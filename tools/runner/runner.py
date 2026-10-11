@@ -130,7 +130,9 @@ def main():
         code, _, out = run_cmd("git rev-parse HEAD", 10, cwd=repo_dir)
         at = out.strip()
         want = job.get("sha")
-        if want and at != want:
+        if want in (None, "HEAD", ""):
+            record("sha-check", "check", 0, 0.0, "job pins HEAD; at {}".format(at[:12]))
+        elif at != want:
             # shallow clones of a SHA may differ if fetch fell back to a branch; log loudly
             record("sha-check", "check", 1, 0.0, "repo at {} but job pins {}".format(at, want))
         else:
