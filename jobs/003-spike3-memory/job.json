@@ -20,7 +20,7 @@
   "commands": [
     {
       "name": "spike3-run",
-      "run": "export PATH=/tmp/go/bin:$HOME/.cargo/bin:$PATH && unset CARGO_TARGET_DIR && cd spikes/spike3-memory/work && bash run.sh 2>&1 | tail -60",
+      "run": "export PATH=/tmp/go/bin:$HOME/.cargo/bin:$PATH && unset CARGO_TARGET_DIR && cd spikes/spike3-memory/work && bash run.sh 2>&1",
       "timeout": 1800,
       "cwd": "repo"
     },

@@ -79,6 +79,9 @@ spike-2:
 spike-3:
         bash spikes/spike3-memory/work/run.sh
 
+spike-5:
+        bash spikes/spike5-errors/work/run.sh
+
 actions-watch:
         $(PY) tools/job.py watch actions
 

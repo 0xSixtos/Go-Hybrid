@@ -41,7 +41,7 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 | 2 Go linking | source > asm > objects | **PASS 14/14** | Go-source emission primary; zero-install via committed source+artifact |
 | 3 memory/arena | per pre-registered table | **PASS with fallback**: P1/P2/P4/P5/P6/P9 green; P3 FAILED (+55 ns pin cost) → copy-small/pin-large; hazards P7/P8 demonstrated | handles + gen-tags + pinned-large-borrow; abi-types.md draft |
 | 4 scheduling | pending | — | — |
-| 5 errors | pending | — | — |
+| 5 errors | per pre-registered table | **PASS all**: E1 2.58 ns/0 allocs (two-word HyResult), E2 0 allocs, E3 1 alloc, E4 identity + documented chain loss, E5 abort contract verified | adopt HyResult + sentinel table + wrap-on-demand |
 | 6 ownership usability | pending | — | — |
 
 ## Task List
@@ -56,7 +56,7 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 - [x] README.md (top-repo quality, user-requested) | done = patterns from research/readme-study.md applied | lead | done
 - [x] Spike 3 memory across the boundary (arena/handles) | done = working code + tests + interfaces/abi-types.md draft | lead | done (sandbox; worker tier = job 003)
 - [ ] Spike 4 scheduling with blocking foreign calls | done = 1k/10k sandbox + 100k worker | lead | pending
-- [ ] Spike 5 error representation | done = allocation counts measured | lead | pending
+- [x] Spike 5 error representation | done = allocation counts measured | lead | done (sandbox; worker tier = job 004)
 - [ ] Spike 6 ownership usability | done = 10 programs pseudo-Hybrid'd + annotation count | lead | pending (research done: research/ownership-models.md)
 - [ ] research/spike-report.md + gates/G0.md | done = all spikes closed | lead | pending
 - [ ] SPEC-LANGUAGE.md first draft | done = grammar skeleton + type/error/concurrency sections | lead | pending (after G0)
@@ -86,6 +86,7 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 - Spike 1 probes (correctness / 20k-deep recursion / scheduler-migration / GC-hammer / race): PASS on sandbox AND Kaggle worker
 - Spike 2 emission suite: 14/14 PASS (sandbox)
 - Spike 3: 11/11 safe probes PASS under -race; P7/P8 hazards demonstrated; medians: fast crossing 2.42 ns, deep switch 3.98 ns, P1 49.9 ns, P2 0.84 ns, P4 14.1 ns, pin/unpin +55.3 ns
+- Spike 5: 4/4 probes PASS under -race (incl. panic contract via child SIGABRT); E1 wide crossing 2.58 ns/0 allocs, E2 sentinel 0 allocs, E3 wrap 1 alloc, E6 rust refs 2.05/1.76 ns/iter
 - Fleet smoke: 4/4 and 20/20 shards green at pinned SHA cd21089 (runs 38163370515, 38163372872)
 - Actions→Kaggle secret path: kaggle.yml run 38167716652 green (104 s end-to-end)
 - Differential corpus: not started (Phase 1)
@@ -104,6 +105,8 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 - 2026-10-12 | Spike 1 shared mmap stack RETIRED for concurrency; fast path on caller's goroutine stack + pooled deep stacks | real crash (cleanup goroutines) + measured 2.42 ns fast path | reverse: per-M stacks via TLS g if pooled deep path ever shows contention
 - 2026-10-12 | Memory model = owning-side handle tables (gen-tagged ids) + copy-small/pin-large borrows | P3 pre-registered fallback fired (Pinner +55 ns > cgo); P1/P2/P4/P5/P6/P9 pass | reverse: revisit if Pinner gets cheaper in a future Go
 - 2026-10-12 | runtime.g offsets (stackguard0) pinned + DWARF extractor + canary test | fast-path guard check needs one offset; version bump → re-run extractor | reverse: cgo fallback if a Go release breaks asm assumptions
+- 2026-10-12 | Error ABI = two-word HyResult (RAX:RDX) + sentinel table + wrap-on-demand; panic = abort at Rust edge | Spike 5 all-green; +0.16 ns for (T, error) | reverse: catch_unwind-at-edge only if abort proves unacceptable at G1
+- 2026-10-12 | Job commands never pipe into head/tail on live producers (SIGPIPE silently kills the suite; also masks exit codes) | job 003's first run died silently to a gofmt gate + masked pipeline | reverse: n/a — runner already truncates output itself
 
 ## Cut Log
 (empty)

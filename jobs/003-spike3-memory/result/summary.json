@@ -1,0 +1,81 @@
+{
+  "schema": "go-hybrid-job-summary/1",
+  "job": "003-spike3-memory",
+  "sha": "820863e6725a03d507876f2eb02c365ad5275d48",
+  "tier": "any",
+  "started": "2026-10-11T20:10:46Z",
+  "hardware": {
+    "ts": "2026-10-11T20:10:46Z",
+    "platform": "Linux-6.18.48+-x86_64-with-glibc2.39",
+    "python": "3.13.15",
+    "machine": "x86_64",
+    "nproc": "4",
+    "lscpu": "Architecture:                            x86_64\nCPU op-mode(s):                          32-bit, 64-bit\nAddress sizes:                           46 bits physical, 48 bits virtual\nByte Order:                              Little Endian\nCPU(s):                                  4\nOn-line CPU(s) list:                     0-3\nVendor ID:                               GenuineIntel\nModel name:                              Intel(R) Xeon(R) CPU @ 2.20GHz\nCPU family:                              6\nModel:                                   79\nThread(s) per core:                      2\nCore(s) per socket:                      2\nSocket(s):                               1\nStepping:                                0\nBogoMIPS:                                4399.99\nFlags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch pti ssbd ibrs ibpb stibp fsgsbase tsc_adjust bmi1 hle avx2 smep bmi2 erms invpcid rtm rdseed adx smap xsaveopt arat md_clear arch_capabilities\nHypervisor vendor:                       KVM\nVirtualization type:                     full\nL1d cache:                               64 KiB (2 instances)\nL1i cache:                               64 KiB (2 instances)",
+    "mem": "total        used        free      shared  buff/cache   available\nMem:           32099         973       26925           1        4656       31125\nSwap:              0           0           0",
+    "disk": "Filesystem      Size  Used Avail Use% Mounted on\noverlay         8.0T  7.0T  1.1T  87% /\noverlay         8.0T  7.0T  1.1T  87% /",
+    "cgroup_mem": "32212254720",
+    "cgroup_cpu": "400000 100000",
+    "tool_go": "",
+    "tool_rustc": "",
+    "tool_cargo": "",
+    "tool_gcc": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+    "tool_clang": "",
+    "tool_git": "git version 2.43.0",
+    "tool_cc": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+    "kaggle_env": {
+      "KAGGLE_URL_BASE": "https://api.kaggle.com",
+      "KAGGLE_KERNEL_RUN_TYPE": "Batch",
+      "KAGGLE_DATA_PROXY_URL": "https://dp.kaggle.net",
+      "KAGGLE_GCP_ZONE": "us-east4-a",
+      "KAGGLE_CONTAINER_NAME": "kaggle_YZudCE18lWZpn40g6GOGzhssfCbmOl7PrSpIGSA-357459437-webtier",
+      "KAGGLE_GRPC_DATA_PROXY_URL": "dp.kaggle.net:443",
+      "KAGGLE_KERNEL_INTEGRATIONS": "",
+      "KAGGLE_DATA_PROXY_PROJECT": "kaggle-161607",
+      "KAGGLE_DATA_PROXY_TOKEN": "[REDACTED len=473]",
+      "KAGGLE_USER_SECRETS_TOKEN": "[REDACTED len=245]",
+      "KAGGLE_API_V1_TOKEN": "[REDACTED len=32]",
+      "KAGGLE_DOCKER_IMAGE": "gcr.io/kaggle-images/python@sha256:81b1e7c4b4f0f2a7e0a33943c95754b1b7af6b30d65221633a284b6b601cd84a"
+    },
+    "ci_env": {}
+  },
+  "steps": [
+    {
+      "name": "sha-check",
+      "kind": "check",
+      "exit": 0,
+      "dur_s": 0.0,
+      "out_tail": "at 820863e6725a03d507876f2eb02c365ad5275d48"
+    },
+    {
+      "name": "install-go",
+      "kind": "setup",
+      "exit": 0,
+      "dur_s": 3.3,
+      "out_tail": "go version go1.26.9 linux/amd64\n"
+    },
+    {
+      "name": "install-rust",
+      "kind": "setup",
+      "exit": 0,
+      "dur_s": 17.46,
+      "out_tail": "fo: default host tuple is x86_64-unknown-linux-gnu\ninfo: syncing channel updates for 1.99.0-x86_64-unknown-linux-gnu\ninfo: latest update on 2026-10-01 for version 1.99.0 (b940084d7 2026-09-28)\ninfo: downloading 3 components\ninfo: default toolchain set to 1.99.0-x86_64-unknown-linux-gnu\n\n  1.99.0-x86_64-unknown-linux-gnu installed - rustc 1.99.0 (b940084d7 2026-09-28)\n\n\nRust is installed now. Great!\n\nTo get started you need Cargo's bin directory ($HOME/.cargo/bin) in your PATH\nenvironment variable. This has not been done automatically.\n\nTo configure your current shell, you need to source\nthe corresponding env file under $HOME/.cargo.\n\nConsider running the right command for your shell (note the leading DOT):\n. \"$HOME/.cargo/env\" # For sh/ash/dash/pdksh/bash\ncargo:rerun-if-env-changed=CC_x86_64-unknown-linux-gnu\nCC_x86_64-unknown-linux-gnu = None\ncargo:rerun-if-env-changed=CC_x86_64_unknown_linux_gnu\nCC_x86_64_unknown_linux_gnu = None\ncargo:rerun-if-env-changed=HOST_CC\nHOST_CC = None\ncargo:rerun-if-env-changed=CC\nCC = None\ncargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT\ncargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS\nCRATE_CC_NO_DEFAULTS = None\ncargo:rerun-if-env-changed=CFLAGS\nCFLAGS = None\ncargo:rerun-if-env-changed=HOST_CFLAGS\nHOST_CFLAGS = None\ncargo:rerun-if-env-changed=CFLAGS_x86_64_unknown_linux_gnu\nCFLAGS_x86_64_unknown_linux_gnu = None\ncargo:rerun-if-env-changed=CFLAGS_x86_64-unknown-linux-gnu\nCFLAGS_x86_64-unknown-linux-gnu = None\nrustc 1.99.0 (b940084d7 2026-09-28)\n"
+    },
+    {
+      "name": "spike3-run",
+      "kind": "cmd",
+      "exit": 0,
+      "dur_s": 0.42,
+      "out_tail": "   Compiling hyarena v0.1.0 (/kaggle/working/repo/spikes/spike3-memory/work/rust)\nwarning: field `kind` is never read\n  --> src/lib.rs:67:5\n   |\n65 | struct View {\n   |        ---- field in this struct\n66 |     ptr: *mut u64,\n67 |     kind: u8, // 1 = unpinned heap probe, 2 = stack probe\n   |     ^^^^\n   |\n   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default\n\nwarning: `hyarena` (lib) generated 1 warning\n    Finished `release` profile [optimized] target(s) in 0.38s\n-rw-r--r-- 2 root root 23344952 Oct 11 20:11 rust/target/release/libhyarena.a\nhybridge/bridge.go\nhybridge/bridge_bench_test.go\n"
+    },
+    {
+      "name": "collect-results",
+      "kind": "cmd",
+      "exit": 0,
+      "dur_s": 0.01,
+      "out_tail": "total 8\ndrwxr-xr-x 2 root root 4096 Oct 11 20:10 .\ndrwxr-xr-x 4 root root 4096 Oct 11 20:10 ..\n"
+    }
+  ],
+  "wall_clock_s": 21.19,
+  "ok": true,
+  "finished": "2026-10-11T20:11:07Z"
+}

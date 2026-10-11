@@ -38,8 +38,12 @@ echo "=== hazard probes (P7/P8) ==="
 SPIKE3_UNSAFE=1 go test ./spike3/ -run 'TestUnpinnedHeapHazard|TestStackHazard' -count=1 -v 2>&1 | tee ../hazard.out | grep -E "^(--- (PASS|FAIL|SKIP)|P7|P8|ok)" || true
 
 # 6. benchmarks (count=10, both packages: spike3 suite + hybridge direct crossings)
+# NOTE: no pipes into `head` on the live producer — SIGPIPE would silently kill
+# go test mid-suite (found the hard way). Write the file, then display from it.
 echo "=== benchmarks (count=10) ==="
-go test ./... -run '^$' -bench . -benchmem -count=10 2>&1 | tee ../bench.sandbox.out | grep -E "^Benchmark" | head -40
+go test ./hybridge/ -run '^$' -bench . -benchmem -count=10 > ../bench.sandbox.out 2>&1 || { cat ../bench.sandbox.out; exit 1; }
+go test ./spike3/ -run '^$' -bench . -benchmem -count=10 >> ../bench.sandbox.out 2>&1 || { cat ../bench.sandbox.out; exit 1; }
+grep -E "^Benchmark" ../bench.sandbox.out | head -40
 
 # 7. medians + derived figures for RESULTS.md
 python3 ../analyze.py ../bench.sandbox.out || true

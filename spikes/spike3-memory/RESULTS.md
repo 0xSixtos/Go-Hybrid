@@ -120,7 +120,13 @@ Hazard probes (PASS = hazard demonstrated):
 
 ### Kaggle worker (worker-measured; job 003)
 
-(pending — submitted after sandbox results were recorded)
+First submission (sha 820863e) failed SILENTLY: the job's `| tail -60` pipe
+masked a non-zero exit, and the worker's gofmt gate correctly caught two
+files my local session had left unformatted after post-format edits. The
+step "completed" in 0.4 s with ok=true and no evidence — exactly the kind of
+false green the SPEC's evidence discipline exists to catch. Fixes: gofmt
+re-run locally; job commands no longer pipe into tail/head (SIGPIPE + exit
+masking; the runner truncates output itself). Re-submitted after the fixes.
 
 ## Analysis & decision
 
