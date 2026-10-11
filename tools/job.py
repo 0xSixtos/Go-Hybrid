@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""tools/job.py — tier-agnostic job control (SPEC.md §14.1).
+
+  job.py submit  kaggle  <jobdir>            resolve pinned SHA, inject, push kernel
+  job.py status  kaggle  [slug]              poll kernel status (one shot)
+  job.py fetch   kaggle  <jobdir>             download kernel output -> jobdir/result/raw/
+  job.py dispatch actions <workflow> <sha> <jobname> <shards> <maxparallel>
+  job.py watch   actions [run_id]             poll latest heavy run (one shot)
+  job.py fetch   actions <run_id> <jobdir>    download artifacts -> jobdir/result/ runs
+
+Environment: KAGGLE_CLI (default /home/z/.venv/bin/kaggle), GITHUB_TOKEN read from
+the git remote URL of this repo (never printed, never written to files).
+Kaggle kernel slug: from worker/kernel-metadata.json (id field).
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+
+REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WORKER_DIR = os.path.join(REPO_DIR, "worker")
+META = os.path.join(WORKER_DIR, "kernel-metadata.json")
+INJECT_MARKER = "JOB_JSON = None  # INJECTED_BY_tools/job.py"
+GITHUB_API = "https://api.github.com"
+GITHUB_REPO_API = GITHUB_API + "/repos/limitlessprojects/Go-Hybrid"
+KAGGLE_CLI = os.environ.get("KAGGLE_CLI", "/home/z/.venv/bin/kaggle")
+
+
+def sh(cmd, cwd=None, timeout=120):
+    p = subprocess.run(["/bin/sh", "-c", cmd], cwd=cwd, timeout=timeout,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    return p.returncode, p.stdout.decode("utf-8", "replace").strip()
+
+
+def gh_token():
+    """Read the token from the git remote (never print it)."""
+    _, out = sh("git remote get-url origin", cwd=REPO_DIR)
+    m = re.search(r"https://([^@]+)@github.com", out)
+    return m.group(1) if m else None
+
+
+def gh_api(path, data=None, method=None):
+    tok = gh_token()
+    req = urllib.request.Request(GITHUB_API + path)
+    if tok:
+        req.add_header("Authorization", "token " + tok)
+    req.add_header("Accept", "application/vnd.github+json")
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+        req.data = json.dumps(data).encode()
+    if method:
+        req.get_method = lambda: method
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.loads(r.read().decode())
+
+
+def resolve_head():
+    _, out = sh("git rev-parse HEAD", cwd=REPO_DIR)
+    return out.strip()
+
+
+def kaggle_slug():
+    with open(META) as f:
+        return json.load(f)["id"]
+
+
+# ---------------------------------------------------------------- kaggle tier
+def kaggle_submit(jobdir):
+    head = resolve_head()
+    with open(os.path.join(jobdir, "job.json")) as f:
+        job = json.load(f)
+    job["sha"] = head  # run the code we just pushed
+    payload = json.dumps(job, indent=2)
+
+    # sanity: no secrets in the payload
+    for pat in ("ghp_", "gho_", "github_pat_", "KGAT_", "KAGGLE_KEY"):
+        if pat in payload:
+            sys.exit("REFUSING to push: secret pattern {} in job.json".format(pat))
+
+    script = os.path.join(WORKER_DIR, "script.py")
+    with open(script) as f:
+        src = f.read()
+    if INJECT_MARKER not in src:
+        sys.exit("worker/script.py missing inject marker")
+    injected = src.replace(INJECT_MARKER, "JOB_JSON = r'''" + payload + "'''")
+    with open(script, "w") as f:
+        f.write(injected)
+    with open(os.path.join(WORKER_DIR, "job.json"), "w") as f:  # per SPEC §2 protocol
+        f.write(payload)
+    try:
+        rc, out = sh("{} kernels push -p {}".format(KAGGLE_CLI, WORKER_DIR), timeout=180)
+        print(out)
+        if rc != 0:
+            sys.exit("kaggle kernels push failed")
+        # record what we submitted, with the resolved SHA
+        with open(os.path.join(jobdir, "submitted.json"), "w") as f:
+            json.dump({"sha": head, "submitted_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                       "job": job["job"]}, f, indent=2)
+        print("submitted job {} at sha {}".format(job["job"], head[:10]))
+    finally:
+        # always restore the pristine template
+        with open(script, "w") as f:
+            f.write(src.replace("JOB_JSON = r'''" + payload + "'''", INJECT_MARKER))
+        # double safety: restore from git if anything went wrong
+        sh("git checkout -- worker/script.py", cwd=REPO_DIR)
+        if os.path.exists(os.path.join(WORKER_DIR, "job.json")):
+            os.remove(os.path.join(WORKER_DIR, "job.json"))
+
+
+def kaggle_status(slug=None):
+    slug = slug or kaggle_slug()
+    rc, out = sh("{} kernels status {}".format(KAGGLE_CLI, slug), timeout=60)
+    print(out)
+    return out
+
+
+def kaggle_fetch(jobdir, slug=None):
+    slug = slug or kaggle_slug()
+    raw = os.path.join(jobdir, "result", "raw")
+    os.makedirs(raw, exist_ok=True)
+    rc, out = sh("{} kernels output {} -p {}".format(KAGGLE_CLI, slug, raw), timeout=180)
+    print(out)
+    # find summary.json anywhere under raw
+    found = []
+    for root, _, files in os.walk(raw):
+        for fn in files:
+            if fn == "summary.json":
+                found.append(os.path.join(root, fn))
+    if found:
+        import shutil
+        dst = os.path.join(jobdir, "result", "summary.json")
+        shutil.copyfile(sorted(found)[-1], dst)
+        print("summary.json -> " + dst)
+        with open(dst) as f:
+            print(json.dumps(json.load(f), indent=2)[:3000])
+    else:
+        print("WARNING: no summary.json in output")
+
+
+# --------------------------------------------------------------- actions tier
+def actions_dispatch(workflow, sha, jobname, shards, maxparallel):
+    data = {"ref": "main", "inputs": {"sha": sha, "job": jobname,
+                                       "shards": str(shards), "max-parallel": str(maxparallel)}}
+    gh_api("/repos/limitlessprojects/Go-Hybrid/actions/workflows/{}.yml/dispatches".format(workflow), data, method="POST")
+    print("dispatched {} sha={} job={} shards={} max-parallel={}".format(workflow, sha[:10], jobname, shards, maxparallel))
+
+
+def actions_watch(run_id=None):
+    if run_id is None:
+        runs = gh_api("/repos/limitlessprojects/Go-Hybrid/actions/runs?per_page=5")["workflow_runs"]
+        for r in runs:
+            print("{}  {}  {}  sha={}".format(r["id"], r["name"], r["status"], r["head_sha"][:10]))
+        return
+    r = gh_api("/repos/limitlessprojects/Go-Hybrid/actions/runs/{}".format(run_id))
+    print("run {} status={} conclusion={}".format(run_id, r["status"], r.get("conclusion")))
+
+
+def actions_fetch(run_id, jobdir):
+    arts = gh_api("/repos/limitlessprojects/Go-Hybrid/actions/runs/{}/artifacts".format(run_id))["artifacts"]
+    os.makedirs(os.path.join(jobdir, "result"), exist_ok=True)
+    tok = gh_token()
+    for a in arts:
+        url = a["archive_download_url"]
+        dest = os.path.join(jobdir, "result", a["name"] + ".zip")
+        req = urllib.request.Request(url)
+        req.add_header("Authorization", "token " + tok)
+        with urllib.request.urlopen(req, timeout=120) as r, open(dest, "wb") as f:
+            f.write(r.read())
+        print("artifact {} ({} bytes) -> {}".format(a["name"], a["size_in_bytes"], dest))
+
+
+def main():
+    if len(sys.argv) < 3:
+        print(__doc__)
+        sys.exit(2)
+    tier, action = sys.argv[1], sys.argv[2]
+    if tier == "kaggle" and action == "submit" and len(sys.argv) == 4:
+        kaggle_submit(os.path.abspath(sys.argv[3]))
+    elif tier == "kaggle" and action == "status":
+        kaggle_status(sys.argv[4] if len(sys.argv) > 4 else None)
+    elif tier == "kaggle" and action == "fetch" and len(sys.argv) == 4:
+        kaggle_fetch(os.path.abspath(sys.argv[3]))
+    elif tier == "actions" and action == "dispatch" and len(sys.argv) >= 7:
+        actions_dispatch(sys.argv[3], sys.argv[4], sys.argv[5], int(sys.argv[6]), int(sys.argv[7]))
+    elif tier == "actions" and action == "watch":
+        actions_watch(int(sys.argv[4]) if len(sys.argv) > 4 else None)
+    elif tier == "actions" and action == "fetch" and len(sys.argv) == 5:
+        actions_fetch(int(sys.argv[3]), os.path.abspath(sys.argv[4]))
+    else:
+        print(__doc__)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()
