@@ -63,9 +63,30 @@ Correctness probes (all PASS under `-race`; panic probe via child process):
 | RustResultLoop (E6 ok reference, 2²⁰-iter loop) | 2.05 ns/iter | — | 0 |
 | RustResultLoopErr (E6 err reference, 1-in-4 Err) | 1.76 ns/iter | — | 0 |
 
-### Kaggle worker (worker-measured; job 004)
+### Kaggle worker (worker-measured; job 004, kernel v7, SHA d61f894, 4 cores / 30 GB)
 
-(pending — submitted after sandbox results were recorded)
+Wall clock 164.0 s (install-go 2.9 s, install-rust 15.7 s, spike5-run 145.5 s).
+**All 4 probes PASS under `-race`, including the panic contract** (child killed
+by SIGABRT). Medians:
+
+| benchmark | median ns/op | sandbox median | ratio |
+|-----------|-------------:|---------------:|------:|
+| WideDirect (two-word crossing) | **4.15** | 2.58 | 1.61× |
+| OkPath (wrapped) | 28.44 | 17.21 | 1.65× |
+| ErrSentinel | 33.80 | 17.38 | 1.95× |
+| ErrDynamic | 74.84 | 43.86 | 1.71× |
+| GoNativeOk | 1.90 | 2.04 | 0.93× |
+| RustResultLoop (E6, per iter) | 2.01 | 2.05 | 0.98× |
+| RustResultLoopErr (E6, per iter) | 4.11 | 1.76 | 2.33× |
+
+**Cross-tier agreement:** allocation verdicts are IDENTICAL (E1/E2 = 0 allocs,
+E3 = exactly 1); ns ratios sit in the expected 1.6–2.0× tier band (matching
+Spike 3's worker/sandbox skew); the Rust-side references are tier-stable
+(~2 ns/iter ok). The E1 "+3 ns" budget was written against the sandbox
+baseline; the honest cross-tier check is the ratio to THAT tier's own fast
+crossing — WideDirect 4.15 vs the worker's Spike-3 fast crossing 4.12 =
++0.03 ns for the two-word return. The (T, error) mapping is effectively free
+on both tiers.
 
 ## Analysis & decision
 

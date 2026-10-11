@@ -54,9 +54,9 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 - [x] Spike 2 Go linking routes | done = each route tested (14 checks) | lead | done
 - [x] Ten target programs sketched in examples/ | done = each has .hy intent + expected output | lead | done
 - [x] README.md (top-repo quality, user-requested) | done = patterns from research/readme-study.md applied | lead | done
-- [x] Spike 3 memory across the boundary (arena/handles) | done = working code + tests + interfaces/abi-types.md draft | lead | done (sandbox; worker tier = job 003)
+- [x] Spike 3 memory across the boundary (arena/handles) | done = working code + tests + interfaces/abi-types.md draft | lead | done (both tiers: sandbox + job 003 rerun)
 - [ ] Spike 4 scheduling with blocking foreign calls | done = 1k/10k sandbox + 100k worker | lead | pending
-- [x] Spike 5 error representation | done = allocation counts measured | lead | done (sandbox; worker tier = job 004)
+- [x] Spike 5 error representation | done = allocation counts measured | lead | done (both tiers: sandbox + job 004)
 - [ ] Spike 6 ownership usability | done = 10 programs pseudo-Hybrid'd + annotation count | lead | pending (research done: research/ownership-models.md)
 - [ ] research/spike-report.md + gates/G0.md | done = all spikes closed | lead | pending
 - [ ] SPEC-LANGUAGE.md first draft | done = grammar skeleton + type/error/concurrency sections | lead | pending (after G0)
@@ -86,7 +86,9 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 - Spike 1 probes (correctness / 20k-deep recursion / scheduler-migration / GC-hammer / race): PASS on sandbox AND Kaggle worker
 - Spike 2 emission suite: 14/14 PASS (sandbox)
 - Spike 3: 11/11 safe probes PASS under -race; P7/P8 hazards demonstrated; medians: fast crossing 2.42 ns, deep switch 3.98 ns, P1 49.9 ns, P2 0.84 ns, P4 14.1 ns, pin/unpin +55.3 ns
+- Spike 3 worker tier (job 003): all probes green, hazards reproduced identically, thresholds hold, P3 fallback confirmed cross-tier (fast crossing 4.12 ns)
 - Spike 5: 4/4 probes PASS under -race (incl. panic contract via child SIGABRT); E1 wide crossing 2.58 ns/0 allocs, E2 sentinel 0 allocs, E3 wrap 1 alloc, E6 rust refs 2.05/1.76 ns/iter
+- Spike 5 worker tier (job 004): all green; alloc verdicts identical cross-tier; two-word return costs +0.03 ns over that tier's fast crossing
 - Fleet smoke: 4/4 and 20/20 shards green at pinned SHA cd21089 (runs 38163370515, 38163372872)
 - Actions→Kaggle secret path: kaggle.yml run 38167716652 green (104 s end-to-end)
 - Differential corpus: not started (Phase 1)

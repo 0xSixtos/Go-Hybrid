@@ -20,7 +20,7 @@
   "commands": [
     {
       "name": "spike1-bench",
-      "run": "export PATH=/tmp/go/bin:$HOME/.cargo/bin:$PATH && unset CARGO_TARGET_DIR && cd spikes/spike1-call-overhead/work && bash run.sh 2>&1 | tail -40",
+      "run": "export PATH=/tmp/go/bin:$HOME/.cargo/bin:$PATH && unset CARGO_TARGET_DIR && cd spikes/spike1-call-overhead/work && bash run.sh 2>&1",
       "timeout": 1500,
       "cwd": "repo"
     },
