@@ -1,0 +1,43 @@
+# Build artifacts
+/target/
+/bin/
+/obj/
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+hybrid
+hybridc
+
+# Rust
+**/*.rs.bk
+
+# Go
+*.test
+*.out
+go.sum backup files: *.sum~
+
+# Jobs & results (commit summaries only, not bulk logs)
+jobs/*/result/logs/
+jobs/*/result/*.bin
+results/
+
+# Spike scratch dirs (RESULTS.md is committed, throwaway code is not)
+spikes/*/work/
+
+# Logs & caches
+*.log
+.cache/
+# NOTE: Cargo.lock and go.sum ARE committed per SPEC.md Phase 5 (reproducible builds)
+
+# Editor/OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# NEVER COMMIT SECRETS (tokens, keys). If a filename here looks like a leak, fix the source.
+*.token
+*.secret
+.env*
