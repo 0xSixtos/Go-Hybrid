@@ -48,3 +48,7 @@ spikes/*/work/**/*.a
 spikes/*/work/**/bin/
 spikes/*/work/**/*.o
 spikes/*/work/**/*.test
+
+# Python bytecode
+__pycache__/
+*.pyc
