@@ -134,7 +134,7 @@ def main():
             record("sha-check", "check", 0, 0.0, "at {}".format(at))
 
     for step in job.get("setup", []):
-        cwd = os.path.join(repo_dir, step["cwd"]) if step.get("cwd") == "repo" else (step.get("cwd") or None)
+        cwd = repo_dir if step.get("cwd") == "repo" else (step.get("cwd") or None)
         code, dur, out = run_cmd(step["run"], step.get("timeout", 600), cwd=cwd)
         record(step["name"], "setup", code, dur, out)
         if code != 0 and step.get("hard"):
@@ -142,7 +142,7 @@ def main():
             break
 
     for step in job.get("commands", []):
-        cwd = os.path.join(repo_dir, step["cwd"]) if step.get("cwd") == "repo" else (step.get("cwd") or None)
+        cwd = repo_dir if step.get("cwd") == "repo" else (step.get("cwd") or None)
         code, dur, out = run_cmd(step["run"], step.get("timeout", 600), cwd=cwd)
         record(step["name"], "cmd", code, dur, out)
         if code != 0 and step.get("hard"):

@@ -46,7 +46,7 @@ jobs:
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      max-parallel: ${{ github.event.inputs.max-parallel }}
+      max-parallel: ${{ fromJson(github.event.inputs.max-parallel) }}
       matrix:
         shard: ${{ fromJson(needs.gen.outputs.matrix) }}
     steps:
