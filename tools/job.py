@@ -54,7 +54,8 @@ def gh_api(path, data=None, method=None):
     if method:
         req.get_method = lambda: method
     with urllib.request.urlopen(req, timeout=60) as r:
-        return json.loads(r.read().decode())
+        body = r.read().decode()
+        return json.loads(body) if body.strip() else {"status": r.status}
 
 
 def resolve_head():

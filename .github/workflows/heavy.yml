@@ -37,11 +37,8 @@ jobs:
     steps:
       - id: mk
         run: |
-          python3 - <<'EOF'
-          import json, os
-          n = int("${{ github.event.inputs.shards }}")
-          print("::set-output name=matrix::" + json.dumps(list(range(n))))
-          EOF
+          n="${{ github.event.inputs.shards }}"
+          python3 -c "import json,sys; print('matrix=' + json.dumps(list(range(int(sys.argv[1])))))" "$n" >> "$GITHUB_OUTPUT"
 
   shard:
     needs: gen
