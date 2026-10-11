@@ -3,6 +3,7 @@
 
   job.py kaggle submit  <jobdir>            resolve pinned SHA, inject, push kernel
   job.py kaggle status  [slug]              poll kernel status (one shot)
+  job.py kaggle wait    <minutes> [slug]    poll until a NEW run terminates (0 ok/1 err/2 timeout)
   job.py kaggle fetch   <jobdir>             download kernel output -> jobdir/result/raw/
   job.py actions dispatch <workflow> <sha> <jobname> <shards> <maxparallel>
   job.py actions watch   [run_id]             poll latest heavy run (one shot)
@@ -118,6 +119,43 @@ def kaggle_status(slug=None):
     return out
 
 
+TERMINAL_STATES = ("COMPLETE", "ERROR", "CANCELACKNOWLEDGED", "CANCELEDEXECUTION")
+ACTIVE_STATES = ("QUEUED", "RUNNING", "CANCELREQUESTED")
+
+
+def kaggle_wait(minutes, slug=None):
+    """Poll kernel status until a NEW run reaches a terminal state.
+
+    Robustness rule: a terminal state is only accepted AFTER we have observed
+    an active state (QUEUED/RUNNING) since this call started — otherwise a
+    stale COMPLETE from the previous kernel version could be mistaken for the
+    run we just submitted (queue latency is ~11s, so the active window is
+    comfortably observable with a 5s poll interval).
+
+    Exit codes: 0 = COMPLETE, 1 = kernel error/cancel, 2 = timeout.
+    """
+    slug = slug or kaggle_slug()
+    deadline = time.time() + minutes * 60
+    saw_active = False
+    state, polls = "?", 0
+    while time.time() < deadline:
+        rc, out = sh("{} kernels status {}".format(KAGGLE_CLI, slug), timeout=60)
+        polls += 1
+        try:
+            state = out.split('"')[-2].split(".")[-1].upper()  # '"KernelWorkerStatus.RUNNING"'
+        except IndexError:
+            state = "?"  # CLI error text: keep polling, do not trust
+        print("[poll {}] {}".format(polls, state), flush=True)
+        if state in ACTIVE_STATES:
+            saw_active = True
+        elif state in TERMINAL_STATES and saw_active:
+            print("terminal after {} polls: {}".format(polls, state))
+            return 0 if state == "COMPLETE" else 1
+        time.sleep(5)
+    print("TIMEOUT after {} min (last state {}, saw_active={})".format(minutes, state, saw_active))
+    return 2
+
+
 def kaggle_fetch(jobdir, slug=None):
     slug = slug or kaggle_slug()
     raw = os.path.join(jobdir, "result", "raw")
@@ -182,6 +220,9 @@ def main():
         kaggle_submit(os.path.abspath(sys.argv[3]))
     elif tier == "kaggle" and action == "status":
         kaggle_status(sys.argv[4] if len(sys.argv) > 4 else None)
+    elif tier == "kaggle" and action == "wait" and len(sys.argv) >= 4:
+        minutes = float(sys.argv[3])
+        sys.exit(kaggle_wait(minutes, sys.argv[4] if len(sys.argv) > 4 else None))
     elif tier == "kaggle" and action == "fetch" and len(sys.argv) == 4:
         kaggle_fetch(os.path.abspath(sys.argv[3]))
     elif tier == "actions" and action == "dispatch" and len(sys.argv) >= 7:
