@@ -31,8 +31,8 @@
       "KAGGLE_GRPC_DATA_PROXY_URL": "dp.kaggle.net:443",
       "KAGGLE_KERNEL_INTEGRATIONS": "",
       "KAGGLE_DATA_PROXY_PROJECT": "kaggle-161607",
-      "KAGGLE_DATA_PROXY_TOKEN": "eyJhbGciOiJBMTI4S1ciLCJlbmMiOiJBMTI4Q0JDLUhTMjU2In0.DT3-yDf5xQAI6taaNHfxkidch9cN5kMS4e25hU6HrLGv6WWlmcGMBQ.ClHTT_uou-z8VUejAzE6pg.QG6aUE72E6QadnPjnoHEENOYt8dayg-XZU0fShgfODGkqIPp7Sl8DPp8wOmdSxr7XPjpuobS1PbGil8mxH3fkz4R8dr1vYXSN4wqsMxoveoXK7TBiGuOoZyrG_cnTPgUtdCmhfckL32mdwHpa-_zBir4ok_KHFbzVg4WoTCVxivsou9UbwYvBgNfhYHugQOpxiylMsuWYrH7WG0v1gycsql5eK2SH-aOAJ-xInDfieOZNVkFlLgy3xiVimPCdWtnITo45iIrdqUxVYRnbQs5UfIX7NStiTg1a2BxyUVJYbTdVGPATSR2LiFscv7gw5ze.ecPBolzVeagiWr_2Fx7qtA",
-      "KAGGLE_USER_SECRETS_TOKEN": "eyJhbGciOiJkaXIiLCJlbmMiOiJBMTI4Q0JDLUhTMjU2In0..dUKfLeRSVVg7e5ZHeQgfXA.hGrFjIwMx4Zxop_ndEPMAuvbKJKGx37uVuAXzB-hGNy3GprglEV1zoayMjFA7XX3jbKQju-RYJDOveFJxUHNcwVsaOCY31oDAXFPHGaAbFyEXhrvplrHupOiKCQX_5p70EcP3RMNLFOldLVoWh5uiQ.Ekt8Ao75wMUlMyBkuoowRw",
+      "KAGGLE_DATA_PROXY_TOKEN": "[REDACTED: ephemeral kaggle session token, expired]",
+      "KAGGLE_USER_SECRETS_TOKEN": "[REDACTED: ephemeral kaggle session token, expired]",
       "KAGGLE_API_V1_TOKEN": "/etc/secrets/kaggle/api-v1-token",
       "KAGGLE_DOCKER_IMAGE": "gcr.io/kaggle-images/python@sha256:81b1e7c4b4f0f2a7e0a33943c95754b1b7af6b30d65221633a284b6b601cd84a"
     },

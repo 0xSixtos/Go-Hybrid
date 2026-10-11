@@ -83,9 +83,25 @@ def env_report():
     rep["cgroup_cpu"] = cap("cat /sys/fs/cgroup/cpu.max 2>/dev/null || cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null")
     for tool in ("go", "rustc", "cargo", "gcc", "clang", "git", "cc"):
         rep["tool_" + tool] = cap("{} --version 2>/dev/null | head -1".format(tool))
-    rep["kaggle_env"] = {k: v for k, v in os.environ.items() if k.startswith("KAGGLE_")}
-    rep["ci_env"] = {k: v for k, v in os.environ.items() if k.startswith(("GITHUB_", "RUNNER_", "CI"))}
+    rep["kaggle_env"] = redact({k: v for k, v in os.environ.items() if k.startswith("KAGGLE_")})
+    rep["ci_env"] = redact({k: v for k, v in os.environ.items() if k.startswith(("GITHUB_", "RUNNER_", "CI"))})
     return rep
+
+
+# Env values that look secret-ish are masked in reports (R10 hygiene).
+# Lesson 2026-10-12: Kaggle embeds ephemeral session JWTs (KAGGLE_DATA_PROXY_TOKEN,
+# KAGGLE_USER_SECRETS_TOKEN) in kernel env; they leaked into committed summaries once.
+_SECRET_KEY = ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "_KEY", "API_KEY", "PAT")
+
+
+def redact(env: dict) -> dict:
+    out = {}
+    for k, v in env.items():
+        if any(s in k.upper() for s in _SECRET_KEY):
+            out[k] = "[REDACTED len={}]".format(len(v)) if v else "[EMPTY]"
+        else:
+            out[k] = v
+    return out
 
 
 def main():
