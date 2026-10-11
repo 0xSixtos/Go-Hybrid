@@ -52,10 +52,10 @@ spike0-kaggle-fetch:
 	$(PY) tools/job.py kaggle fetch jobs/$(JOB)
 
 spike0-actions-4:
-	$(PY) tools/job.py actions dispatch heavy "$(shell git rev-parse --short=40 HEAD)" spike0 4 4
+	$(PY) tools/job.py actions dispatch heavy "$(shell git rev-parse --short=40 HEAD)" $(JOB) 4 4
 
 spike0-actions-20:
-	$(PY) tools/job.py actions dispatch heavy "$(shell git rev-parse --short=40 HEAD)" spike0 20 20
+	$(PY) tools/job.py actions dispatch heavy "$(shell git rev-parse --short=40 HEAD)" $(JOB) 20 20
 
 kaggle-job:
 	$(PY) tools/job.py kaggle submit jobs/$(J)
