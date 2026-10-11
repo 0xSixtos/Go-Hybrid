@@ -41,3 +41,5 @@ spikes/*/work/
 *.token
 *.secret
 .env*
+jobs/*/result/raw/repo/
+jobs/*/result/raw/__*
