@@ -59,6 +59,6 @@ jobs:
         run: |
           set -e
           test -f SPEC.md && test -f AGENTS.md && test -f PLAN.md && test -f STATUS.md
-          # secrets must never be committed
-          ! git grep -qE 'ghp_[A-Za-z0-9]{20,}|KGAT_[A-Za-z0-9]{20,}' HEAD || { echo "SECRET LEAK DETECTED"; exit 1; }
+          # secrets must never be committed (incl. JWT-shaped session tokens)
+          ! git grep -qE 'ghp_[A-Za-z0-9]{20,}|KGAT_[A-Za-z0-9]{20,}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}' HEAD || { echo "SECRET LEAK DETECTED"; exit 1; }
           echo "hygiene OK"
