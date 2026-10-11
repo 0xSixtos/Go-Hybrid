@@ -114,6 +114,9 @@ def main():
         "wall_clock_s": None,
         "ok": False,
     }
+    # export for job commands (portable across tiers)
+    os.environ["RESULTS_DIR"] = os.path.abspath(results_dir)
+    os.environ["REPO_DIR"] = repo_dir
     t0 = time.monotonic()
 
     def record(name, kind, code, dur, out):

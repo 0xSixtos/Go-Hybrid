@@ -24,7 +24,7 @@ jobs/*/result/*.bin
 results/
 
 # Spike scratch dirs (RESULTS.md is committed, throwaway code is not)
-spikes/*/work/
+# spike work dirs: source IS committed (workers must run them); artifacts are not
 
 # Logs & caches
 *.log
@@ -43,3 +43,8 @@ spikes/*/work/
 .env*
 jobs/*/result/raw/repo/
 jobs/*/result/raw/__*
+spikes/*/work/**/target/
+spikes/*/work/**/*.a
+spikes/*/work/**/bin/
+spikes/*/work/**/*.o
+spikes/*/work/**/*.test

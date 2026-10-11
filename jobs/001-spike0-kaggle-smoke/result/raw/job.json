@@ -1,7 +1,7 @@
 {
   "job": "001-spike0-kaggle-smoke",
   "tier": "any",
-  "sha": "e264a842abb9a24cff55126369378c1dbeff1af1",
+  "sha": "f09dce93de0b9fe7187cc307f6d98d6d4c58b6da",
   "repo": "https://github.com/limitlessprojects/Go-Hybrid.git",
   "gpu": false,
   "note": "Spike 0 part A: environment report, pinned toolchain installs, Go+Rust hello-worlds, repo reachability. Thresholds pre-registered in spikes/spike0-compute/RESULTS.md.",
@@ -20,12 +20,12 @@
   "commands": [
     {
       "name": "hello-go",
-      "run": "mkdir -p /tmp/hello-go && cd /tmp/hello-go && printf 'package main\\nimport \"fmt\"\\nfunc main(){ fmt.Println(\"go-hybrid spike0: go hello OK\") }\\n' > main.go && PATH=/tmp/go/bin:$PATH go build -o hello . && ./hello",
+      "run": "mkdir -p /tmp/hello-go && cd /tmp/hello-go && printf 'package main\\nimport \"fmt\"\\nfunc main(){ fmt.Println(\"go-hybrid spike0: go hello OK\") }\\n' > main.go && PATH=/tmp/go/bin:$PATH go mod init hello >/dev/null 2>&1; cd /tmp/hello-go && PATH=/tmp/go/bin:$PATH go build -o hello . && ./hello",
       "timeout": 300
     },
     {
       "name": "hello-rust",
-      "run": "export PATH=$HOME/.cargo/bin:$PATH && cargo new --bin --vcs none /tmp/hello-rust 2>/dev/null; cd /tmp/hello-rust && cargo build --quiet 2>&1 | tail -3; ./target/debug/hello-rust",
+      "run": "export PATH=$HOME/.cargo/bin:$PATH && cargo new --bin --vcs none /tmp/hello-rust 2>/dev/null; cd /tmp/hello-rust && cargo build --quiet --target-dir /tmp/hello-rust/target 2>&1 | tail -3; /tmp/hello-rust/target/debug/hello-rust",
       "timeout": 600
     },
     {

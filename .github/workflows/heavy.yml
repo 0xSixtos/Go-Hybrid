@@ -58,7 +58,8 @@ jobs:
         run: |
           set -e
           python3 tools/runner/runner.py "jobs/${{ github.event.inputs.job }}/job.json" \
-            --results-dir "results/shard-${{ matrix.shard }}"
+            --results-dir "results/shard-${{ matrix.shard }}" \
+            --repo-dir "$GITHUB_WORKSPACE"
       - name: Always produce a shard summary (even on failure)
         if: always()
         run: |
