@@ -43,28 +43,28 @@ ci: check
 
 # ---- Spike 0 orchestration ----
 spike0-kaggle:
-	$(PY) tools/job.py submit kaggle jobs/$(JOB)
+	$(PY) tools/job.py kaggle submit jobs/$(JOB)
 
 spike0-kaggle-status:
-	$(PY) tools/job.py status kaggle
+	$(PY) tools/job.py kaggle status
 
 spike0-kaggle-fetch:
-	$(PY) tools/job.py fetch kaggle jobs/$(JOB)
+	$(PY) tools/job.py kaggle fetch jobs/$(JOB)
 
 spike0-actions-4:
-	$(PY) tools/job.py dispatch actions heavy "$(shell git rev-parse --short=40 HEAD)" spike0 4 4
+	$(PY) tools/job.py actions dispatch heavy "$(shell git rev-parse --short=40 HEAD)" spike0 4 4
 
 spike0-actions-20:
-	$(PY) tools/job.py dispatch actions heavy "$(shell git rev-parse --short=40 HEAD)" spike0 20 20
+	$(PY) tools/job.py actions dispatch heavy "$(shell git rev-parse --short=40 HEAD)" spike0 20 20
 
 kaggle-job:
-	$(PY) tools/job.py submit kaggle jobs/$(J)
+	$(PY) tools/job.py kaggle submit jobs/$(J)
 
 kaggle-status:
-	$(PY) tools/job.py status kaggle
+	$(PY) tools/job.py kaggle status
 
 kaggle-fetch:
-	$(PY) tools/job.py fetch kaggle jobs/$(J)
+	$(PY) tools/job.py kaggle fetch jobs/$(J)
 
 actions-watch:
 	$(PY) tools/job.py watch actions

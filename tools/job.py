@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """tools/job.py — tier-agnostic job control (SPEC.md §14.1).
 
-  job.py submit  kaggle  <jobdir>            resolve pinned SHA, inject, push kernel
-  job.py status  kaggle  [slug]              poll kernel status (one shot)
-  job.py fetch   kaggle  <jobdir>             download kernel output -> jobdir/result/raw/
-  job.py dispatch actions <workflow> <sha> <jobname> <shards> <maxparallel>
-  job.py watch   actions [run_id]             poll latest heavy run (one shot)
-  job.py fetch   actions <run_id> <jobdir>    download artifacts -> jobdir/result/ runs
+  job.py kaggle submit  <jobdir>            resolve pinned SHA, inject, push kernel
+  job.py kaggle status  [slug]              poll kernel status (one shot)
+  job.py kaggle fetch   <jobdir>             download kernel output -> jobdir/result/raw/
+  job.py actions dispatch <workflow> <sha> <jobname> <shards> <maxparallel>
+  job.py actions watch   [run_id]             poll latest heavy run (one shot)
+  job.py actions fetch   <run_id> <jobdir>    download artifacts -> jobdir/result/ runs
 
 Environment: KAGGLE_CLI (default /home/z/.venv/bin/kaggle), GITHUB_TOKEN read from
 the git remote URL of this repo (never printed, never written to files).
