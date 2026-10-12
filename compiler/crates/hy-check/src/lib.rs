@@ -3,10 +3,40 @@
 //! Public API (consumed by the `hyb` CLI and the corpus harness):
 //!   * `check_file(&File) -> CheckResult` — diagnostics + verdict + managed report
 //!
-//! Implementation status: stub (agent 5-c fills `rules/`).
+//! Architecture (two passes per function, one flat file pass):
+//!   * `model.rs`   — the data model: TypeShape classification, bindings,
+//!                    moves/consumes, loans, the Checker accumulator.
+//!   * `walk.rs`    — Pass A: flattens a body into a source-ordered statement
+//!                    list with indices; records loop/managed extents (the
+//!                    non-lexical windows) and per-binding last-use indices;
+//!                    collects per-statement uses and calls (closures are
+//!                    skipped — the A5 perimeter).
+//!   * `shape.rs`   — lightweight shape inference from declared types and
+//!                    initializer expressions (NOT a type system).
+//!   * `foreign.rs`— the builtin foreign-type + method-mode descriptor
+//!                    stubs (documented tech debt: replaced by generated
+//!                    boundary descriptors post-MVP).
+//!   * `sendability.rs` — A1c (O4 classes) at spawn/send sites + the O6
+//!                    `managed` suppression/lint (HYB-E8001).
+//!   * `freeze.rs`  — A1b/A7 (O5 freeze-after-move, O13 consume).
+//!   * `loans.rs`   — A2/A3/A6/LOAN-ESCAPE + the environment updates.
+//!   * this file    — Pass B: the per-statement driver and the verdict.
+//!
+//! Tier-0 discipline: never reject on shapes the checker cannot see
+//! (`Unknown` is permissive); every rejection teaches (O17 — fix-its come
+//! from the hy-diag registry); diagnostics are returned in source order.
 
-use hy_diag::{Diagnostic, ManagedReport};
-use hy_syntax::File;
+mod foreign;
+mod freeze;
+mod loans;
+mod model;
+mod sendability;
+mod shape;
+mod walk;
+
+use hy_diag::{Diagnostic, ManagedReport, Severity};
+use hy_syntax::{Decl, Expr, File, FnDecl, ForKind, SelectArmKind, Stmt};
+use model::{Binding, Checker, FnState, TypeShape};
 
 /// The result of checking one file.
 #[derive(Debug, Default)]
@@ -35,13 +65,718 @@ impl Verdict {
 
 /// Check one parsed file against the Tier-0 rules (O2/O4/O5/O6/O7/O8/O12...).
 ///
-/// STUB: accepts everything until the rules engine lands. The checker agent
-/// replaces this — the signature is the contract.
+/// Verdict = reject iff any severity-error diagnostic survives (warnings —
+/// including the managed lint — never fail a build). Diagnostics are sorted
+/// into source order before returning: the corpus harness reads the FIRST
+/// error's `tier0_rule` as the join key against VERDICTS.md.
 pub fn check_file(file: &File) -> CheckResult {
-    let _ = file;
+    let mut ck = Checker::new(file);
+
+    build_tables(&mut ck);
+    ck.check_struct_decls(); // A6: borrow-handle / pointer struct fields
+
+    let fns: Vec<&FnDecl> = file.fns().collect();
+    for f in fns {
+        check_fn(&mut ck, f);
+    }
+
+    let mut diags = ck.diags;
+    diags.sort_by(|a, b| {
+        (a.span.start.line, a.span.start.col, a.span.end.line, a.span.end.col)
+            .cmp(&(
+                b.span.start.line,
+                b.span.start.col,
+                b.span.end.line,
+                b.span.end.col
+            ))
+    });
+    let verdict = if diags.iter().any(|d| d.severity == Severity::Error) {
+        Verdict::Reject
+    } else {
+        Verdict::Accept
+    };
     CheckResult {
-        diagnostics: Vec::new(),
-        verdict: Verdict::Accept,
-        managed: ManagedReport::default(),
+        diagnostics: diags,
+        verdict,
+        managed: ManagedReport {
+            managed_blocks: ck.managed_blocks,
+            sites_via_managed: ck.sites_via_managed,
+            total_sites: ck.total_sites,
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// File-level tables
+// ---------------------------------------------------------------------------
+
+fn build_tables(ck: &mut Checker<'_>) {
+    let file: &File = ck.file;
+    for d in &file.decls {
+        match d {
+            Decl::Import { path, .. } => {
+                // `import "rust/serde_json"` → package root "serde_json".
+                let root = path.rsplit('/').next().unwrap_or(path.as_str());
+                ck.packages.insert(root.to_string());
+            }
+            Decl::Const(c) => {
+                let b = ck.const_binding(c);
+                ck.consts.insert(c.name.clone(), b);
+            }
+            Decl::Struct(s) => {
+                // `type X = int` aliases parse as zero-field struct decls;
+                // they are not containers — leave them unresolved (Unknown
+                // is permissive, and alias-of-primitive values must never
+                // classify as mutable GC structs).
+                if s.fields.is_empty() {
+                    continue;
+                }
+                ck.structs.insert(
+                    s.name.clone(),
+                    s.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect(),
+                );
+            }
+            Decl::Fn(f) => {
+                ck.fns.insert(f.name.clone(), f);
+            }
+            Decl::Enum(_) => {}
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pass B — the per-function statement driver
+// ---------------------------------------------------------------------------
+
+fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
+    let Some(body) = &f.body else { return };
+
+    // environment seed: receiver + params
+    let mut st = FnState::default();
+    if let Some(r) = &f.receiver {
+        let shape = ck.shape_of_type(&r.ty);
+        st.env.insert(
+            r.name.clone(),
+            Binding {
+                shape,
+                ty: Some(r.ty.clone()),
+                immutable: false,
+                managed_taint: false,
+                moved: None,
+            },
+        );
+    }
+    for p in &f.params {
+        let shape = ck.shape_of_type(&p.ty);
+        st.env.insert(
+            p.name.clone(),
+            Binding {
+                shape,
+                ty: Some(p.ty.clone()),
+                immutable: false,
+                managed_taint: false,
+                moved: None,
+            },
+        );
+    }
+
+    // Pass A: indices, structural extents, last-use map.
+    let flat = walk::flatten(body);
+    st.last_use = flat.last_use.clone();
+
+    // Pass B: statements in source order.
+    for (stmt, idx) in &flat.stmts {
+        let stmt: &Stmt = stmt;
+        let idx = *idx;
+        let managed = flat.in_managed(idx);
+        if matches!(stmt, Stmt::Managed { .. }) {
+            ck.managed_blocks += 1; // O6.3: one per `managed` statement
+        }
+
+        // A1b/A7: use-after-move on this statement's own uses (checked
+        // BEFORE this statement marks any new transfers).
+        let mut uses = Vec::new();
+        walk::own_uses(stmt, &mut uses);
+        ck.check_uses(&st, &uses);
+
+        // Calls (A2 loan windows, A7 consumes + arg lending). A for-loop
+        // ITERATE expression's borrow calls get loop-extent loans: the
+        // element views live across the whole loop body (O7).
+        if let Stmt::For { kind: ForKind::Iterate { expr, .. }, .. } = stmt {
+            let loop_end = flat.loop_end_of(idx);
+            let mut calls = Vec::new();
+            walk::expr_calls(expr, &mut calls);
+            for cr in calls {
+                ck.process_call(&mut st, &cr, idx, Some(loop_end));
+            }
+        } else {
+            let mut calls = Vec::new();
+            walk::own_calls(stmt, &mut calls);
+            for cr in calls {
+                ck.process_call(&mut st, &cr, idx, None);
+            }
+        }
+
+        // Statement-specific processing.
+        match stmt {
+            Stmt::Local(l) => ck.process_local(&mut st, l, idx, managed),
+
+            Stmt::Assign { targets, op, values, span } => {
+                ck.process_assign(&mut st, targets, *op, values, *span, idx);
+            }
+
+            Stmt::Return { values, .. } => ck.process_return(&mut st, values),
+
+            // O4.0 check-site: every task argument (HYB-E3001).
+            Stmt::Task { callee, args, span } => {
+                let desc = format!("the spawn `task {}(...)`", callee.render());
+                let vals: Vec<&Expr> = args.iter().map(|a| &a.value).collect();
+                ck.check_site(&mut st, *span, "HYB-E3001", &vals, managed, &desc, false);
+            }
+
+            // O4.0 check-site: the sent value (HYB-E3002). The parser flags
+            // `ch <- move x` as `is_move: true` with a plain Ident value —
+            // `implicit_move` routes it to the class-3 move handling.
+            Stmt::Send { chan, value, is_move, span } => {
+                let desc = if *is_move {
+                    format!("the move-send `{} <- move {}`", chan.render(), value.render())
+                } else {
+                    format!("the send `{} <- {}`", chan.render(), value.render())
+                };
+                let vals: Vec<&Expr> = vec![value];
+                ck.check_site(&mut st, *span, "HYB-E3002", &vals, managed, &desc, *is_move);
+            }
+
+            // Loop variables: fresh bindings per iteration shape.
+            Stmt::For { kind, .. } => match kind {
+                ForKind::Iterate { vars, expr } => {
+                    let shapes = ck.iterate_var_shapes(&st, expr, vars.len());
+                    for (name, shape) in vars.iter().zip(shapes) {
+                        ck.define_binding(&mut st, name, shape, None, false, managed);
+                    }
+                }
+                ForKind::Range { var, .. } => {
+                    ck.define_binding(
+                        &mut st,
+                        var,
+                        TypeShape::Primitive,
+                        None,
+                        false,
+                        managed,
+                    );
+                }
+                ForKind::While { .. } | ForKind::Infinite => {}
+            },
+
+            // select arms: `ch <- v` is a send check-site; `v, ok := <-ch`
+            // defines its names (permissive Unknown shapes).
+            Stmt::Select { arms, .. } => {
+                for arm in arms {
+                    match &arm.kind {
+                        SelectArmKind::Send { chan, value } => {
+                            let desc =
+                                format!("the select-send `{} <- {}`", chan.render(), value.render());
+                            let span = chan.span().to(value.span());
+                            let vals: Vec<&Expr> = vec![value];
+                            ck.check_site(
+                                &mut st,
+                                span,
+                                "HYB-E3002",
+                                &vals,
+                                managed,
+                                &desc,
+                                false,
+                            );
+                        }
+                        SelectArmKind::Recv { names, .. } => {
+                            for n in names {
+                                ck.define_binding(
+                                    &mut st,
+                                    n,
+                                    TypeShape::Unknown,
+                                    None,
+                                    false,
+                                    managed,
+                                );
+                            }
+                        }
+                        SelectArmKind::Default => {}
+                    }
+                }
+            }
+
+            // If-init Locals, match arms, defer, exprs, blocks: already
+            // covered by the flat walk (init is its own statement entry)
+            // and the uses/calls collected above.
+            _ => {}
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — parsed-snippet checks per rule family (verdict + first-error rule)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hy_syntax::parse_file;
+
+    fn check(src: &str) -> CheckResult {
+        let ast = parse_file("t.hy", src).expect("snippet parses");
+        check_file(&ast)
+    }
+
+    fn first_error_rule(r: &CheckResult) -> Option<String> {
+        r.diagnostics
+            .iter()
+            .find(|d| d.severity == Severity::Error)
+            .and_then(|d| d.tier0_rule.clone())
+    }
+
+    #[test]
+    fn clean_program_accepts() {
+        let r = check("fn main() { x := 1 \n fmt.println(x) }");
+        assert_eq!(r.verdict, Verdict::Accept);
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn a1c_spawn_shared_map_rejects() {
+        let r = check(
+            "fn tally(counts map[string]int) { counts[\"a\"]++ }\n\
+             fn main() {\n\
+               counts := map[string]int{}\n\
+               task tally(counts)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1c"));
+        let d = &r.diagnostics[0];
+        assert_eq!(d.code, "HYB-E3001");
+        assert!(d.message.contains("counts"));
+        assert!(d.message.contains("map[string]int"));
+        assert!(!d.fixits.is_empty(), "O17: rejection must teach");
+    }
+
+    #[test]
+    fn a1c_send_shared_struct_rejects() {
+        let r = check(
+            "struct s { n int }\n\
+             fn main() {\n\
+               st := s{}\n\
+               ch := make(chan s, 1)\n\
+               ch <- st\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1c"));
+        assert_eq!(r.diagnostics[0].code, "HYB-E3002");
+    }
+
+    #[test]
+    fn a1c_addr_of_struct_rejects() {
+        let r = check(
+            "struct st { n int }\n\
+             fn w(s *st) { s.n++ }\n\
+             fn main() {\n\
+               stats := st{}\n\
+               task w(&stats)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1c"));
+        assert!(r.diagnostics[0].message.contains("&stats"));
+        assert!(r.diagnostics[0].message.contains("*st"));
+    }
+
+    #[test]
+    fn a1c_fresh_literal_and_move_and_chan_ok() {
+        let r = check(
+            "struct s { a int }\n\
+             fn w(x s, c chan<- s) { c <- s{a: 1} }\n\
+             fn main() {\n\
+               v := s{a: 2}\n\
+               c := make(chan s, 1)\n\
+               task w(move v, c)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+        assert!(r.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn a1b_write_after_move_send() {
+        let r = check(
+            "fn main() {\n\
+               agg := map[string]int{}\n\
+               agg[\"w\"]++\n\
+               results := make(chan map[string]int, 1)\n\
+               results <- move agg\n\
+               agg[\"total\"] = len(agg)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        let d = &r.diagnostics[0];
+        assert_eq!(d.code, "HYB-E3003");
+        assert!(d.message.contains("agg"));
+    }
+
+    #[test]
+    fn a1b_read_after_move_send() {
+        let r = check(
+            "fn main() {\n\
+               agg := map[string]int{}\n\
+               results := make(chan map[string]int, 1)\n\
+               results <- move agg\n\
+               n := len(agg)\n\
+               fmt.println(n)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        assert_eq!(r.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn a1b_alias_write_after_move() {
+        let r = check(
+            "fn main() {\n\
+               agg := map[string]int{}\n\
+               m2 := agg\n\
+               results := make(chan map[string]int, 1)\n\
+               results <- move agg\n\
+               m2[\"total\"] = len(m2)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        let d = &r.diagnostics[0];
+        assert!(d.message.contains("alias"), "{}", d.message);
+    }
+
+    #[test]
+    fn a2_mutate_during_loan_rejects() {
+        let r = check(
+            "import \"rust/serde_json\"\n\
+             fn main() {\n\
+               doc := serde_json.parse(`{}`)?\n\
+               for u in doc.array(\"users\")? {\n\
+                 if u.int(\"logins\")? == 0 {\n\
+                   doc.set(\"pruned\", true)?\n\
+                 }\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A2"));
+        let d = &r.diagnostics[0];
+        assert_eq!(d.code, "HYB-E3101");
+        assert!(d.message.contains("doc"));
+    }
+
+    #[test]
+    fn a2_mutate_after_loan_dies_accepts() {
+        let r = check(
+            "import \"rust/serde_json\"\n\
+             fn main() {\n\
+               doc := serde_json.parse(`{}`)?\n\
+               for u in doc.array(\"users\")? {\n\
+                 fmt.println(u.int(\"logins\")?)\n\
+               }\n\
+               doc.set(\"pruned\", true)?\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn a3_insert_inside_window_rejects() {
+        let r = check(
+            "struct svc { n int }\n\
+             struct env { m map[string]svc }\n\
+             fn f(e *env) {\n\
+               s := &e.m[\"a\"]\n\
+               e.m[\"b\"] = svc{n: 1}\n\
+               s.n = 2\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A3"));
+        let d = &r.diagnostics[0];
+        assert_eq!(d.code, "HYB-E3102");
+        assert!(d.message.contains("insert"));
+    }
+
+    #[test]
+    fn a3_insert_after_last_use_accepts() {
+        let r = check(
+            "struct svc { n int }\n\
+             struct env { m map[string]svc }\n\
+             fn f(e *env) {\n\
+               s := &e.m[\"a\"]\n\
+               s.n = 2\n\
+               e.m[\"b\"] = svc{n: 1}\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn a6_borrow_handle_field_rejects() {
+        let r = check(
+            "import \"rust/serde_json\"\n\
+             struct auditor {\n\
+               trail []string\n\
+               cur   serde_json.view\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A6"));
+        let d = &r.diagnostics[0];
+        assert_eq!(d.code, "HYB-E3103");
+        assert!(d.message.contains("auditor.cur"));
+        assert!(d.message.contains("serde_json.view"));
+    }
+
+    #[test]
+    fn loan_escape_return_addr_of_rejects() {
+        let r = check(
+            "struct c { hits int }\n\
+             struct reg { cs []c }\n\
+             fn get(r *reg, i int) *c {\n\
+               return &r.cs[i]\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("LOAN-ESCAPE"));
+        let d = &r.diagnostics[0];
+        assert_eq!(d.code, "HYB-E3104");
+        assert!(d.message.contains("borrow"));
+    }
+
+    #[test]
+    fn a7_use_after_consuming_rejects() {
+        let r = check(
+            "import \"rust/flate2\"\n\
+             fn main() {\n\
+               enc := flate2.new_writer(6)?\n\
+               out := enc.finish()?\n\
+               enc.write([]byte(\"trailer\"))?\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A7"));
+        let d = &r.diagnostics[0];
+        assert_eq!(d.code, "HYB-E3003");
+        assert!(d.message.contains("enc"));
+    }
+
+    #[test]
+    fn a7_borrow_by_default_and_return_transfer_accept() {
+        // 12-shape: two borrow calls then a mutate — windows non-lexical.
+        let r = check(
+            "import \"rust/serde_json\"\n\
+             fn count(doc serde_json.value) int {\n\
+               n := 0\n\
+               for u in doc.array(\"users\")? {\n\
+                 n += u.int(\"logins\")?\n\
+               }\n\
+               return n\n\
+             }\n\
+             fn main() {\n\
+               doc := serde_json.parse(`{}`)?\n\
+               a := count(doc)?\n\
+               b := count(doc)?\n\
+               doc.set(\"audited\", true)?\n\
+               fmt.println(a + b)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn managed_suppression_lints_and_accepts() {
+        let r = check(
+            "fn tally(counts map[string]int) { counts[\"a\"]++ }\n\
+             fn main() {\n\
+               managed {\n\
+                 counts := map[string]int{}\n\
+                 task tally(counts)\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E8001"),
+            "managed lint must fire: {:?}",
+            r.diagnostics
+        );
+        assert!(r.diagnostics.iter().all(|d| d.severity != Severity::Error));
+        assert_eq!(r.managed.managed_blocks, 1);
+        assert!(r.managed.sites_via_managed >= 1);
+        assert!(r.managed.total_sites >= 1);
+    }
+
+    #[test]
+    fn atomic_and_const_immutable_spawn_args_accept() {
+        // 17-shape: `&hits` where hits is atomic-typed; const table read.
+        let r = check(
+            "import \"sync/atomic\"\n\
+             const th = [10, 50, 250, 1000]\n\
+             struct sample { probe int }\n\
+             fn probe(id int, hits *atomic.int64, s chan<- sample) {\n\
+               if th[3] > 100 {\n\
+                 hits.add(1)\n\
+               }\n\
+               s <- sample{probe: id}\n\
+             }\n\
+             fn main() {\n\
+               var hits atomic.int64\n\
+               samples := make(chan sample, 4)\n\
+               task probe(0, &hits, samples)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn a2_define_stored_view_extends_loan() {
+        // `u := doc.array(...)` stores an element view: the borrow loan on
+        // the handle lives until the view's last use (O7 non-lexical) — a
+        // mutating call inside that window conflicts.
+        let r = check(
+            "import \"rust/serde_json\"\n\
+             fn main() {\n\
+               doc := serde_json.parse(`{}`)?\n\
+               u := doc.array(\"users\")?\n\
+               doc.set(\"x\", true)?\n\
+               fmt.println(u.int(\"n\")?)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A2"));
+        assert_eq!(r.diagnostics[0].code, "HYB-E3101");
+    }
+
+    #[test]
+    fn a2_primitive_boundary_read_is_a_copy() {
+        // O9: a boundary read of a primitive is a COPY — it must NOT keep
+        // the handle borrowed; the later mutating call is legal.
+        let r = check(
+            "import \"rust/serde_json\"\n\
+             fn main() {\n\
+               doc := serde_json.parse(`{}`)?\n\
+               n := doc.int(\"n\")?\n\
+               doc.set(\"x\", true)?\n\
+               fmt.println(n)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn a7_own_transfer_at_return_accepts() {
+        // 13-shape: `return v` transfers the own handle OUT; the caller
+        // mutates the returned handle — the transfer made it the caller's.
+        let r = check(
+            "import \"rust/serde_json\"\n\
+             fn summary(doc serde_json.value) serde_json.value {\n\
+               v := serde_json.new_object()\n\
+               for u in doc.array(\"users\")? {\n\
+                 if u.int(\"logins\")? > 0 {\n\
+                   v.set(\"active\", 1)\n\
+                 }\n\
+               }\n\
+               return v\n\
+             }\n\
+             fn main() {\n\
+               doc := serde_json.parse(`{}`)?\n\
+               s := summary(doc)?\n\
+               s.set(\"cached_at\", \"2026-10-12\")?\n\
+               fmt.println(serde_json.to_string_pretty(s)?)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+        assert!(r.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn o46_deep_sendability_of_composites() {
+        // A fresh literal is NOT automatically safe: embedding a live
+        // mutable map by name is rejected, naming that part (O4.6).
+        let r = check(
+            "struct job { data map[string]int }\n\
+             fn w(j job) { }\n\
+             fn main() {\n\
+               shared_map := map[string]int{}\n\
+               ch := make(chan job, 1)\n\
+               ch <- job{data: shared_map}\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1c"));
+        let d = &r.diagnostics[0];
+        assert_eq!(d.code, "HYB-E3002");
+        assert!(d.message.contains("shared_map"), "{}", d.message);
+    }
+
+    #[test]
+    fn fresh_literal_with_sendable_parts_accepts() {
+        // The clean twin: every reference-typed part sendable.
+        let r = check(
+            "struct probe { id int }\n\
+             struct sample { p probe }\n\
+             fn w(s chan<- sample) { }\n\
+             fn main() {\n\
+               id := 3\n\
+               c := make(chan sample, 1)\n\
+               task w(c)\n\
+               c <- sample{p: probe{id: id}}\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn closure_capture_is_outside_perimeter() {
+        // 10-shape: FnLit bodies are never analyzed (A5 scoped claim).
+        let r = check(
+            "fn main() {\n\
+               hits := 0\n\
+               mux := http.new_serve_mux()\n\
+               mux.handle(\"/ping\", http.handler(fn(w http.response_writer) {\n\
+                 hits++\n\
+               }))\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn diagnostics_are_sorted_in_source_order() {
+        let r = check(
+            "fn tally(counts map[string]int) { counts[\"a\"]++ }\n\
+             fn main() {\n\
+               counts := map[string]int{}\n\
+               task tally(counts)\n\
+               results := make(chan map[string]int, 1)\n\
+               results <- move counts\n\
+               n := len(counts)\n\
+               fmt.println(n)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+        let spans: Vec<_> = r
+            .diagnostics
+            .iter()
+            .map(|d| (d.span.start.line, d.span.start.col))
+            .collect();
+        let mut sorted = spans.clone();
+        sorted.sort();
+        assert_eq!(spans, sorted);
+        // first error in source order is the spawn (A1c)
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1c"));
     }
 }

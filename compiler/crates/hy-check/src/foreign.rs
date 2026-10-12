@@ -1,0 +1,131 @@
+//! foreign.rs — the builtin foreign-type and method-mode tables.
+//!
+//! ── TECH DEBT (post-MVP, tracked for the lead) ────────────────────────────
+//! These builtin descriptor STUBS stand in for the real boundary descriptors
+//! (interfaces/abi-types.md, OQ8): the mode of every foreign call is
+//! hardcoded here as data. When the bridge lands, this module is replaced by
+//! generated descriptor tables (`own` / `borrow` / `mutate` / `consume`
+//! flags per API, exactly as `finish` is flagged `consume` today). Until
+//! then: unknown receivers degrade to `CallMode::Unknown` = "no loan
+//! implications" (permissive — never a false reject), and unknown foreign
+//! TYPES degrade to `TypeShape::Unknown` (permissive at check-sites).
+//! ──────────────────────────────────────────────────────────────────────────
+
+use crate::model::TypeShape;
+
+/// Foreign package roots recognized without an import line (the corpus uses
+/// `strings`/`fmt` freely; imports add to this set at runtime).
+pub(crate) const BUILTIN_PACKAGES: &[&str] = &[
+    "serde_json", "flate2", "atomic", "strings", "fmt", "http", "httptest", "sync", "net",
+    "io", "os", "time", "sort", "strconv", "errors",
+];
+
+/// How a call uses its receiver / arguments (O7 handle modes + O13 consume).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallMode {
+    /// Creates a fresh own handle (does not touch any existing binding).
+    Produce,
+    /// Borrow-mode call: creates a read loan on the receiver (A2 window).
+    Borrow,
+    /// Mutating-mode call: conflicts with live borrow loans (A2).
+    Mutate,
+    /// Consuming call: own-transfer INTO the API — receiver moved-from (A7).
+    Consume,
+    /// Go-side / no loan semantics (fmt, strings, atomics, ...).
+    Safe,
+    /// Not in the table: no loan implications (permissive).
+    Unknown,
+}
+
+/// Classify a dotted foreign type name; `None` = not a known foreign type
+/// (the caller falls back to local struct decls / `Unknown`).
+pub(crate) fn foreign_named_type(name: &str) -> Option<TypeShape> {
+    if name.starts_with("atomic.") {
+        return Some(TypeShape::Atomic);
+    }
+    match name {
+        "serde_json.value" => Some(TypeShape::OwnHandle("serde_json.value".into())),
+        "serde_json.view" => Some(TypeShape::BorrowHandle("serde_json.view".into())),
+        "flate2.writer" => Some(TypeShape::OwnHandle("flate2.writer".into())),
+        _ => {
+            let root = name.split('.').next().unwrap_or("");
+            if BUILTIN_PACKAGES.contains(&root) {
+                Some(TypeShape::ForeignOpaque(name.to_string()))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Mode of a package-level call: `serde_json.parse(...)`, `fmt.println(...)`.
+pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
+    match (pkg, method) {
+        ("serde_json", "parse") | ("serde_json", "new_object") | ("flate2", "new_writer") => {
+            CallMode::Produce
+        }
+        ("serde_json", "to_string_pretty")
+        | ("serde_json", "array")
+        | ("serde_json", "get")
+        | ("serde_json", "int")
+        | ("serde_json", "string") => CallMode::Borrow,
+        ("serde_json", "set") | ("serde_json", "remove") => CallMode::Mutate,
+        ("flate2", "write") => CallMode::Mutate,
+        ("flate2", "finish") => CallMode::Consume,
+        _ => CallMode::Safe,
+    }
+}
+
+/// Result shape of a package-level call (for defines / loop variables).
+pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
+    match (pkg, method) {
+        ("serde_json", "parse") | ("serde_json", "new_object") => {
+            TypeShape::OwnHandle("serde_json.value".into())
+        }
+        ("flate2", "new_writer") => TypeShape::OwnHandle("flate2.writer".into()),
+        ("serde_json", "to_string_pretty") | ("serde_json", "string") | ("strings", "join") => {
+            TypeShape::Str
+        }
+        ("strings", "split") | ("strings", "fields") => {
+            TypeShape::Slice(Box::new(TypeShape::Str))
+        }
+        ("http", "new_serve_mux") => TypeShape::ForeignOpaque("http.serve_mux".into()),
+        ("http", "handler") => TypeShape::ForeignOpaque("http.handler".into()),
+        _ if pkg == "atomic" => TypeShape::Primitive,
+        _ => TypeShape::Unknown,
+    }
+}
+
+/// Mode of a method call on a typed receiver, keyed by the receiver's
+/// boundary type name ("serde_json.value", "flate2.writer", "atomic", ...).
+pub(crate) fn method_mode(recv_type: &str, method: &str) -> CallMode {
+    if recv_type.starts_with("atomic.") {
+        // atomics are safe-by-type: no loan implications (class 2)
+        return CallMode::Safe;
+    }
+    match (recv_type, method) {
+        ("serde_json.value" | "serde_json.view", "array" | "get" | "int" | "string" | "to_string_pretty") => {
+            CallMode::Borrow
+        }
+        ("serde_json.value" | "serde_json.view", "set" | "remove") => CallMode::Mutate,
+        ("flate2.writer", "write") => CallMode::Mutate,
+        ("flate2.writer", "finish") => CallMode::Consume,
+        _ => CallMode::Unknown,
+    }
+}
+
+/// Result shape of a method call on a typed receiver.
+pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
+    match (recv_type, method) {
+        ("serde_json.value" | "serde_json.view", "array" | "get") => {
+            // element views: iterating the result yields borrow handles
+            TypeShape::BorrowHandle("serde_json.view".into())
+        }
+        ("serde_json.value" | "serde_json.view", "int") => TypeShape::Primitive,
+        ("serde_json.value" | "serde_json.view", "string" | "to_string_pretty") => TypeShape::Str,
+        ("flate2.writer", "write") => TypeShape::Primitive,
+        ("flate2.writer", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
+        _ if recv_type.starts_with("atomic.") => TypeShape::Primitive,
+        _ => TypeShape::Unknown,
+    }
+}

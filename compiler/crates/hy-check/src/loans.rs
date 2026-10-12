@@ -1,0 +1,587 @@
+//! loans.rs — the loan rule family (SPEC §9.1 / §9.0 O2):
+//!
+//!   * A2  (O7)   HYB-E3101 — mutating-mode call on a boundary handle while
+//!                a borrow-mode loan on the same handle is live.
+//!   * A3  (O8)   HYB-E3102 — map insert/delete inside a live `&m[k]`
+//!                map-slot loan window (creation → last use, non-lexical).
+//!   * A6  (O12)  HYB-E3103 — struct fields never hold borrows (declared
+//!                borrow-handle fields, and borrow values stored into fields).
+//!   * LOAN-ESCAPE (O2) HYB-E3104 — a returned `&...` loan would outlive the
+//!                callee frame; loans are function-local by construction.
+//!   * A7  (O11/O13) HYB-E3003 rule A7 — consuming APIs transfer ownership;
+//!                later uses are use-after-consume.
+//!
+//! Plus the environment updates that feed all of the above: local defines
+//! (shapes, aliases, managed taint, A3 loan creation), assignments
+//! (whole-binding rebinds, A3 insert detection, A6 field stores) and
+//! returns (escape check, move marking).
+
+use crate::foreign::{self, CallMode};
+use crate::model::{
+    as_addr_of, move_operand_ident, Binding, Checker, FnState, Loan, LoanTarget, MoveKind,
+    TypeShape,
+};
+use crate::shape::receiver_type_name;
+use crate::walk::{self, CallRef};
+use hy_diag::{Diagnostic, Span};
+use hy_syntax::{AssignOp, Expr, LocalDecl, Place, PlaceKind};
+
+// ---------------------------------------------------------------------------
+// Call resolution + A2/A7 processing
+// ---------------------------------------------------------------------------
+
+enum Resolved {
+    /// `pkg.method(...)` — the base ident is a known package, not a binding.
+    Package { pkg: String, method: String },
+    /// `recv.method(...)` — receiver root binding + its shape.
+    Method { root: String, method: String, recv: TypeShape },
+    /// `name(...)` — a plain function call (or builtin).
+    Fn { name: String },
+    None,
+}
+
+impl<'a> Checker<'a> {
+    fn resolve_call(&self, st: &FnState, cr: &CallRef) -> Resolved {
+        match cr.callee {
+            Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: b, .. } = &**base {
+                    if self.lookup_binding(st, b).is_none() && self.known_package(b) {
+                        return Resolved::Package { pkg: b.clone(), method: name.clone() };
+                    }
+                }
+                if let Some(root) = base.root_ident() {
+                    let recv = self.shape_of_expr(st, base);
+                    return Resolved::Method { root: root.to_string(), method: name.clone(), recv };
+                }
+                Resolved::None
+            }
+            Expr::Ident { name, .. } => Resolved::Fn { name: name.clone() },
+            _ => Resolved::None,
+        }
+    }
+
+    /// Process one call site for the loan rules. `loop_end` is `Some(end)`
+    /// when this call is a for-loop ITERATE expression: its borrow loans
+    /// live across the whole loop body (O7's loop rule); otherwise borrow
+    /// loans are call-scoped (A7 borrow-by-default, O11).
+    pub(crate) fn process_call(
+        &mut self,
+        st: &mut FnState,
+        cr: &CallRef,
+        idx: usize,
+        loop_end: Option<usize>,
+    ) {
+        match self.resolve_call(st, cr) {
+            Resolved::Package { pkg, method } => {
+                if foreign::package_mode(&pkg, &method) == CallMode::Borrow {
+                    // a borrow-mode package call lends its handle-typed args
+                    // for the call (`serde_json.to_string_pretty(doc)`)
+                    self.lend_handle_args(st, cr, idx);
+                }
+            }
+            Resolved::Method { root, method, recv } => {
+                let Some(tname) = receiver_type_name(&recv) else {
+                    return;
+                };
+                let receiver_moved = self
+                    .lookup_binding(st, &root)
+                    .map(|b| b.moved.is_some())
+                    .unwrap_or(false);
+                if receiver_moved {
+                    // use-after-move/consume already reported at the use site
+                    return;
+                }
+                match foreign::method_mode(&tname, &method) {
+                    CallMode::Borrow => {
+                        let last = loop_end.unwrap_or(idx);
+                        st.loans.push(Loan {
+                            target: LoanTarget::Handle { handle: root.clone() },
+                            created: idx,
+                            last,
+                            span: cr.span,
+                            desc: format!(
+                                "the borrow-mode call `{}` on `{}`{}",
+                                cr.callee.render(),
+                                root,
+                                if loop_end.is_some() { " (live across the whole loop)" } else { "" }
+                            ),
+                        });
+                    }
+                    CallMode::Mutate => {
+                        self.check_a2_conflict(st, cr, &root, idx);
+                    }
+                    CallMode::Consume => {
+                        // A7: own-transfer INTO the API — receiver moved-from
+                        self.mark_move(
+                            st,
+                            &root,
+                            cr.span,
+                            format!("the consuming call `{}`", cr.callee.render()),
+                            MoveKind::Consumed,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            Resolved::Fn { name } => {
+                if name == "delete" {
+                    // A3: map delete is a map mutation
+                    self.check_delete_conflict(st, cr, idx);
+                }
+                if self.fns.contains_key(&name) {
+                    // A7 borrow-by-default: a handle passed to a Hybrid
+                    // function is lent for the call only
+                    self.lend_handle_args(st, cr, idx);
+                }
+            }
+            Resolved::None => {}
+        }
+    }
+
+    /// HYB-E3101 (A2): a mutating-mode call conflicts with any live
+    /// borrow-mode loan on the same handle.
+    fn check_a2_conflict(&mut self, st: &FnState, cr: &CallRef, root: &str, idx: usize) {
+        let conflict = st.loans.iter().find(|l| {
+            matches!(&l.target, LoanTarget::Handle { handle } if handle == root)
+                && l.created <= idx
+                && idx <= l.last
+        });
+        let Some(loan) = conflict else { return };
+        let msg = format!("mutating call on `{}` while a borrow loan is live", root);
+        let notes = vec![
+            format!(
+                "the borrow-mode loan on `{}` was created at {} ({}:{}) and is live until its last use — for a loop-header loan that is the whole loop body (O7, non-lexical window)",
+                root,
+                loan.desc,
+                self.path,
+                loan.span.start
+            ),
+            "a mutating call on a handle invalidates outstanding borrow-mode loans: the element views would alias mutated state".to_string(),
+            "collect-then-mutate: reads at the boundary are copies — gather what you need into locals, let the loan die at its last use, THEN mutate (corpus 12 is the legal after-the-loop shape)".to_string(),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E3101", self.path.clone(), cr.span, msg).with_notes(notes),
+        );
+    }
+
+    /// Handle-typed arguments of a call are lent for the call (call-scoped).
+    fn lend_handle_args(&self, st: &mut FnState, cr: &CallRef, idx: usize) {
+        for a in cr.args {
+            if let Expr::Ident { name, .. } = &a.value {
+                if let Some(b) = self.lookup_binding(st, name) {
+                    if b.shape.is_handle() {
+                        st.loans.push(Loan {
+                            target: LoanTarget::Handle { handle: name.clone() },
+                            created: idx,
+                            last: idx,
+                            span: a.span,
+                            desc: format!(
+                                "the argument `{}` lent to `{}` (A7 borrow-by-default)",
+                                name,
+                                cr.callee.render()
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// A3 via `delete(m, k)`: a delete on a loaned base path inside the
+    /// window invalidates the slot loan.
+    fn check_delete_conflict(&mut self, st: &FnState, cr: &CallRef, idx: usize) {
+        let Some(first) = cr.args.first() else { return };
+        let Some(path) = walk::expr_path(&first.value) else { return };
+        self.emit_a3_if_live(st, &path, cr.span, idx, "delete");
+    }
+
+    /// Shared A3 emitter for index-assign inserts and `delete` calls.
+    fn emit_a3_if_live(&mut self, st: &FnState, path: &str, span: Span, idx: usize, verb: &str) {
+        let Some(loan) = st.loans.iter().find(|l| {
+            matches!(&l.target, LoanTarget::MapSlot { path: p, .. } if p == path)
+                && l.created <= idx
+                && idx <= l.last
+        }) else {
+            return;
+        };
+        let (binding, loan_desc, loan_span, loan_last) = match &loan.target {
+            LoanTarget::MapSlot { binding, .. } => {
+                (binding.clone(), loan.desc.clone(), loan.span, loan.last)
+            }
+            _ => unreachable!("filtered above"),
+        };
+        let msg = format!("map {} invalidates the live slot loan `{}`", verb, binding);
+        let notes = vec![
+            format!(
+                "{} ({}:{}) is a unique loan on a slot of `{}`, live from creation to its last use (O8, non-lexical window ending at statement {})",
+                loan_desc,
+                self.path,
+                loan_span.start,
+                path,
+                loan_last
+            ),
+            "a rehash may move the slot — reorder so the slot mutation finishes before any insert/delete on the same map (corpus 09 is the legal twin), or copy-out / modify / store-back (reads are copies, O9)".to_string(),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E3102", self.path.clone(), span, msg).with_notes(notes),
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Defines (environment + A3 loan creation)
+    // -----------------------------------------------------------------------
+
+    pub(crate) fn process_local(
+        &mut self,
+        st: &mut FnState,
+        l: &LocalDecl,
+        idx: usize,
+        managed: bool,
+    ) {
+        // A3 loan creation: `svc := &e.services[existing]`
+        if l.names.len() == 1 && l.values.len() == 1 {
+            if let Some(path) = walk::addr_of_index_base_path(&l.values[0]) {
+                let binding = l.names[0].clone();
+                let last = st
+                    .last_use
+                    .get(&binding)
+                    .copied()
+                    .unwrap_or(idx)
+                    .max(idx);
+                st.loans.push(Loan {
+                    target: LoanTarget::MapSlot { binding: binding.clone(), path },
+                    created: idx,
+                    last,
+                    span: l.values[0].span(),
+                    desc: format!("`{} := {}`", binding, l.values[0].render()),
+                });
+            }
+        }
+
+        // bindings
+        let immutable = l.kind.is_immutable();
+        if l.values.is_empty() {
+            // `var hits atomic.int64` / `var got []int` — shape from the
+            // ascription (there is no initializer to infer from).
+            let shape = l
+                .ty
+                .as_ref()
+                .map(|t| self.shape_of_type(t))
+                .unwrap_or(TypeShape::Unknown);
+            let ty = l.ty.clone();
+            for name in &l.names {
+                self.define_binding(st, name, shape.clone(), ty.clone(), immutable, managed);
+            }
+            return;
+        }
+        if l.values.len() == 1 && l.names.len() > 1 {
+            // multi-value define from one expression
+            let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
+            for (name, shape) in l.names.iter().zip(shapes) {
+                self.define_binding(st, name, shape, None, immutable, managed);
+            }
+        } else {
+            for (name, value) in l.names.iter().zip(l.values.iter()) {
+                let shape = self.shape_of_expr(st, value);
+                let ty = self.ty_of_expr(st, value);
+                // `x := move y` — y is moved; x takes ownership (no alias)
+                if move_operand_ident(value).is_some() {
+                    self.mark_move_in_value(
+                        st,
+                        value,
+                        format!("the move-define `{}`", value.render()),
+                    );
+                    self.define_binding(st, name, shape, ty, immutable, managed);
+                    continue;
+                }
+                let is_view = matches!(shape, TypeShape::BorrowHandle(_));
+                self.define_binding(st, name, shape, ty, immutable, managed);
+                // A2 non-lexical extension: `u := doc.array(...)` stores an
+                // element VIEW — the borrow loan the call opened on the
+                // handle lives until the view's last use (O7), not just the
+                // call. Only borrow-handle results extend the loan: boundary
+                // reads of primitives are copies (O9) — a copied-out int
+                // must NOT keep the handle borrowed.
+                if is_view {
+                    self.extend_call_loans_to_view(st, value, name, idx);
+                }
+                // alias recording: `m2 := agg` (reference-typed value)
+                if let Expr::Ident { name: src, .. } = value {
+                    if let Some(b) = self.lookup_binding(st, src) {
+                        if b.shape.is_reference_alias() {
+                            st.aliases.insert(name.clone(), src.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Extend call-scoped borrow loans opened by the calls inside `value`
+    /// to the last use of the view binding `name` (the A2 non-lexical
+    /// window for define-stored element views).
+    fn extend_call_loans_to_view(
+        &self,
+        st: &mut FnState,
+        value: &Expr,
+        name: &str,
+        idx: usize,
+    ) {
+        let mut calls = Vec::new();
+        walk::expr_calls(value, &mut calls);
+        let mut roots = Vec::new();
+        for cr in &calls {
+            if let Resolved::Method { root, method, recv } = self.resolve_call(st, cr) {
+                if let Some(t) = receiver_type_name(&recv) {
+                    if foreign::method_mode(&t, &method) == CallMode::Borrow {
+                        roots.push(root);
+                    }
+                }
+            }
+        }
+        if roots.is_empty() {
+            return;
+        }
+        let view_last = st.last_use.get(name).copied().unwrap_or(idx).max(idx);
+        for loan in st.loans.iter_mut() {
+            if let LoanTarget::Handle { handle } = &loan.target {
+                if loan.created == idx
+                    && loan.last == idx
+                    && roots.iter().any(|r| r == handle)
+                {
+                    loan.last = view_last;
+                }
+            }
+        }
+    }
+
+    pub(crate) fn define_binding(
+        &self,
+        st: &mut FnState,
+        name: &str,
+        shape: TypeShape,
+        ty: Option<hy_syntax::TypeExpr>,
+        immutable: bool,
+        managed: bool,
+    ) {
+        st.aliases.remove(name);
+        st.env.insert(
+            name.to_string(),
+            Binding {
+                shape,
+                ty,
+                immutable,
+                managed_taint: managed, // O6.2: born inside `managed {}`
+                moved: None,
+            },
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Assignments (A3 inserts, A6 field stores, whole-binding rebinds)
+    // -----------------------------------------------------------------------
+
+    pub(crate) fn process_assign(
+        &mut self,
+        st: &mut FnState,
+        targets: &[Place],
+        op: AssignOp,
+        values: &[Expr],
+        _span: Span,
+        idx: usize,
+    ) {
+        // A3: an index-assign on a loaned base path is a potential INSERT
+        for t in targets {
+            if matches!(t.kind, PlaceKind::Index { .. }) {
+                if let Some(path) = walk::place_path(t) {
+                    self.emit_a3_if_live(st, &path, t.span, idx, "insert");
+                }
+            }
+        }
+
+        // A6: a borrow stored into a struct field
+        if values.len() == 1 {
+            let v = &values[0];
+            for t in targets {
+                if matches!(t.kind, PlaceKind::Field { .. }) {
+                    let is_borrow = as_addr_of(v).is_some()
+                        || matches!(self.shape_of_expr(st, v), TypeShape::BorrowHandle(_));
+                    if is_borrow {
+                        let msg = format!(
+                            "a borrow value cannot be stored in the field `{}`",
+                            t.render()
+                        );
+                        let notes = vec![
+                            "struct fields hold owned values, GC values, ids, or own-handles — never borrows (O12): a stored borrow is the shape that would force lifetime annotations".to_string(),
+                            "store the index or a copy and re-view through the handle at the use site (id discipline)".to_string(),
+                        ];
+                        self.diags.push(
+                            Diagnostic::error("HYB-E3103", self.path.clone(), t.span, msg)
+                                .with_notes(notes),
+                        );
+                    }
+                }
+            }
+        }
+
+        // whole-binding rebind: `rows = append(rows, ...)` re-owns the value
+        if op == AssignOp::Assign && values.len() == 1 {
+            let shape = self.shape_of_expr(st, &values[0]);
+            let ty = self.ty_of_expr(st, &values[0]);
+            for t in targets {
+                if let PlaceKind::Ident(name) = &t.kind {
+                    if let Some(b) = st.env.get_mut(name) {
+                        b.shape = shape.clone();
+                        b.ty = ty.clone();
+                        b.moved = None; // a fresh value re-owns the binding
+                    }
+                    // rebind may create a fresh alias
+                    st.aliases.remove(name);
+                    if let Expr::Ident { name: src, .. } = &values[0] {
+                        if let Some(b) = self.lookup_binding(st, src) {
+                            if b.shape.is_reference_alias() {
+                                st.aliases.insert(name.clone(), src.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Returns (LOAN-ESCAPE + move marking)
+    // -----------------------------------------------------------------------
+
+    pub(crate) fn process_return(&mut self, st: &mut FnState, values: &[Expr]) {
+        for v in values {
+            // O2/LOAN-ESCAPE: a borrow returned from a function
+            if as_addr_of(v).is_some() || contains_addr_of_in_literal(v) {
+                let msg = "a borrow cannot be returned from a function".to_string();
+                let notes = vec![
+                    format!(
+                        "`{}` is a loan whose window ends when this function exits — Tier 0 keeps every loan function-local (O2): that is why there are no lifetime annotations to write",
+                        v.render()
+                    ),
+                    "make the mutation a method on the owner so the loan stays in one frame, return the index and let the caller do the access, or return a copy (Go-heap reads are copies, O9)".to_string(),
+                    "a lifetime parameter is NOT offered on purpose: the language has none".to_string(),
+                ];
+                self.diags.push(
+                    Diagnostic::error("HYB-E3104", self.path.clone(), v.span(), msg)
+                        .with_notes(notes),
+                );
+            } else if move_operand_ident(v).is_some() {
+                self.mark_move_in_value(st, v, format!("the move-return `{}`", v.render()));
+            }
+        }
+    }
+}
+
+/// Does this literal contain an address-of at its top level (field values,
+/// map entries, slice items — recursively through nested literals only)?
+fn contains_addr_of_in_literal(e: &Expr) -> bool {
+    if as_addr_of(e).is_some() {
+        return true;
+    }
+    match e {
+        Expr::StructLit { fields, .. } => fields.iter().any(|f| contains_addr_of_in_literal(&f.value)),
+        Expr::MapLit { entries, .. } => entries
+            .iter()
+            .any(|(k, v)| contains_addr_of_in_literal(k) || contains_addr_of_in_literal(v)),
+        Expr::SliceLit { items, .. } => items.iter().any(contains_addr_of_in_literal),
+        Expr::Paren { inner, .. } => contains_addr_of_in_literal(inner),
+        _ => false, // do not look through calls/indices — literal contents only
+    }
+}
+
+// ---------------------------------------------------------------------------
+// File-level A6: struct field declarations (corpus 11's violation site)
+// ---------------------------------------------------------------------------
+
+impl<'a> Checker<'a> {
+    pub(crate) fn check_struct_decls(&mut self) {
+        let decls: Vec<(String, Vec<(String, hy_syntax::TypeExpr)>)> = self
+            .file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                hy_syntax::Decl::Struct(s) => Some((
+                    s.name.clone(),
+                    s.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect(),
+                )),
+                _ => None,
+            })
+            .collect();
+
+        for (sname, fields) in decls {
+            for (fname, fty) in fields {
+                let shape = self.shape_of_type(&fty);
+                match &shape {
+                    TypeShape::BorrowHandle(_) => {
+                        let msg = format!(
+                            "struct field `{}.{}` has borrow-handle type `{}`",
+                            sname,
+                            fname,
+                            fty.render()
+                        );
+                        let notes = vec![
+                            "fields hold owned values, GC values, ids, or own-handles — never borrows (O12): a stored borrow is the shape that would force lifetime annotations".to_string(),
+                            "process the element inside the loop body (the loan dies at each iteration's last use), or store the index or a copy and re-view through the handle later".to_string(),
+                        ];
+                        let span = fty.span();
+                        self.diags.push(
+                            Diagnostic::error("HYB-E3103", self.path.clone(), span, msg)
+                                .with_notes(notes),
+                        );
+                    }
+                    TypeShape::Pointer(inner)
+                        if !matches!(**inner, TypeShape::Atomic) =>
+                    {
+                        // O12's own example (`cur &node`): pointer fields are
+                        // borrows — store an id or the value instead.
+                        let msg = format!(
+                            "struct field `{}.{}` has pointer type `{}` — fields never hold borrows",
+                            sname,
+                            fname,
+                            fty.render()
+                        );
+                        let notes = vec![
+                            "a pointer field is a stored borrow (O12): store an id/index and re-borrow at the use site, or store the value".to_string(),
+                        ];
+                        let span = fty.span();
+                        self.diags.push(
+                            Diagnostic::error("HYB-E3103", self.path.clone(), span, msg)
+                                .with_notes(notes),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// `var`/`let` statements are Locals; file-level const inference:
+    pub(crate) fn const_binding(&self, c: &hy_syntax::ConstDecl) -> Binding {
+        let shape = match &c.ty {
+            Some(t) => self.shape_of_type(t),
+            None => {
+                let empty = FnState::default();
+                self.shape_of_expr(&empty, &c.value)
+            }
+        };
+        let ty = match &c.ty {
+            Some(t) => Some(t.clone()),
+            None => {
+                let empty = FnState::default();
+                self.ty_of_expr(&empty, &c.value)
+            }
+        };
+        Binding {
+            shape,
+            ty,
+            immutable: true, // class 4: const values are immutable-by-type
+            managed_taint: false,
+            moved: None,
+        }
+    }
+}
