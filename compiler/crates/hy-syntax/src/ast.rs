@@ -66,6 +66,8 @@ pub struct ConstDecl {
 #[derive(Debug, Clone)]
 pub struct StructDecl {
     pub name: String,
+    /// Generic type parameters: `struct lru_cache[k comparable, v any]`.
+    pub type_params: Vec<TypeParam>,
     pub fields: Vec<FieldDecl>,
     pub span: Span,
 }
@@ -96,12 +98,30 @@ pub struct FnDecl {
     pub name: String,
     /// Method receiver: `fn (g *graph) connect(...)`.
     pub receiver: Option<Receiver>,
+    /// Generic type parameters: `fn id[t any](x t) t` (examples 07 surface).
+    pub type_params: Vec<TypeParam>,
     pub params: Vec<Param>,
-    /// 0, 1, or 2 result types (multi-value, never a tuple).
-    pub results: Vec<TypeExpr>,
+    /// 0, 1, or 2 results (multi-value, never a tuple). Named results
+    /// (`fn main() (code int)`, example 02) carry their name.
+    pub results: Vec<FnResult>,
     /// `None` = declaration without body (not expected in corpus files).
     pub body: Option<Block>,
     pub span: Span,
+}
+
+/// A function result: type + optional name (`(code int)`).
+#[derive(Debug, Clone)]
+pub struct FnResult {
+    pub name: Option<String>,
+    pub ty: TypeExpr,
+}
+
+/// A generic type parameter: `[k comparable, v any]`.
+#[derive(Debug, Clone)]
+pub struct TypeParam {
+    pub name: String,
+    /// Constraint rendered as written (`comparable`, `any`, ...).
+    pub constraint: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -304,6 +324,9 @@ pub enum PlaceKind {
     Index { base: Box<Place>, index: Expr },
     /// `stats.processed`, `svc.tag`, `stats.mu`
     Field { base: Box<Place>, name: String },
+    /// `&stats`, `&hits`, `&reg.counters[i]` — address-of in place/arg
+    /// position (the parser may also yield Expr::Unary{Addr} there).
+    AddrOf { base: Box<Place> },
 }
 
 impl Place {
@@ -313,6 +336,7 @@ impl Place {
             PlaceKind::Ident(n) => n,
             PlaceKind::Index { base, .. } => base.root(),
             PlaceKind::Field { base, .. } => base.root(),
+            PlaceKind::AddrOf { base } => base.root(),
         }
     }
 
@@ -326,6 +350,7 @@ impl Place {
             PlaceKind::Ident(n) => n.clone(),
             PlaceKind::Index { base, .. } => format!("{}[...]", base.render()),
             PlaceKind::Field { base, name } => format!("{}.{}", base.render(), name),
+            PlaceKind::AddrOf { base } => format!("&{}", base.render()),
         }
     }
 }
@@ -357,6 +382,10 @@ pub enum Expr {
     Interp { parts: Vec<InterpPart>, span: Span },
     Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr>, span: Span },
     Unary { op: UnOp, operand: Box<Expr>, span: Span },
+    /// `&stats`, `&reg.counters[i]`, `&hits` — address-of. Synonymous with
+    /// `Unary { Addr }`; both spellings are legal AST (parser picks one —
+    /// the checker handles both).
+    AddrOf { operand: Box<Expr>, span: Span },
     /// `move agg` — ownership transfer marker (O5). Legal in spawn/send
     /// argument position and (later) assignment/return.
     Move { operand: Box<Expr>, span: Span },
@@ -415,7 +444,20 @@ pub enum BinOp {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
-    Not, Neg,
+    Not,
+    Neg,
+    /// `&x` — also spelled `Expr::AddrOf` (both are legal AST).
+    Addr,
+}
+
+impl UnOp {
+    pub fn render(&self) -> &'static str {
+        match self {
+            UnOp::Not => "!",
+            UnOp::Neg => "-",
+            UnOp::Addr => "&",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -476,6 +518,7 @@ impl Expr {
             | Expr::Interp { span, .. }
             | Expr::Binary { span, .. }
             | Expr::Unary { span, .. }
+            | Expr::AddrOf { span, .. }
             | Expr::Move { span, .. }
             | Expr::Try { span, .. }
             | Expr::Receive { span, .. }
@@ -520,6 +563,7 @@ impl Expr {
                 format!("{} {} {}", lhs.render(), op.render(), rhs.render())
             }
             Expr::Unary { op, operand, .. } => format!("{}{}", op.render(), operand.render()),
+            Expr::AddrOf { operand, .. } => format!("&{}", operand.render()),
             Expr::Move { operand, .. } => format!("move {}", operand.render()),
             Expr::Try { operand, .. } => format!("{}?", operand.render()),
             Expr::Receive { chan, .. } => format!("<-{}", chan.render()),
@@ -550,15 +594,6 @@ impl BinOp {
             BinOp::Lt => "<", BinOp::Gt => ">",
             BinOp::Le => "<=", BinOp::Ge => ">=",
             BinOp::And => "&&", BinOp::Or => "||",
-        }
-    }
-}
-
-impl UnOp {
-    pub fn render(&self) -> &'static str {
-        match self {
-            UnOp::Not => "!",
-            UnOp::Neg => "-",
         }
     }
 }
