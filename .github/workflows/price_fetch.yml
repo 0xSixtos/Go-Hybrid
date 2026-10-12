@@ -1,0 +1,39 @@
+name: price-fetch
+on:
+  workflow_dispatch:
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install yfinance pandas
+      - run: |
+          python - <<'EOF'
+          import yfinance as yf, pandas as pd, time
+          out = {}
+          for t in ["MATT", "FIT", "IRBT", "SKX", "AAPL", "SPY"]:
+              for a in [t, t + ".OQ", t + ".N"]:
+                  try:
+                      h = yf.Ticker(a).history(period="max", interval="1d", auto_adjust=True)
+                      if len(h) > 100:
+                          out[t] = h["Close"].dropna()
+                          print(t, "via", a, len(h), h.index[0].date(), "->", h.index[-1].date())
+                          break
+                  except Exception as e:
+                      print(t, a, "err", str(e)[:60]); time.sleep(3)
+              time.sleep(1)
+          px = pd.DataFrame(out)
+          px.index = pd.to_datetime(px.index).tz_localize(None)
+          px.to_csv("missing_prices.csv")
+          print(px.tail(2))
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: missing-prices
+          path: missing_prices.csv
+          if-no-files-found: error
+          retention-days: 10
