@@ -40,7 +40,7 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 | 1 call overhead | <10ns / 10–100 / cgo-class | **PASS row 1**: 2.82 ns sandbox, 4.36 ns worker (safe M4), 0 allocs, race-clean | keep trampoline design; §6 budget → ≤5 ns |
 | 2 Go linking | source > asm > objects | **PASS 14/14** | Go-source emission primary; zero-install via committed source+artifact |
 | 3 memory/arena | per pre-registered table | **PASS with fallback**: P1/P2/P4/P5/P6/P9 green; P3 FAILED (+55 ns pin cost) → copy-small/pin-large; hazards P7/P8 demonstrated | handles + gen-tags + pinned-large-borrow; abi-types.md draft |
-| 4 scheduling | per pre-registered table | **PASS (sandbox)**: S1 ≥94× starvation demonstrated; S2 two-tier 1.0–1.1× M0 (14/15 cells; lane-ceiling cell characterized); S4 pool at bound, zero lost; S5 threads bounded; crash finding → two-tier design | two-tier adopted: syswin lane + bounded pool + sampler-gated thread budget (worker tier = job 005) |
+| 4 scheduling | per pre-registered table | **PASS (both tiers)**: S1 starvation theory-exact at 1k/10k/100k; S2 worker 100k: M2b 1.00–1.19× M0 on every cell (pair cost ~0.9 ms intrinsic, design-absorbed); S4 pool at bound on both tiers (19.62 s vs 19.5 s at 100k), zero lost; S5 threads bounded, budgets environment-specific; GC-assist wedge = M1's third indictment | two-tier adopted: syswin lane + bounded pool + sampler-gated thread budget |
 | 5 errors | per pre-registered table | **PASS all**: E1 2.58 ns/0 allocs (two-word HyResult), E2 0 allocs, E3 1 alloc, E4 identity + documented chain loss, E5 abort contract verified | adopt HyResult + sentinel table + wrap-on-demand |
 | 6 ownership usability | 10 programs, annotation count | **PASS**: 0 annotations / 0 managed / 0 outside-model (strictest reading; hand-trace); A1–A8 ambiguities + corpus gap recorded | Tier-0 real for MVP corpus; Polonius-style engine + rustc CI oracle |
 
@@ -55,11 +55,11 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 - [x] Ten target programs sketched in examples/ | done = each has .hy intent + expected output | lead | done
 - [x] README.md (top-repo quality, user-requested) | done = patterns from research/readme-study.md applied | lead | done
 - [x] Spike 3 memory across the boundary (arena/handles) | done = working code + tests + interfaces/abi-types.md draft | lead | done (both tiers: sandbox + job 003 rerun)
-- [x] Spike 4 scheduling with blocking foreign calls | done = 1k/10k sandbox + 100k worker | lead | sandbox DONE (both legs, race-clean); worker = job 005 in flight
+- [x] Spike 4 scheduling with blocking foreign calls | done = 1k/10k sandbox + 100k worker | lead | done (both tiers: sandbox + job 005 v9 all-green, 521 s)
 - [x] Spike 5 error representation | done = allocation counts measured | lead | done (both tiers: sandbox + job 004)
 - [x] Spike 6 ownership usability | done = 10 programs pseudo-Hybrid'd + annotation count | lead | done (agent 6-a; 0/0/0)
-- [ ] research/spike-report.md + gates/G0.md | done = all spikes closed | lead | pending
-- [ ] SPEC-LANGUAGE.md first draft | done = grammar skeleton + type/error/concurrency sections | lead | pending (after G0)
+- [x] research/spike-report.md + gates/G0.md | done = all spikes closed | lead | done (G0 written 2026-10-12; build-vs-extend re-run: B CONFIRMED)
+- [ ] SPEC-LANGUAGE.md first draft | done = grammar skeleton + type/error/concurrency sections | lead | pending (Phase 1 starts now)
 
 ## Blockers
 - (none)
@@ -80,7 +80,7 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 | R11 | Go codegen ceiling (GC pauses) misses perf budget | M | M | hot paths via ≤5ns Rust calls; macro-benchmarks at Phase 4 |
 
 ## Review Gates
-- G0: pending (needs Spikes 3–6) | G1: [ ] | G2: [ ] | G3: [ ]
+- G0: **PASSED 2026-10-12** (all six spikes both tiers; spike-report written; build-vs-extend re-run confirms Option B; two open human decisions logged in QUESTIONS.md — sendability reading + thread-budget config — defaults proceed per SPEC §9) | G1: [ ] | G2: [ ] | G3: [ ]
 
 ## Test Results
 - Spike 1 probes (correctness / 20k-deep recursion / scheduler-migration / GC-hammer / race): PASS on sandbox AND Kaggle worker
@@ -90,6 +90,7 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 - Spike 5: 4/4 probes PASS under -race (incl. panic contract via child SIGABRT); E1 wide crossing 2.58 ns/0 allocs, E2 sentinel 0 allocs, E3 wrap 1 alloc, E6 rust refs 2.05/1.76 ns/iter
 - Spike 5 worker tier (job 004): all green; alloc verdicts identical cross-tier; two-word return costs +0.03 ns over that tier's fast crossing
 - Spike 4 sandbox: all canaries + race leg green under -race; M2b two-tier 1.0–1.1× M0 (14/15 cells); M1 169× starvation at (1k,50%,100ms); M3 pool at predicted bound; two-tier thread bound never exceeded; uncapped-M2b crash evidence in spikes/spike4-scheduling/work/m2b-uncapped-crash-trimmed.txt
+- Spike 4 worker tier (job 005 v9): ALL GREEN (521 s) — 100k matrix: M2b 1.00–1.19× M0 every cell; M1 capped at theory (93% at 120 s); M3 long cell 19.62 s vs 19.5 s predicted; M4 5000 threads zero failures (pids.max 38508); race leg 13.8 s; pair cost ~0.9 ms intrinsic on BOTH tiers (sandbox syscall-interception theory refuted)
 - Spike 6: 10/10 hand-trace pass (0 annotations / 0 managed / 0 outside-model) — believed (hand-trace), to be machine-checked when the Phase-1 checker exists
 - Fleet smoke: 4/4 and 20/20 shards green at pinned SHA cd21089 (runs 38163370515, 38163372872)
 - Actions→Kaggle secret path: kaggle.yml run 38167716652 green (104 s end-to-end)
@@ -117,6 +118,8 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 - 2026-10-12 | Spike 4 P-release canary: iteration-ratio → self-calibrating CPU-time/floor form | 2-busy-thread ceiling on this box is ~1.5× (environmental); null = 1.0; thresholds 0.80/0.75/1.25 vs in-process floor | reverse: n/a — measurement-theory correction, claim unchanged
 - 2026-10-12 | Makefile recipe tabs fixed (committed spaces made every target unrunnable) | `make check` failed with 'missing separator'; earlier sessions had invoked run.sh directly | reverse: n/a
 - 2026-10-12 | Session-3 sandbox-reset recovery: re-clone + re-pin toolchains + re-stage kaggle creds; secret verified intact server-side | sandbox was reset between sessions; all work was pushed | reverse: n/a
+- 2026-10-12 | Blocking dispatch pair cost re-scored: ~0.9 ms intrinsic on both tiers (not syscall interception — worker refuted the sandbox theory); design-absorbed (blocking-only callees; amortized: load cells 1.0–1.2× M0 up to 100k) | honest ledger entry per SPEC §14.7 | reverse: revisit if a Go release makes exitsyscall fast-path viable for single callers
+- 2026-10-12 | G0 gate PASSED; build-vs-extend re-run = Option B CONFIRMED (strengthened by spikes 3–6) | spike-report.md + gates/G0.md | reverse: never-cut fallbacks priced (cgo bridge / M3 pool)
 
 ## Cut Log
 (empty)

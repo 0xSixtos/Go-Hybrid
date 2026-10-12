@@ -1,8 +1,11 @@
 # Spike Report — Phase 0 Feasibility (SPEC §5 spike gate)
 
-**Status:** all six spikes executed; this report closes Phase 0 and feeds gate
-G0 (`gates/G0.md`). Written 2026-10-12 after Spikes 0–6; Spike 4's worker
-tier (job 005) confirms the sandbox numbers where environments differ.
+**Status:** all six spikes executed on both required tiers; this report
+closes Phase 0 and feeds gate G0 (`gates/G0.md`). Written 2026-10-12 after
+Spikes 0–6; Spike 4's worker tier (job 005 v9, all green, 521 s) confirms
+the sandbox numbers and corrects one interpretation (the ~0.9 ms syswin
+pair cost is intrinsic, not environment-specific — see the relaxed-targets
+ledger).
 **Rule:** nothing here is aspirational — every number traces to a
 pre-registered threshold in the spike's RESULTS.md and a run that exists in
 git history.
@@ -37,7 +40,7 @@ after G0.
 | 1 call overhead | Safe crossing < 10 ns? | **PASS row 1**: 2.82 ns sandbox / 4.36 ns worker, 0 allocs, race+GC-hammer clean | keep the trampoline; §6 budget ≤ 5 ns |
 | 2 Go linking | What will Go link, zero-install? | **PASS 14/14**: Go source + `//line` + asm trampolines; `go build` one command; no-toolchain consumption | Go-source emission primary |
 | 3 memory/arena | Handles vs arenas vs copies | **PASS with one pre-registered fallback** (P3: Pinner +55 ns > cgo → copy-small/pin-large); hazards P7/P8 demonstrated (UAF + stack-slot stomp) | owning-side handle tables; raw cross-language pointers forbidden in safe mode; **crash finding retired the shared mmap stack** → guard-checked fast path on the caller's stack + pooled guarded deep stacks |
-| 4 scheduling | Do blocking foreign calls starve? | **PASS**: M1 naive = 169× starvation (R4 confirmed); **two-tier adopted** — M2b 1.0–1.1× M0 on 14/15 cells, P-release canary-proven (CPU-tick syswin/floor = 1.01); M3 pool at the predicted bound, zero lost tickets; **crash finding: ~717-thread environment wall → the bridge owns a hard thread budget** | two-tier blocking design (below) |
+| 4 scheduling | Do blocking foreign calls starve? | **PASS both tiers**: M1 naive = 169× starvation at 1k, 42×+ capped at 100k (theory-exact), plus the GC-assist wedge (M1 can freeze allocation itself); **two-tier adopted** — M2b 1.00–1.19× M0 on every worker cell at 100 000 tasks; P-release canary-proven (CPU-tick syswin/floor = 1.01); M3 pool at the predicted bound on both tiers (19.62 s vs 19.5 s at 100k), zero lost tickets; thread budgets are environment-specific (sandbox walls ~717; worker pids.max 38508) → derive-by-probe | two-tier blocking design (below) |
 | 5 errors | (T, error) ↔ Result, panic contract | **PASS all**: ok path 2.58 ns / 0 allocs; error path exactly 1 alloc; `errors.Is/As` identity survives; panic = SIGABRT at the edge, never unwinds | two-word HyResult + sentinel table + wrap-on-demand |
 | 6 ownership usability | Is "no visible lifetimes" real? | **PASS**: 10/10 target programs, **0 annotations / 0 managed / 0 outside-model** under the strictest rule reading; rustc delegation = CI oracle only | Tier-0 model confirmed for the MVP corpus; A1–A8 ambiguities → SPEC-LANGUAGE.md |
 
@@ -82,19 +85,22 @@ after G0.
 - **Error source-chain across the boundary** (Spike 5 E4): Go `errors.Is/
   As` identity survives; Rust-side `source()` chains do not (documented
   loss; wrap-on-demand recovers text).
-- **Blocking-call dispatch cost** (Spike 4): the naked enter/exit pair is
-  ~0.53 ms on the intercepted-syscall sandbox (native-Linux worker value
-  in job 005's results); amortized over ≥1 ms blocks in every load cell.
-  The ≤100 ns pair threshold as pre-registered FAILS on the sandbox and is
-  re-scored on the worker — recorded, not hidden.
-- **M3 poll-latency overhead** (Spike 4 S4): 70–157 ms on the sandbox
-  (intercepted-timer tax on the backoff sleep); worker tier decides
-  whether the 5 ms threshold holds on native Linux. The throughput bound
-  held exactly (4.01 s vs 3.9 s predicted) regardless.
-- **M2b lane ceiling at extreme fan-in** (Spike 4 S2): (10k, 50%, 100 ms)
-  runs at 4.9× M0 — a bounded-lane throughput ceiling with full drain and
-  a healthy 2.8 ms canary, i.e. queueing, not starvation. Judged PASS
-  against the SPEC decision table's actual bar ("without starving tasks").
+- **Blocking-call dispatch cost** (Spike 4 S2, re-scored): the naked
+  enter/exit pair is **~0.9 ms on BOTH tiers** — the sandbox's syscall-
+  interception theory was refuted by native Linux; the cost is intrinsic to
+  the single-caller handoff shape (P ping-pong through parked Ms + the
+  exitsyscall slow path). The ≤100 ns pre-registered threshold FAILS as
+  written; the design absorbs the number: the syswin path is reserved for
+  descriptor-flagged blocking callees where ~0.9 ms amortizes (every load
+  cell prices the design at 1.0–1.2× M0, up to 100 000 tasks). The M3
+  pool's park-backoff floor is the same ~0.9 ms — inside the 5 ms blocking
+  dispatch budget.
+- **M2b lane ceiling at extreme fan-in** (Spike 4 S2, sandbox): (10k, 50%,
+  100 ms) runs at 4.9× M0 — a bounded-lane throughput ceiling with full
+  drain and a healthy 2.8 ms canary, i.e. queueing, not starvation. On the
+  worker the same shape at 100k/50%/10ms lands at 1.18× (more lanes +
+  faster arrivals). Judged PASS against the SPEC decision table's actual
+  bar ("without starving tasks").
 
 ## What was cut
 

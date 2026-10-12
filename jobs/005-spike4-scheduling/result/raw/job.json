@@ -1,7 +1,7 @@
 {
   "job": "005-spike4-scheduling",
   "tier": "any",
-  "sha": "2945008a2efc96363f02d4bb57ffecbfc43ee261",
+  "sha": "4a672d731669a952ef10ac360796cbf41a2ca190",
   "repo": "https://github.com/limitlessprojects/Go-Hybrid.git",
   "gpu": false,
   "note": "Spike 4 second tier: the 100k-task blocking-load matrix on the Kaggle worker (4 cores, native Linux \u2014 also re-measures the enter/exit pair cost without the sandbox's intercepted syscalls). Thresholds pre-registered in spikes/spike4-scheduling/RESULTS.md.",
