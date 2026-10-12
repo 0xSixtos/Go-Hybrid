@@ -42,11 +42,18 @@ echo "=== M4 thread-per-call demo ==="
 go test ./spike4/ -count=1 -v -run 'TestM4ExhaustionDemo' > ../m4.out 2>&1 || { cat ../m4.out; exit 1; }
 grep -E "^(--- (PASS|FAIL)|ok|FAIL|.*spawning|.*spawned|.*spawn wall)" ../m4.out
 
-# 6. the load matrix (sandbox leg: 1k + 10k; worker leg adds 100k via env)
+# 6. the load matrix (sandbox leg: 1k + 10k; worker leg: anchor + 100k via env;
+#    the worker SKIPS the sandbox legs — the worker's own anchor cells carry the
+#    cross-tier comparison, and job 005's first run showed the duplicated legs
+#    cost ~20 min of worker time for data the anchors already provide)
 echo "=== load matrix ==="
 rm -f ../matrix.sandbox.jsonl ../matrix.race.jsonl ../matrix.worker.jsonl
-go test ./spike4/ -count=1 -v -run 'TestMatrixSandbox' -timeout 2400s > ../matrix.out 2>&1 || { cat ../matrix.out; exit 1; }
-grep -E "^(--- (PASS|FAIL)|ok|FAIL)|^ *matrix_test.go:" ../matrix.out | head -90
+if [ "${SPIKE4_WORKER:-0}" != "1" ]; then
+  go test ./spike4/ -count=1 -v -run 'TestMatrixSandbox' -timeout 2400s > ../matrix.out 2>&1 || { cat ../matrix.out; exit 1; }
+  grep -E "^(--- (PASS|FAIL)|ok|FAIL)|^ *matrix_test.go:" ../matrix.out | head -90
+else
+  : > ../matrix.out
+fi
 if [ "${SPIKE4_WORKER:-0}" = "1" ]; then
   go test ./spike4/ -count=1 -v -run 'TestMatrixWorker' -timeout 3000s >> ../matrix.out 2>&1 || { cat ../matrix.out; exit 1; }
   grep -E "^(--- (PASS|FAIL)|ok|FAIL)|^ *matrix_test.go:" ../matrix.out | tail -40

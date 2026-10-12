@@ -1,16 +1,16 @@
 # STATUS (for the human — 15 lines max)
 
-- Phase: 0 — research + feasibility spikes (Spikes 0/1/2/3/5 **done**, 4 & 6 next; no compiler code yet, by design)
-- Works (verified): Kaggle key stored as GitHub Actions secret + kaggle.yml — Actions can drive ALL 3 tiers (104 s end-to-end run green)
-- Works (verified): Spike 3 — owning-side handle tables: create/release 49.9 ns (0 allocs), get 0.84 ns, Rust-side resolve 14.1 ns, 100k-object dual-release storm green under `-race`
-- Works (verified): crossing REDESIGNED after a real crash — fast path runs shallow Rust on the caller's own goroutine stack behind a stackguard check (**2.42 ns**), deep path on bitmap-pooled 1 MiB guarded stacks (10k-deep recursion green)
-- Works (verified): Spike 5 — (T, error)↔Result via two-word HyResult (RAX:RDX): ok path 2.58 ns / **0 allocs**, sentinel errors 0 allocs, wrapped errors exactly 1 alloc, `errors.Is/As` identity survives, panic contract = SIGABRT at the Rust edge (never unwinds)
-- Finding: `runtime.Pinner` costs ~55 ns per pin/unpin pair (> cgo) — pre-registered fallback fired: copy small values at the boundary, pin only large buffers
-- Finding (hazards demonstrated): unpinned heap pointer read back as churn poison (UAF); captured stack pointer overwritten — raw pointers stay forbidden in safe mode
-- Works (verified): 2 research notes landed — runtime-hazards.md (all 9 SPEC §12 checklist items decided) + ownership-models.md (Spike 6 design: Polonius-style engine, rustc as CI oracle)
-- Security: ephemeral Kaggle JWTs found in 2 old job summaries → redacted; runner now masks secret-looking env values; CI scan catches JWT shapes
-- Infra lesson: never pipe job commands into head/tail (SIGPIPE kills the suite silently + masks exit codes) — job 003's first run was a false green; fixed
+- Phase: 0 — ALL SIX SPIKES DONE (Spike 4 worker tier + spike-report + G0 remain to close the phase)
+- Works (verified): Spike 6 — Tier-0 ownership is REAL for the MVP corpus: 10/10 target programs need **zero** lifetime annotations and **zero** `managed` (strictest reading); rustc = CI oracle only
+- Works (verified): Spike 4 sandbox — scheduling DECIDED: **two-tier blocking design** (entersyscallblock linkname trampoline, P-release canary-proven, + concurrency-sized bounded pool overflow)
+- Works (verified): M2b two-tier tracks M0 within **1.0–1.1×** on 14/15 load cells; zero deadlock/panic under `-race`; threads bounded by design
+- Works (verified): M3 pool drains at exactly the predicted concurrency bound (4.01 s vs 3.9 s) with **zero lost tickets** across every uncapped cell
+- Measured: naive blocking starves at **169×** (R4 closed); the canary goroutine itself stalls to 5.4 s under it
+- CRASH FINDING #2: uncapped syswin dies at ~718 threads — Go Ms never shrink + this environment's address-space wall (M4 hit the same wall independently) → the bridge owns a hard thread budget (50 ms sampler + admission gate)
+- Honest caveats on record: naked enter/exit pair ~0.53 ms on this syscall-intercepting sandbox (amortized in-load); M3 poll-latency overhead same-environment tax — job 005 re-measures both on native Linux + runs the 100k matrix
+- Recovery: sandbox was reset between sessions; repo re-cloned, toolchains re-pinned, Kaggle creds re-staged; GitHub secret verified intact server-side
+- Fixed: committed Makefile had spaces not tabs (every target was unrunnable); `make check` green again
 - Blocked: nothing
-- Top risk: R4 (crossing holds the P during foreign calls — Spike 4's question); R5 (Tier-0 ownership realism — Spike 6)
-- Next 3 actions: (1) Spike 4 scheduling/blocking load, (2) Spike 6 pseudo-Hybrid programs, (3) spike-report + G0
-- Last review gate: none yet (G0 pending Spikes 4 & 6)
+- Top risk: R6 (MVP scope) — R1–R5 all closed by spikes; worker-tier confirmation of Spike 4 in flight
+- Next 3 actions: (1) fetch job 005 (100k tier), (2) research/spike-report.md, (3) gates/G0.md + re-run build-vs-extend → Phase 1
+- Last review gate: G0 pending (all six spikes now have data)

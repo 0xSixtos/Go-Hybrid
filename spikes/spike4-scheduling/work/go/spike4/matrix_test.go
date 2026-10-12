@@ -7,6 +7,7 @@ package spike4
 
 import (
 	"os"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -33,6 +34,19 @@ func TestMain(m *testing.M) {
 	os.Exit(rc)
 }
 
+// matrixGC wraps a matrix test body: GC OFF during cells (a mark cycle
+// started mid-cell on the worker and gcAssistAlloc WEDGED the spawn loop —
+// every P was parked inside M1's nanosleeps so mark could not progress;
+// goroutine dump evidence in jobs/005's first run; recorded in RESULTS.md
+// as M1's third indictment), then an explicit GC between cells keeps the
+// heap bounded. Percent restored on exit.
+func matrixGC(t *testing.T, body func()) {
+	old := debug.SetGCPercent(-1)
+	defer debug.SetGCPercent(old)
+	body()
+	runtime.GC()
+}
+
 func outPath(defaultName string) string {
 	if p := os.Getenv("SPIKE4_OUT"); p != "" {
 		return p
@@ -48,6 +62,10 @@ func TestMatrixSandbox(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short mode")
 	}
+	matrixGC(t, func() { testMatrixSandboxBody(t) })
+}
+
+func testMatrixSandboxBody(t *testing.T) {
 	leg := os.Getenv("SPIKE4_MATRIX_LEG")
 	if leg == "" {
 		leg = "all"
@@ -101,6 +119,10 @@ func TestMatrixWorker(t *testing.T) {
 	// than sandbox (600) but still bounded; M2 fan-in overflows to the pool
 	os.Setenv("SPIKE4_THREAD_BUDGET", "2000")
 	hybridge4.ReloadEnvTunables()
+	matrixGC(t, func() { testMatrixWorkerBody(t) })
+}
+
+func testMatrixWorkerBody(t *testing.T) {
 	var rows []CellResult
 
 	// cross-tier anchor: same 3 cells as the sandbox 10k leg

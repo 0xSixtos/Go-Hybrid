@@ -243,9 +243,37 @@ costs that native Linux should collapse.
 
 ### Kaggle worker (4 cores / 30 GB, job 005)
 
-*(filled after the job returns; same commands, pool=256, budget=2000,
-SetMaxThreads(30000), 100k matrix + M4@5000 + the naked pair cost on
-native Linux)*
+**First submission (kernel v8, failed mid-run — two findings salvaged,
+both recorded):**
+
+1. **The thread wall is ENVIRONMENT-SPECIFIC.** The worker's cgroup
+   `pids.max = 38508`: the M4 demo spawned all 5000 detached threads with
+   ZERO failures (9.3 kB RSS/thread, 38.4 µs/thread, peak 5262 threads).
+   The sandbox's ~717-thread address-space wall does not exist on the
+   worker — confirming the bridge's derive-by-probe thread budget (the
+   50 ms sampler) as the right design: a hard-coded budget would have been
+   wrong on either tier.
+2. **The GC-assist wedge (M1's third indictment).** The run died in the
+   (10k, 50%, 100 ms) M1 cell: a GC mark cycle started mid-spawn, and
+   `gcAssistAlloc` BLOCKED the test goroutine's spawn loop for 43 minutes
+   because every P was parked inside M1's nanosleeps — mark could not
+   progress, allocation could not proceed, the cell's own watchdog could
+   not fire (it lives in the wedged goroutine). Evidence: the goroutine
+   dump (`runtime.gcAssistAlloc ← mallocgc ← runCell cell.go:186`).
+   On-stack blocking does not just starve throughput (169×) — it can
+   wedge allocation itself under GC pressure. The two-tier design (no P
+   held hostage) is structurally immune. Harness fix: GC disabled during
+   matrix cells (measurement-infrastructure, like the /proc fix — the
+   mechanisms are unchanged; the wedge is pre-recorded as M1 evidence).
+
+Race leg + canaries + worker M4 all PASSED on the worker before the wedge
+(race leg 13.9 s vs the sandbox's 51 s — native Linux, 4 cores).
+
+**Rerun (kernel v9):** worker leg only (the sandbox legs' duplication was
+~20 min of worker time for data the anchor cells already provide), GC
+controlled, pool=256, budget=2000. Results below.
+
+*(filled after the rerun returns)*
 
 ## Analysis & decision
 
