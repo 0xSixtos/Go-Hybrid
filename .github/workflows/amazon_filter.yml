@@ -1,0 +1,28 @@
+name: amazon-filter
+on:
+  workflow_dispatch:
+
+jobs:
+  filter:
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 7
+      fail-fast: false
+      matrix:
+        category: [Electronics, Cell_Phones_and_Accessories, Video_Games, Toys_and_Games, Clothing_Shoes_and_Jewelry, Home_and_Kitchen, Office_Products]
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install orjson requests
+      - run: python scripts/filter_reviews.py "${{ matrix.category }}" out
+        env:
+          SOURCE: hf
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agg-${{ matrix.category }}
+          path: out/
+          retention-days: 10
+          if-no-files-found: error
