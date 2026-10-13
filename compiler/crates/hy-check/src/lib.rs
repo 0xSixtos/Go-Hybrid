@@ -5,19 +5,19 @@
 //!
 //! Architecture (two passes per function, one flat file pass):
 //!   * `model.rs`   — the data model: TypeShape classification, bindings,
-//!                    moves/consumes, loans, the Checker accumulator.
+//!     moves/consumes, loans, the Checker accumulator.
 //!   * `walk.rs`    — Pass A: flattens a body into a source-ordered statement
-//!                    list with indices; records loop/managed extents (the
-//!                    non-lexical windows) and per-binding last-use indices;
-//!                    collects per-statement uses and calls (closures are
-//!                    skipped — the A5 perimeter).
+//!     list with indices; records loop/managed extents (the
+//!     non-lexical windows) and per-binding last-use indices;
+//!     collects per-statement uses and calls (closures are
+//!     skipped — the A5 perimeter).
 //!   * `shape.rs`   — lightweight shape inference from declared types and
-//!                    initializer expressions (NOT a type system).
+//!     initializer expressions (NOT a type system).
 //!   * `foreign.rs`— the builtin foreign-type + method-mode descriptor
-//!                    stubs (documented tech debt: replaced by generated
-//!                    boundary descriptors post-MVP).
+//!     stubs (documented tech debt: replaced by generated
+//!     boundary descriptors post-MVP).
 //!   * `sendability.rs` — A1c (O4 classes) at spawn/send sites + the O6
-//!                    `managed` suppression/lint (HYB-E8001).
+//!     `managed` suppression/lint (HYB-E8001).
 //!   * `freeze.rs`  — A1b/A7 (O5 freeze-after-move, O13 consume).
 //!   * `loans.rs`   — A2/A3/A6/LOAN-ESCAPE + the environment updates.
 //!   * this file    — Pass B: the per-statement driver and the verdict.
@@ -82,12 +82,17 @@ pub fn check_file(file: &File) -> CheckResult {
 
     let mut diags = ck.diags;
     diags.sort_by(|a, b| {
-        (a.span.start.line, a.span.start.col, a.span.end.line, a.span.end.col)
+        (
+            a.span.start.line,
+            a.span.start.col,
+            a.span.end.line,
+            a.span.end.col,
+        )
             .cmp(&(
                 b.span.start.line,
                 b.span.start.col,
                 b.span.end.line,
-                b.span.end.col
+                b.span.end.col,
             ))
     });
     let verdict = if diags.iter().any(|d| d.severity == Severity::Error) {
@@ -133,7 +138,10 @@ fn build_tables(ck: &mut Checker<'_>) {
                 }
                 ck.structs.insert(
                     s.name.clone(),
-                    s.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect(),
+                    s.fields
+                        .iter()
+                        .map(|f| (f.name.clone(), f.ty.clone()))
+                        .collect(),
                 );
             }
             Decl::Fn(f) => {
@@ -203,7 +211,11 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         // Calls (A2 loan windows, A7 consumes + arg lending). A for-loop
         // ITERATE expression's borrow calls get loop-extent loans: the
         // element views live across the whole loop body (O7).
-        if let Stmt::For { kind: ForKind::Iterate { expr, .. }, .. } = stmt {
+        if let Stmt::For {
+            kind: ForKind::Iterate { expr, .. },
+            ..
+        } = stmt
+        {
             let loop_end = flat.loop_end_of(idx);
             let mut calls = Vec::new();
             walk::expr_calls(expr, &mut calls);
@@ -222,7 +234,12 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         match stmt {
             Stmt::Local(l) => ck.process_local(&mut st, l, idx, managed),
 
-            Stmt::Assign { targets, op, values, span } => {
+            Stmt::Assign {
+                targets,
+                op,
+                values,
+                span,
+            } => {
                 ck.process_assign(&mut st, targets, *op, values, *span, idx);
             }
 
@@ -238,9 +255,18 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             // O4.0 check-site: the sent value (HYB-E3002). The parser flags
             // `ch <- move x` as `is_move: true` with a plain Ident value —
             // `implicit_move` routes it to the class-3 move handling.
-            Stmt::Send { chan, value, is_move, span } => {
+            Stmt::Send {
+                chan,
+                value,
+                is_move,
+                span,
+            } => {
                 let desc = if *is_move {
-                    format!("the move-send `{} <- move {}`", chan.render(), value.render())
+                    format!(
+                        "the move-send `{} <- move {}`",
+                        chan.render(),
+                        value.render()
+                    )
                 } else {
                     format!("the send `{} <- {}`", chan.render(), value.render())
                 };
@@ -257,14 +283,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     }
                 }
                 ForKind::Range { var, .. } => {
-                    ck.define_binding(
-                        &mut st,
-                        var,
-                        TypeShape::Primitive,
-                        None,
-                        false,
-                        managed,
-                    );
+                    ck.define_binding(&mut st, var, TypeShape::Primitive, None, false, managed);
                 }
                 ForKind::While { .. } | ForKind::Infinite => {}
             },
@@ -275,19 +294,14 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 for arm in arms {
                     match &arm.kind {
                         SelectArmKind::Send { chan, value } => {
-                            let desc =
-                                format!("the select-send `{} <- {}`", chan.render(), value.render());
+                            let desc = format!(
+                                "the select-send `{} <- {}`",
+                                chan.render(),
+                                value.render()
+                            );
                             let span = chan.span().to(value.span());
                             let vals: Vec<&Expr> = vec![value];
-                            ck.check_site(
-                                &mut st,
-                                span,
-                                "HYB-E3002",
-                                &vals,
-                                managed,
-                                &desc,
-                                false,
-                            );
+                            ck.check_site(&mut st, span, "HYB-E3002", &vals, managed, &desc, false);
                         }
                         SelectArmKind::Recv { names, .. } => {
                             for n in names {

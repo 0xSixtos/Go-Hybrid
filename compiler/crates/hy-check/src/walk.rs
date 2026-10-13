@@ -17,9 +17,7 @@
 
 use crate::model::as_addr_of;
 use hy_diag::Span;
-use hy_syntax::{
-    Block, CallArg, Expr, ForKind, InterpPart, Place, PlaceKind, SelectArmKind, Stmt,
-};
+use hy_syntax::{Block, CallArg, Expr, ForKind, InterpPart, Place, PlaceKind, SelectArmKind, Stmt};
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -43,9 +41,7 @@ pub(crate) struct FlatInfo<'a> {
 impl<'a> FlatInfo<'a> {
     /// Is statement `idx` lexically inside a `managed` block (O6.1)?
     pub(crate) fn in_managed(&self, idx: usize) -> bool {
-        self.managed_end
-            .iter()
-            .any(|(&k, &v)| k < idx && idx <= v)
+        self.managed_end.iter().any(|(&k, &v)| k < idx && idx <= v)
     }
 
     /// The loop-extent end for a for-statement at `for_idx`.
@@ -83,7 +79,12 @@ fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt) {
     }
 
     match stmt {
-        Stmt::If { init, then, otherwise, .. } => {
+        Stmt::If {
+            init,
+            then,
+            otherwise,
+            ..
+        } => {
             if let Some(i) = init {
                 walk_one(out, i);
             }
@@ -140,7 +141,9 @@ pub(crate) fn own_uses(stmt: &Stmt, out: &mut Vec<Use>) {
                 expr_uses(v, out);
             }
         }
-        Stmt::Assign { targets, values, .. } => {
+        Stmt::Assign {
+            targets, values, ..
+        } => {
             for t in targets {
                 place_uses(t, out);
             }
@@ -315,7 +318,9 @@ pub(crate) fn own_calls<'a>(stmt: &'a Stmt, out: &mut Vec<CallRef<'a>>) {
                 expr_calls(v, out);
             }
         }
-        Stmt::Assign { targets, values, .. } => {
+        Stmt::Assign {
+            targets, values, ..
+        } => {
             for t in targets {
                 if let PlaceKind::Index { index, .. } = &t.kind {
                     expr_calls(index, out);
@@ -381,8 +386,12 @@ pub(crate) fn own_calls<'a>(stmt: &'a Stmt, out: &mut Vec<CallRef<'a>>) {
 pub(crate) fn expr_calls<'e>(expr: &'e Expr, out: &mut Vec<CallRef<'e>>) {
     match expr {
         Expr::Call { callee, args, span } => {
-            out.push(CallRef { callee: &**callee, args, span: *span });
-            expr_calls(&**callee, out);
+            out.push(CallRef {
+                callee,
+                args,
+                span: *span,
+            });
+            expr_calls(callee, out);
             for a in args {
                 expr_calls(&a.value, out);
             }

@@ -20,19 +20,13 @@ impl<'a> Checker<'a> {
         match ty {
             TypeExpr::Named { name, .. } => self.named_shape(name),
             TypeExpr::Pointer { to, .. } => TypeShape::Pointer(Box::new(self.shape_of_type(to))),
-            TypeExpr::Slice { elem, .. } => {
-                TypeShape::Slice(Box::new(self.shape_of_type(elem)))
-            }
-            TypeExpr::Array { elem, .. } => {
-                TypeShape::Array(Box::new(self.shape_of_type(elem)))
-            }
+            TypeExpr::Slice { elem, .. } => TypeShape::Slice(Box::new(self.shape_of_type(elem))),
+            TypeExpr::Array { elem, .. } => TypeShape::Array(Box::new(self.shape_of_type(elem))),
             TypeExpr::Map { key, value, .. } => TypeShape::Map(
                 Box::new(self.shape_of_type(key)),
                 Box::new(self.shape_of_type(value)),
             ),
-            TypeExpr::Chan { elem, .. } => {
-                TypeShape::Chan(Box::new(self.shape_of_type(elem)))
-            }
+            TypeExpr::Chan { elem, .. } => TypeShape::Chan(Box::new(self.shape_of_type(elem))),
             // option[T] of sendable classes is class 4 — modeled permissively
             // as Unknown (the corpus never sends one).
             TypeExpr::Option { .. } | TypeExpr::Fn { .. } => TypeShape::Unknown,
@@ -41,10 +35,10 @@ impl<'a> Checker<'a> {
 
     fn named_shape(&self, name: &str) -> TypeShape {
         match name {
-            "int" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64"
-            | "u8" | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64"
-            | "usize" | "isize" | "uintptr" | "float32" | "float64" | "f32" | "f64"
-            | "bool" | "byte" | "rune" | "char" => TypeShape::Primitive,
+            "int" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
+            | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "usize"
+            | "isize" | "uintptr" | "float32" | "float64" | "f32" | "f64" | "bool" | "byte"
+            | "rune" | "char" => TypeShape::Primitive,
             "string" => TypeShape::Str,
             _ => {
                 if let Some(shape) = foreign::foreign_named_type(name) {
@@ -206,7 +200,9 @@ impl<'a> Checker<'a> {
     }
 
     fn make_shape(&self, args: &[CallArg]) -> TypeShape {
-        let Some(first) = args.first() else { return TypeShape::Unknown };
+        let Some(first) = args.first() else {
+            return TypeShape::Unknown;
+        };
         match &first.value {
             // The parser renders a type in expression position as a literal
             // node carrying the TypeExpr in `.ty` (`make(chan bool, n)` →
@@ -266,16 +262,20 @@ impl<'a> Checker<'a> {
     /// (literals, aliases, local-fn results). `None` = use the shape render.
     pub(crate) fn ty_of_expr(&self, st: &FnState, expr: &Expr) -> Option<TypeExpr> {
         match expr {
-            Expr::Ident { name, .. } => {
-                self.lookup_binding(st, name).and_then(|b| b.ty.clone())
-            }
+            Expr::Ident { name, .. } => self.lookup_binding(st, name).and_then(|b| b.ty.clone()),
             Expr::StructLit { ty, .. } => ty.clone(),
-            Expr::MapLit { key, value, span, .. } => Some(TypeExpr::Map {
+            Expr::MapLit {
+                key, value, span, ..
+            } => Some(TypeExpr::Map {
                 key: key.clone(),
                 value: value.clone(),
                 span: *span,
             }),
-            Expr::SliceLit { elem: Some(e), span, .. } => Some(TypeExpr::Slice {
+            Expr::SliceLit {
+                elem: Some(e),
+                span,
+                ..
+            } => Some(TypeExpr::Slice {
                 elem: e.clone(),
                 span: *span,
             }),

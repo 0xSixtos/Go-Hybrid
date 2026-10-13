@@ -10,9 +10,14 @@
 
 use hy_syntax::*;
 
-use super::{go_quote, is_package_root, special_member, to_go_name, BindingKind, Emitter, EmitError, MemberSpecial};
+use super::{
+    go_quote, is_package_root, special_member, to_go_name, BindingKind, EmitError, Emitter,
+    MemberSpecial,
+};
 
-use super::shapes::{lookup_conversion, lookup_member, lookup_rust_crate, RustCrateDesc, MemberKind};
+use super::shapes::{
+    lookup_conversion, lookup_member, lookup_rust_crate, MemberKind, RustCrateDesc,
+};
 
 /// Operator precedence (Go tiers; higher binds tighter).
 fn bin_prec(op: BinOp) -> u8 {
@@ -53,12 +58,16 @@ impl Emitter {
     ) -> Result<String, EmitError> {
         if let Some(exp) = expected {
             match e {
-                Expr::StructLit { ty: None, fields, .. } => {
+                Expr::StructLit {
+                    ty: None, fields, ..
+                } => {
                     let head = self.type_text(exp);
                     let body = self.field_inits(fields)?;
                     return Ok(format!("{}{{{}}}", head, body)); // atomic head
                 }
-                Expr::SliceLit { elem: None, items, .. } => {
+                Expr::SliceLit {
+                    elem: None, items, ..
+                } => {
                     if let TypeExpr::Slice { elem, .. } = exp {
                         let head = format!("[]{}", self.type_text(elem));
                         let mut parts = Vec::new();
@@ -123,10 +132,11 @@ impl Emitter {
                 if let Some(t) = self.try_temps.get(&(span.start.line, span.start.col)) {
                     return Ok(t.clone());
                 }
-                Err(EmitError::unsupported(format!(
+                Err(EmitError::unsupported(
                     "`?` outside a binding position — E3 desugars binding-position and \
                      hoisted-expression `?` only"
-                )))
+                        .to_string(),
+                ))
             }
 
             Expr::Receive { chan, .. } => {
@@ -192,7 +202,12 @@ impl Emitter {
                 Ok(format!("{}{{{}}}", head, parts.join(", ")))
             }
 
-            Expr::MapLit { key, value, entries, .. } => {
+            Expr::MapLit {
+                key,
+                value,
+                entries,
+                ..
+            } => {
                 let head = format!("map[{}]{}", self.type_text(key), self.type_text(value));
                 let mut parts = Vec::new();
                 for (k, v) in entries {
@@ -212,16 +227,17 @@ impl Emitter {
                 // Typed params in the source win; a count mismatch errors.
                 let conv = self.pending_fnlit_conv.take(); // only the params consume it
                 let mut untyped_params: Vec<usize> = Vec::new();
-                let params: Vec<Param> = if let Some(conv) = conv {
-                    if params.len() != conv.params.len() {
-                        return Err(EmitError::unsupported(format!(
+                let params: Vec<Param> =
+                    if let Some(conv) = conv {
+                        if params.len() != conv.params.len() {
+                            return Err(EmitError::unsupported(format!(
                             "function literal takes {} params; the {} target's signature has {}",
                             params.len(),
                             conv.go,
                             conv.params.len()
                         )));
-                    }
-                    params
+                        }
+                        params
                         .iter()
                         .zip(conv.params)
                         .enumerate()
@@ -248,9 +264,9 @@ impl Emitter {
                             }
                         })
                         .collect()
-                } else {
-                    params.clone()
-                };
+                    } else {
+                        params.clone()
+                    };
                 let rendered_params = params
                     .iter()
                     .map(|p| format!("{} {}", p.name, self.type_text(&p.ty)))
@@ -331,9 +347,7 @@ impl Emitter {
     /// `"total={total}"` → `fmt.Sprintf("total=%v", total)`.
     /// All-literal interps stay plain strings (no Sprintf, no allocation).
     pub fn emit_interp(&mut self, parts: &[InterpPart]) -> Result<String, EmitError> {
-        let has_expr = parts
-            .iter()
-            .any(|p| matches!(p, InterpPart::Expr(_)));
+        let has_expr = parts.iter().any(|p| matches!(p, InterpPart::Expr(_)));
         if !has_expr {
             let mut s = String::new();
             for p in parts {
@@ -593,8 +607,10 @@ impl Emitter {
             let t = self.emit_call_arg(a)?;
             let wants_ptr = ptr_params.get(i).copied().unwrap_or(false);
             let already_ptr = matches!(a.value, Expr::AddrOf { .. });
-            let addressable =
-                matches!(a.value, Expr::Ident { .. } | Expr::Field { .. } | Expr::Index { .. });
+            let addressable = matches!(
+                a.value,
+                Expr::Ident { .. } | Expr::Field { .. } | Expr::Index { .. }
+            );
             if wants_ptr && !already_ptr && addressable {
                 parts.push(format!("&{}", t));
             } else {
@@ -620,11 +636,24 @@ impl Emitter {
             return Err(EmitError::unsupported("`make` with no type argument"));
         };
         let ty_text = match &first.value {
-            Expr::StructLit { ty: Some(t), fields, .. } if fields.is_empty() => self.type_text(t),
-            Expr::SliceLit { elem: Some(t), items, .. } if items.is_empty() => {
+            Expr::StructLit {
+                ty: Some(t),
+                fields,
+                ..
+            } if fields.is_empty() => self.type_text(t),
+            Expr::SliceLit {
+                elem: Some(t),
+                items,
+                ..
+            } if items.is_empty() => {
                 format!("[]{}", self.type_text(t))
             }
-            Expr::MapLit { key, value, entries, .. } if entries.is_empty() => {
+            Expr::MapLit {
+                key,
+                value,
+                entries,
+                ..
+            } if entries.is_empty() => {
                 format!("map[{}]{}", self.type_text(key), self.type_text(value))
             }
             other => {
@@ -854,7 +883,12 @@ impl Emitter {
                 }
                 call_args.push(format!("{:?}", fmt_str));
                 call_args.extend(interp_args);
-                return Ok(format!("{}.{}({})", pkg, to_go_name(name), call_args.join(", ")));
+                return Ok(format!(
+                    "{}.{}({})",
+                    pkg,
+                    to_go_name(name),
+                    call_args.join(", ")
+                ));
             }
         }
 
@@ -862,7 +896,12 @@ impl Emitter {
         for a in args {
             parts.push(self.emit_call_arg(a)?);
         }
-        Ok(format!("{}.{}({})", pkg, to_go_name(name), parts.join(", ")))
+        Ok(format!(
+            "{}.{}({})",
+            pkg,
+            to_go_name(name),
+            parts.join(", ")
+        ))
     }
 }
 

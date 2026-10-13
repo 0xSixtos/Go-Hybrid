@@ -16,8 +16,21 @@ use crate::model::TypeShape;
 /// Foreign package roots recognized without an import line (the corpus uses
 /// `strings`/`fmt` freely; imports add to this set at runtime).
 pub(crate) const BUILTIN_PACKAGES: &[&str] = &[
-    "serde_json", "flate2", "atomic", "strings", "fmt", "http", "httptest", "sync", "net",
-    "io", "os", "time", "sort", "strconv", "errors",
+    "serde_json",
+    "flate2",
+    "atomic",
+    "strings",
+    "fmt",
+    "http",
+    "httptest",
+    "sync",
+    "net",
+    "io",
+    "os",
+    "time",
+    "sort",
+    "strconv",
+    "errors",
 ];
 
 /// How a call uses its receiver / arguments (O7 handle modes + O13 consume).
@@ -86,9 +99,7 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("serde_json", "to_string_pretty") | ("serde_json", "string") | ("strings", "join") => {
             TypeShape::Str
         }
-        ("strings", "split") | ("strings", "fields") => {
-            TypeShape::Slice(Box::new(TypeShape::Str))
-        }
+        ("strings", "split") | ("strings", "fields") => TypeShape::Slice(Box::new(TypeShape::Str)),
         ("http", "new_serve_mux") => TypeShape::ForeignOpaque("http.serve_mux".into()),
         ("http", "handler") => TypeShape::ForeignOpaque("http.handler".into()),
         _ if pkg == "atomic" => TypeShape::Primitive,
@@ -104,9 +115,10 @@ pub(crate) fn method_mode(recv_type: &str, method: &str) -> CallMode {
         return CallMode::Safe;
     }
     match (recv_type, method) {
-        ("serde_json.value" | "serde_json.view", "array" | "get" | "int" | "string" | "to_string_pretty") => {
-            CallMode::Borrow
-        }
+        (
+            "serde_json.value" | "serde_json.view",
+            "array" | "get" | "int" | "string" | "to_string_pretty",
+        ) => CallMode::Borrow,
         ("serde_json.value" | "serde_json.view", "set" | "remove") => CallMode::Mutate,
         ("flate2.writer", "write") => CallMode::Mutate,
         ("flate2.writer", "finish") => CallMode::Consume,

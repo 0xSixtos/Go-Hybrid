@@ -59,7 +59,10 @@ fn main() -> ExitCode {
             eprintln!("  hyb build <file.hy> -o <bin-path> [--emit-go]");
             eprintln!("  hyb bench-overhead");
             eprintln!();
-            eprintln!("build pins: {} / rust {} (HYB-E9001 on drift)", PINNED_GO, PINNED_RUST);
+            eprintln!(
+                "build pins: {} / rust {} (HYB-E9001 on drift)",
+                PINNED_GO, PINNED_RUST
+            );
             ExitCode::from(2)
         }
     }
@@ -76,7 +79,11 @@ fn cmd_explain(args: &[String]) -> ExitCode {
             ExitCode::SUCCESS
         }
         None => {
-            eprintln!("unknown diagnostic code: {} (registry has {} codes)", code, hy_diag::Registry::global().entries().len());
+            eprintln!(
+                "unknown diagnostic code: {} (registry has {} codes)",
+                code,
+                hy_diag::Registry::global().entries().len()
+            );
             ExitCode::from(2)
         }
     }
@@ -123,18 +130,33 @@ fn cmd_check(args: &[String]) -> ExitCode {
 
     // check
     let result = hy_check::check_file(&ast);
-    let errors = result.diagnostics.iter().filter(|d| d.severity == hy_diag::Severity::Error).count();
-    let warnings = result.diagnostics.iter().filter(|d| d.severity == hy_diag::Severity::Warning).count();
+    let errors = result
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == hy_diag::Severity::Error)
+        .count();
+    let warnings = result
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == hy_diag::Severity::Warning)
+        .count();
     let summary = hy_diag::CheckSummary {
         file: file.clone(),
         verdict: result.verdict.as_str().to_string(),
         errors,
         warnings,
-        managed: if report_managed { Some(result.managed.clone()) } else { None },
+        managed: if report_managed {
+            Some(result.managed.clone())
+        } else {
+            None
+        },
     };
 
     if json {
-        println!("{}", hy_diag::check_output_json(&result.diagnostics, &summary));
+        println!(
+            "{}",
+            hy_diag::check_output_json(&result.diagnostics, &summary)
+        );
     } else {
         for d in &result.diagnostics {
             println!("{}", d.render_head());
@@ -253,7 +275,10 @@ fn cmd_build(args: &[String]) -> ExitCode {
                 .count(),
             managed: None,
         };
-        println!("{}", hy_diag::check_output_json(&result.diagnostics, &summary));
+        println!(
+            "{}",
+            hy_diag::check_output_json(&result.diagnostics, &summary)
+        );
         for d in &result.diagnostics {
             println!("{}", d.render_head());
         }
@@ -329,10 +354,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
     } else {
         match build_with_bridge(go_bin, &out_path, &go_src, &bindings) {
             Ok(()) => {
-                println!(
-                    "built {} (go {}, bridge: hyrt)",
-                    out_path, PINNED_GO
-                );
+                println!("built {} (go {}, bridge: hyrt)", out_path, PINNED_GO);
                 ExitCode::SUCCESS
             }
             Err(BuildError::Tool(msg)) => {
@@ -438,7 +460,11 @@ fn cmd_build_package(
         "package {} ready at {} (bindings: {})",
         pkg_name,
         od.display(),
-        if bindings.is_empty() { "none".to_string() } else { bindings.join(", ") }
+        if bindings.is_empty() {
+            "none".to_string()
+        } else {
+            bindings.join(", ")
+        }
     );
     ExitCode::SUCCESS
 }
@@ -469,9 +495,9 @@ fn ensure_staticlib(rt: &std::path::Path) -> Result<std::path::PathBuf, BuildErr
         if let Ok(t) = std::env::var("CARGO_TARGET_DIR") {
             cargo.env("CARGO_TARGET_DIR", t);
         }
-        let out = cargo.output().map_err(|e| {
-            BuildError::Tool(format!("running cargo build (hyrt): {}", e))
-        })?;
+        let out = cargo
+            .output()
+            .map_err(|e| BuildError::Tool(format!("running cargo build (hyrt): {}", e)))?;
         if !out.status.success() {
             return Err(BuildError::Tool(format!(
                 "cargo build (hyrt) failed:\n{}{}",
@@ -501,9 +527,11 @@ fn runtime_dir() -> Result<std::path::PathBuf, BuildError> {
     let p = std::path::Path::new(manifest)
         .join("../../../runtime")
         .canonicalize()
-        .map_err(|_| BuildError::Tool(
-            "runtime/ not found — set HYB_RUNTIME_DIR to the repo's runtime directory".into(),
-        ))?;
+        .map_err(|_| {
+            BuildError::Tool(
+                "runtime/ not found — set HYB_RUNTIME_DIR to the repo's runtime directory".into(),
+            )
+        })?;
     Ok(p)
 }
 
@@ -543,14 +571,13 @@ fn build_with_bridge(
             .map(|d| d.subsec_nanos())
             .unwrap_or(0)
     ));
-    std::fs::create_dir_all(ws.join("lib")).map_err(|e| {
-        BuildError::Tool(format!("creating workspace {}: {}", ws.display(), e))
-    })?;
+    std::fs::create_dir_all(ws.join("lib"))
+        .map_err(|e| BuildError::Tool(format!("creating workspace {}: {}", ws.display(), e)))?;
 
     let run = |mut c: Command, what: &str| -> Result<String, BuildError> {
-        let out = c.output().map_err(|e| {
-            BuildError::Tool(format!("running {}: {}", what, e))
-        })?;
+        let out = c
+            .output()
+            .map_err(|e| BuildError::Tool(format!("running {}: {}", what, e)))?;
         if out.status.success() {
             Ok(String::from_utf8_lossy(&out.stdout).to_string())
         } else {
@@ -566,14 +593,16 @@ fn build_with_bridge(
     // 1. The hyrt staticlib (skip when fresh — mtime of the newest source).
     let lib = ws.join("lib/libhyrt.a");
     let crate_dir = rt.join("rust/hyrt");
-    let lib_fresh = std::fs::metadata(&lib).is_ok() &&
-        newest_mtime(&crate_dir).map(|src_t| {
-            std::fs::metadata(&lib)
-                .and_then(|l| l.modified())
-                .ok()
-                .map(|lib_t| lib_t >= src_t)
-                .unwrap_or(false)
-        }).unwrap_or(false);
+    let lib_fresh = std::fs::metadata(&lib).is_ok()
+        && newest_mtime(&crate_dir)
+            .map(|src_t| {
+                std::fs::metadata(&lib)
+                    .and_then(|l| l.modified())
+                    .ok()
+                    .map(|lib_t| lib_t >= src_t)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
     if !lib_fresh {
         let mut cargo = Command::new(cargo_bin());
         cargo
@@ -601,11 +630,8 @@ fn build_with_bridge(
     }
 
     // 2. Workspace assembly.
-    std::fs::write(
-        ws.join("go.mod"),
-        "module hybrid.program\n\ngo 1.26\n",
-    )
-    .map_err(|e| BuildError::Tool(format!("writing go.mod: {}", e)))?;
+    std::fs::write(ws.join("go.mod"), "module hybrid.program\n\ngo 1.26\n")
+        .map_err(|e| BuildError::Tool(format!("writing go.mod: {}", e)))?;
     std::fs::write(ws.join("main.go"), go_src)
         .map_err(|e| BuildError::Tool(format!("writing main.go: {}", e)))?;
     let copy_pkg = |name: &str| -> Result<(), BuildError> {
@@ -619,9 +645,8 @@ fn build_with_bridge(
             let entry = entry.map_err(|e| BuildError::Tool(format!("readdir: {}", e)))?;
             let p = entry.path();
             if p.is_file() {
-                std::fs::copy(&p, dst.join(entry.file_name())).map_err(|e| {
-                    BuildError::Tool(format!("copying {}: {}", p.display(), e))
-                })?;
+                std::fs::copy(&p, dst.join(entry.file_name()))
+                    .map_err(|e| BuildError::Tool(format!("copying {}: {}", p.display(), e)))?;
             }
         }
         Ok(())
@@ -637,16 +662,18 @@ fn build_with_bridge(
         .current_dir(&ws)
         .env("GOFLAGS", "-p=2")
         .env("CGO_ENABLED", "1");
-    let out = gb.output().map_err(|e| {
-        BuildError::Tool(format!("running go build (workspace): {}", e))
-    })?;
+    let out = gb
+        .output()
+        .map_err(|e| BuildError::Tool(format!("running go build (workspace): {}", e)))?;
     if out.status.success() {
         let _ = std::fs::remove_dir_all(&ws);
         Ok(())
     } else {
         // Keep the workspace for diagnosis; say where.
         eprintln!("(workspace kept at {} for diagnosis)", ws.display());
-        Err(BuildError::Go(String::from_utf8_lossy(&out.stderr).to_string()))
+        Err(BuildError::Go(
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        ))
     }
 }
 
@@ -712,17 +739,16 @@ fn check_toolchain_pins(file: &str) -> Option<Diagnostic> {
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
     if let Some(v) = rust_out {
-        let found = v
-            .split_whitespace()
-            .nth(1)
-            .unwrap_or("")
-            .to_string();
+        let found = v.split_whitespace().nth(1).unwrap_or("").to_string();
         if found != PINNED_RUST {
             return Some(Diagnostic::error(
                 "HYB-E9001",
                 file,
                 span,
-                format!("toolchain mismatch: found rustc {}, pinned {}", found, PINNED_RUST),
+                format!(
+                    "toolchain mismatch: found rustc {}, pinned {}",
+                    found, PINNED_RUST
+                ),
             ));
         }
     }
@@ -887,16 +913,17 @@ fn cmd_bench_overhead() -> ExitCode {
         PINNED_GO, PINNED_RUST
     );
     let go_bin = go_bin();
-    let out = std::env::temp_dir().join(format!(
-        "hyb-bench-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0)
-    ))
-    .to_string_lossy()
-    .to_string();
+    let out = std::env::temp_dir()
+        .join(format!(
+            "hyb-bench-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ))
+        .to_string_lossy()
+        .to_string();
     if let Err(e) = build_with_bridge(go_bin, &out, BENCH_MAIN, &["overheadbench", "jsonbinding"]) {
         match e {
             BuildError::Tool(m) => eprintln!("error: {}", m),
@@ -954,9 +981,15 @@ fn cmd_bench_overhead() -> ExitCode {
     println!("    shipping crossing {:>7.2} ns/call  (deep path: {} crossings — the pooled guarded stack)", r.a_nop, r.a_deep);
     println!("  scenario B — GROWN stack (headroom > 4096 B: the fast path's threshold):");
     println!("    go-call floor     {:>7.2} ns/call", r.b_floor);
-    println!("    raw fast tramp    {:>7.2} ns/call  (in-trampoline guard, no Go-wrapper retry)", r.b_raw);
+    println!(
+        "    raw fast tramp    {:>7.2} ns/call  (in-trampoline guard, no Go-wrapper retry)",
+        r.b_raw
+    );
     println!("    shipping crossing {:>7.2} ns/call  (Cross1; deepcount frozen at {} — fast path proven)", r.b_nop, r.b_deep);
-    println!("    marginal delta    {:>7.2} ns/call  (the boundary's cost over a Go call)", r.b_delta);
+    println!(
+        "    marginal delta    {:>7.2} ns/call  (the boundary's cost over a Go call)",
+        r.b_delta
+    );
     println!("  binding-newobject   {:>7.2} ns/call  (context: real binding call, Rust-side handle alloc)", r.obj);
     println!("  budget              {:>7.2} ns/call  (SPEC §6 hypothesis; spike-1: 2.82 ns sandbox / 4.36 ns worker on the FIXED-stack prototype)", budget);
     println!();
@@ -975,4 +1008,3 @@ fn cmd_bench_overhead() -> ExitCode {
         ExitCode::FAILURE
     }
 }
-

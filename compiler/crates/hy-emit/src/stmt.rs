@@ -4,14 +4,19 @@ use hy_syntax::*;
 
 use super::{is_package_root, to_go_name, BindingKind, EmitError, Emitter};
 
-use super::shapes::lookup_conversion;
 use super::expr::ATOM;
+use super::shapes::lookup_conversion;
 
 impl Emitter {
     pub fn emit_stmt(&mut self, s: &Stmt) -> Result<(), EmitError> {
         match s {
             Stmt::Local(l) => self.emit_local(l),
-            Stmt::Assign { targets, op, values, .. } => self.emit_assign(targets, *op, values),
+            Stmt::Assign {
+                targets,
+                op,
+                values,
+                ..
+            } => self.emit_assign(targets, *op, values),
             Stmt::Expr { expr, .. } => {
                 // A zero-result call with `?` IS its own statement (Batch I):
                 // the hoist emits the call + propagation — no value temp, so
@@ -29,7 +34,7 @@ impl Emitter {
                 self.push(&text);
                 Ok(())
             }
-            Stmt::Send { chan, value, is_move: _, .. } => {
+            Stmt::Send { chan, value, .. } => {
                 // `move` markers drop here: ownership transfer is a CHECKER
                 // concept; Go sends the value either way.
                 let ch = self.emit_expr(chan, 0)?;
@@ -37,9 +42,13 @@ impl Emitter {
                 self.push(&format!("{} <- {}", ch, v));
                 Ok(())
             }
-            Stmt::If { init, cond, then, otherwise, .. } => {
-                self.emit_if(init.as_deref(), cond, then, otherwise.as_deref())
-            }
+            Stmt::If {
+                init,
+                cond,
+                then,
+                otherwise,
+                ..
+            } => self.emit_if(init.as_deref(), cond, then, otherwise.as_deref()),
             Stmt::For { kind, body, .. } => self.emit_for(kind, body),
             Stmt::Return { values, .. } => self.emit_return(values),
             Stmt::Task { callee, args, .. } => {
@@ -56,7 +65,9 @@ impl Emitter {
             Stmt::Managed { body, .. } => {
                 // The escape hatch emits a bare block. The audit marker stays
                 // greppable in the generated source.
-                self.push("{ // managed (unchecked share — audited via hyb check --report-managed)");
+                self.push(
+                    "{ // managed (unchecked share — audited via hyb check --report-managed)",
+                );
                 self.emit_block_body(&body.stmts)?;
                 self.push("}");
                 Ok(())
@@ -169,9 +180,12 @@ impl Emitter {
                 return Ok(());
             }
             LocalKind::Const => {
-                let value = self.emit_expr(l.values.first().ok_or_else(|| {
-                    EmitError::unsupported("`const` without an initializer")
-                })?, 0)?;
+                let value = self.emit_expr(
+                    l.values
+                        .first()
+                        .ok_or_else(|| EmitError::unsupported("`const` without an initializer"))?,
+                    0,
+                )?;
                 let names = l.names.join(", ");
                 match &l.ty {
                     Some(t) => {
@@ -395,9 +409,7 @@ impl Emitter {
         };
         match callee {
             // rust-crate calls: the descriptor's results field.
-            Expr::Field { base, name, .. }
-                if matches!(base.as_ref(), Expr::Ident { .. }) =>
-            {
+            Expr::Field { base, name, .. } if matches!(base.as_ref(), Expr::Ident { .. }) => {
                 if let Expr::Ident { name: pkg, .. } = base.as_ref() {
                     if is_package_root(pkg) {
                         if let Some(desc) = super::shapes::lookup_rust_crate(pkg) {
@@ -414,8 +426,8 @@ impl Emitter {
                 if let Some(bt) = self.type_of_expr(base) {
                     if let Some(m) = super::shapes::lookup_member(bt, name) {
                         if m.kind == super::shapes::MemberKind::Method {
-                            let (n, e) = super::shapes::lookup_method_results(bt, name)
-                                .unwrap_or((1, true));
+                            let (n, e) =
+                                super::shapes::lookup_method_results(bt, name).unwrap_or((1, true));
                             return Some((n as usize, e));
                         }
                     }
@@ -466,8 +478,18 @@ impl Emitter {
         //     httptest.get(mux, path)?` expands to the in-process recorder
         //     dance. The only error source is NewRequest; the `?` shape
         //     (E6 main closure vs E11 handler) governs its propagation. ---
-        if let Expr::Call { callee, args, span: _ } = call {
-            if let Expr::Field { base, name, span: _ } = callee.as_ref() {
+        if let Expr::Call {
+            callee,
+            args,
+            span: _,
+        } = call
+        {
+            if let Expr::Field {
+                base,
+                name,
+                span: _,
+            } = callee.as_ref()
+            {
                 if let Expr::Ident { name: pkg, .. } = base.as_ref() {
                     if *pkg == "httptest" && (*name == "get" || *name == "post") {
                         return self.emit_httptest_get(l, args, name);
@@ -530,7 +552,12 @@ impl Emitter {
     /// mux.ServeHTTP(hyRec0, hyReq0)
     /// code, body := hyRec0.Code, hyRec0.Body.String()
     /// ```
-    fn emit_httptest_get(&mut self, l: &LocalDecl, args: &[CallArg], verb: &str) -> Result<(), EmitError> {
+    fn emit_httptest_get(
+        &mut self,
+        l: &LocalDecl,
+        args: &[CallArg],
+        verb: &str,
+    ) -> Result<(), EmitError> {
         if args.len() != 2 {
             return Err(EmitError::unsupported(format!(
                 "httptest.{} takes (handler, path)",
@@ -791,7 +818,13 @@ impl Emitter {
         self.emit_block_body(&then.stmts)?;
         match otherwise {
             None => self.push("}"),
-            Some(Stmt::If { init, cond, then, otherwise, .. }) => {
+            Some(Stmt::If {
+                init,
+                cond,
+                then,
+                otherwise,
+                ..
+            }) => {
                 self.push_raw("} else ");
                 self.emit_if_at(init.as_deref(), cond, then, otherwise.as_deref(), false)?;
             }
@@ -862,8 +895,15 @@ impl Emitter {
         let label_prefix = if needs_label { "hyLoop: " } else { "" };
         let head = match kind {
             ForKind::Infinite => format!("{}for {{", label_prefix),
-            ForKind::While { cond } => format!("{}for {} {{", label_prefix, self.emit_expr(cond, 0)?),
-            ForKind::Range { var, lo, hi, inclusive } => {
+            ForKind::While { cond } => {
+                format!("{}for {} {{", label_prefix, self.emit_expr(cond, 0)?)
+            }
+            ForKind::Range {
+                var,
+                lo,
+                hi,
+                inclusive,
+            } => {
                 let lo_t = self.emit_expr(lo, 0)?;
                 let hi_t = self.emit_expr(hi, 0)?;
                 let op = if *inclusive { "<=" } else { "<" };
@@ -954,10 +994,20 @@ impl Emitter {
     fn stmt_has_loop_break(&self, s: &Stmt) -> bool {
         match s {
             Stmt::Break { label: Some(_), .. } | Stmt::Continue { label: Some(_), .. } => true,
-            Stmt::If { init, then, otherwise, .. } => {
-                init.as_ref().map(|i| self.stmt_has_loop_break(i)).unwrap_or(false)
+            Stmt::If {
+                init,
+                then,
+                otherwise,
+                ..
+            } => {
+                init.as_ref()
+                    .map(|i| self.stmt_has_loop_break(i))
+                    .unwrap_or(false)
                     || self.block_has_loop_break(then)
-                    || otherwise.as_ref().map(|o| self.stmt_has_loop_break(o)).unwrap_or(false)
+                    || otherwise
+                        .as_ref()
+                        .map(|o| self.stmt_has_loop_break(o))
+                        .unwrap_or(false)
             }
             Stmt::For { .. } => false, // nested loop labels itself
             Stmt::Block { block, .. } | Stmt::Managed { body: block, .. } => {
@@ -1049,7 +1099,11 @@ impl Emitter {
             while vs.len() < zeros.len() {
                 let i = vs.len();
                 let z = &zeros[i];
-                vs.push(if z.is_empty() { "nil".to_string() } else { z.clone() });
+                vs.push(if z.is_empty() {
+                    "nil".to_string()
+                } else {
+                    z.clone()
+                });
             }
         }
         self.push(&format!("return {}", vs.join(", ")));
@@ -1093,9 +1147,10 @@ impl Emitter {
                         }
                     }
                 }
-                MatchPattern::Path { segments, binding: _ } if segments == &["none"] => {
-                    ArmKind::NoneArm
-                }
+                MatchPattern::Path {
+                    segments,
+                    binding: _,
+                } if segments == &["none"] => ArmKind::NoneArm,
                 MatchPattern::Wildcard => ArmKind::Wildcard,
                 other => {
                     return Err(EmitError::unsupported(format!(

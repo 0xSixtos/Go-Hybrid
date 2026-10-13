@@ -103,7 +103,9 @@ pub struct EmitError {
 
 impl EmitError {
     fn unsupported(what: impl Into<String>) -> Self {
-        EmitError { message: format!("emitter (MVP-0): not yet supported: {}", what.into()) }
+        EmitError {
+            message: format!("emitter (MVP-0): not yet supported: {}", what.into()),
+        }
     }
 }
 
@@ -117,7 +119,11 @@ pub fn emit_go(file: &File) -> Result<String, EmitError> {
 /// `package <name>`, `pub fn` exports via M4's export mapping, and the
 /// binding packages import under `binding_prefix` (the consumer module's
 /// path to the package dir). E3 propagates through error-result fns.
-pub fn emit_go_package(file: &File, pkg_name: &str, binding_prefix: &str) -> Result<String, EmitError> {
+pub fn emit_go_package(
+    file: &File,
+    pkg_name: &str,
+    binding_prefix: &str,
+) -> Result<String, EmitError> {
     let mut em = Emitter::new();
     em.package_name = pkg_name.to_string();
     em.binding_prefix = binding_prefix.to_string();
@@ -171,10 +177,27 @@ pub enum BindingKind {
 /// Go's predeclared type names — never CamelCase-normalized.
 #[allow(dead_code)]
 const GO_BUILTIN_TYPES: &[&str] = &[
-    "bool", "byte", "rune", "string", "error", "any",
-    "int", "int8", "int16", "int32", "int64",
-    "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
-    "float32", "float64", "complex64", "complex128",
+    "bool",
+    "byte",
+    "rune",
+    "string",
+    "error",
+    "any",
+    "int",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "uint",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "uintptr",
+    "float32",
+    "float64",
+    "complex64",
+    "complex128",
 ];
 
 /// snake_case → Go exported name (`read_all` → `ReadAll`, `args` → `Args`).
@@ -210,9 +233,26 @@ pub(crate) fn is_package_root(name: &str) -> bool {
     // special-case table below.
     matches!(
         name,
-        "fmt" | "os" | "io" | "time" | "sort" | "strings" | "strconv"
-            | "errors" | "sync" | "bufio" | "http" | "httptest" | "json"
-            | "atomic" | "filepath" | "path" | "hex" | "sha3" | "serde_json" | "regex"
+        "fmt"
+            | "os"
+            | "io"
+            | "time"
+            | "sort"
+            | "strings"
+            | "strconv"
+            | "errors"
+            | "sync"
+            | "bufio"
+            | "http"
+            | "httptest"
+            | "json"
+            | "atomic"
+            | "filepath"
+            | "path"
+            | "hex"
+            | "sha3"
+            | "serde_json"
+            | "regex"
     )
 }
 
@@ -254,6 +294,10 @@ pub(crate) enum MemberSpecial {
 // ---------------------------------------------------------------------------
 // The emitter
 // ---------------------------------------------------------------------------
+
+/// One fn's result shape row: (n_results, ends_in_error, first result's
+/// binding kind, per-param pointer-base types). See Emitter::fn_shapes.
+type FnShape = (usize, bool, Option<BindingKind>, Vec<Option<String>>);
 
 pub struct Emitter {
     /// Function/decl body under assembly (header assembled last — bug #1).
@@ -312,7 +356,7 @@ pub struct Emitter {
     /// result is a known handle type (serde_json.value) — `s.set(...)`
     /// normalizes like any rust-call — and the pointer-param auto-address
     /// at call sites (09: `scale_then_register(e, …)` with `e *env`).
-    fn_shapes: BTreeMap<String, (usize, bool, Option<BindingKind>, Vec<Option<String>>)>,
+    fn_shapes: BTreeMap<String, FnShape>,
     /// User-struct field types (Batch I): struct → (field, declared hy type
     /// name — dotted for shape-known fields, "" otherwise). Receiver typing
     /// for `stats.mu.lock()` (18).
@@ -414,7 +458,10 @@ impl Emitter {
                         ..
                     }) if name == "error"
                 );
-                let kind = f.results.first().and_then(|r| self.binding_kind_of_ty(&r.ty));
+                let kind = f
+                    .results
+                    .first()
+                    .and_then(|r| self.binding_kind_of_ty(&r.ty));
                 let ptr_params = f
                     .params
                     .iter()
@@ -491,7 +538,10 @@ impl Emitter {
             // consumer's package path in package mode). The CODE keeps the
             // root spelling — Go's package name for those imports.
             for root in &self.imports {
-                let path = if shapes::RUST_CRATES.iter().any(|c| c.binding_root == root.as_str()) {
+                let path = if shapes::RUST_CRATES
+                    .iter()
+                    .any(|c| c.binding_root == root.as_str())
+                {
                     format!("{}/{}", self.binding_prefix, root)
                 } else {
                     import_path_of(root)
@@ -592,16 +642,21 @@ impl Emitter {
         // `lru_cache_new` — Go has no dotted identifiers. Call sites mangle
         // identically (see emit_call). Package mode exports `pub fn` via
         // M4's export mapping (example 09: validate_email → ValidateEmail).
-        let go_name = if self.export_pub && f.is_pub && f.receiver.is_none() && !f.name.contains('.') {
-            to_go_name(&f.name)
-        } else {
-            f.name.replace('.', "_")
-        };
+        let go_name =
+            if self.export_pub && f.is_pub && f.receiver.is_none() && !f.name.contains('.') {
+                to_go_name(&f.name)
+            } else {
+                f.name.replace('.', "_")
+            };
         let is_main = f.name == "main" && f.receiver.is_none();
         // E4/E6: main's `?` sites trigger the exit contract. If main declares
         // results OR contains top-level `?` sites, the body moves into a
         // closure whose error result drives the wrapper.
-        let body_has_try = f.body.as_ref().map(|b| self.block_has_try(b)).unwrap_or(false);
+        let body_has_try = f
+            .body
+            .as_ref()
+            .map(|b| self.block_has_try(b))
+            .unwrap_or(false);
         let main_needs_wrapper = is_main && (!f.results.is_empty() || body_has_try);
 
         // `return none` lowers to the declared option result's zero value.
@@ -644,7 +699,10 @@ impl Emitter {
         if let Some(recv) = &f.receiver {
             let recv_ty = self.type_text(&recv.ty);
             let star = if recv.is_pointer { "*" } else { "" };
-            self.push_raw(&format!("func ({} {}{}) {}(", recv.name, star, recv_ty, go_name));
+            self.push_raw(&format!(
+                "func ({} {}{}) {}(",
+                recv.name, star, recv_ty, go_name
+            ));
         } else {
             // Generic fn: `func lru_cache_new[k comparable, v any](...)`.
             if f.type_params.is_empty() {
@@ -699,11 +757,7 @@ impl Emitter {
                 // The declared non-error result IS the exit code on the
                 // explicit `return N` path (example 02's `return 1`). The
                 // receiver var mirrors the declared result's name.
-                let first_ret = ret_vars
-                    .split(", ")
-                    .next()
-                    .unwrap_or("hyR0")
-                    .to_string();
+                let first_ret = ret_vars.split(", ").next().unwrap_or("hyR0").to_string();
                 self.push(&format!("os.Exit({})", first_ret));
             }
             self.indent -= 1;
@@ -873,7 +927,9 @@ impl Emitter {
             TypeExpr::Named { name, .. } => name.contains('.'),
             TypeExpr::Pointer { to, .. } => self.type_is_foreign(to),
             TypeExpr::Slice { elem, .. } => self.type_is_foreign(elem),
-            TypeExpr::Map { key, value, .. } => self.type_is_foreign(key) || self.type_is_foreign(value),
+            TypeExpr::Map { key, value, .. } => {
+                self.type_is_foreign(key) || self.type_is_foreign(value)
+            }
             _ => false,
         }
     }
@@ -888,7 +944,13 @@ impl Emitter {
             Stmt::Assign { values, .. } => values.iter().any(|v| self.expr_has_try(v)),
             Stmt::Expr { expr, .. } => self.expr_has_try(expr),
             Stmt::Send { value, .. } => self.expr_has_try(value),
-            Stmt::If { init, cond, then, otherwise, .. } => {
+            Stmt::If {
+                init,
+                cond,
+                then,
+                otherwise,
+                ..
+            } => {
                 let init_try = init
                     .as_ref()
                     .map(|i| self.stmt_has_try(i.as_ref()))
@@ -897,10 +959,7 @@ impl Emitter {
                     .as_ref()
                     .map(|o| self.stmt_has_try(o.as_ref()))
                     .unwrap_or(false);
-                init_try
-                    || self.expr_has_try(cond)
-                    || self.block_has_try(then)
-                    || else_try
+                init_try || self.expr_has_try(cond) || self.block_has_try(then) || else_try
             }
             Stmt::For { kind, body, .. } => {
                 let kind_try = match kind {
@@ -919,7 +978,10 @@ impl Emitter {
             Stmt::Match { subject, arms, .. } => {
                 self.expr_has_try(subject)
                     || arms.iter().any(|a| {
-                        a.guard.as_ref().map(|g| self.expr_has_try(g)).unwrap_or(false)
+                        a.guard
+                            .as_ref()
+                            .map(|g| self.expr_has_try(g))
+                            .unwrap_or(false)
                             || self.block_has_try(&a.body)
                     })
             }
@@ -932,7 +994,8 @@ impl Emitter {
         match e {
             Expr::Try { .. } => true,
             Expr::Binary { lhs, rhs, .. } => self.expr_has_try(lhs) || self.expr_has_try(rhs),
-            Expr::Unary { operand, .. } | Expr::AddrOf { operand, .. }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
             | Expr::Move { operand, .. } => self.expr_has_try(operand),
             Expr::Receive { chan, .. } => self.expr_has_try(chan),
             Expr::Index { base, index, .. } => self.expr_has_try(base) || self.expr_has_try(index),
@@ -947,9 +1010,9 @@ impl Emitter {
             }
             Expr::StructLit { fields, .. } => fields.iter().any(|f| self.expr_has_try(&f.value)),
             Expr::SliceLit { items, .. } => items.iter().any(|i| self.expr_has_try(i)),
-            Expr::MapLit { entries, .. } => {
-                entries.iter().any(|(k, v)| self.expr_has_try(k) || self.expr_has_try(v))
-            }
+            Expr::MapLit { entries, .. } => entries
+                .iter()
+                .any(|(k, v)| self.expr_has_try(k) || self.expr_has_try(v)),
             Expr::FnLit { body, .. } => self.block_has_try(body),
             Expr::Paren { inner, .. } => self.expr_has_try(inner),
             _ => false,
@@ -988,7 +1051,9 @@ impl Emitter {
                 // zero value, `some(v)` the constructor (see OPTION_PRELUDE).
                 format!("option[{}]", self.type_text(elem))
             }
-            TypeExpr::Fn { params, results, .. } => {
+            TypeExpr::Fn {
+                params, results, ..
+            } => {
                 let ps = params
                     .iter()
                     .map(|p| format!("{} {}", p.name, self.type_text(&p.ty)))
@@ -1045,12 +1110,14 @@ impl Emitter {
                 "bool" => "false".into(),
                 "string" => "\"\"".into(),
                 "byte" | "rune" | "int" | "int8" | "int16" | "int32" | "int64" | "uint"
-                | "uint8" | "uint16" | "uint32" | "uint64" | "uintptr" | "float32"
-                | "float64" | "complex64" | "complex128" => "0".into(),
+                | "uint8" | "uint16" | "uint32" | "uint64" | "uintptr" | "float32" | "float64"
+                | "complex64" | "complex128" => "0".into(),
                 "error" | "any" => "nil".into(),
                 _ => format!("*new({})", name),
             },
-            TypeExpr::Slice { .. } | TypeExpr::Map { .. } | TypeExpr::Chan { .. }
+            TypeExpr::Slice { .. }
+            | TypeExpr::Map { .. }
+            | TypeExpr::Chan { .. }
             | TypeExpr::Pointer { .. } => "nil".into(),
             TypeExpr::Option { .. } => format!("{}{{}}", self.type_text(t)),
             _ => format!("*new({})", self.type_text(t)),

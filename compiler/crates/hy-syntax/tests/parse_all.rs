@@ -31,8 +31,7 @@ fn must_parse(path: &PathBuf) {
     match parse_file(&path.display().to_string(), &src) {
         Ok(_) => {}
         Err(diags) => {
-            let rendered: Vec<String> =
-                diags.iter().map(|d| d.render_head()).collect();
+            let rendered: Vec<String> = diags.iter().map(|d| d.render_head()).collect();
             panic!(
                 "PARSE FAILED: {}\n{} diagnostic(s):\n{}",
                 path.display(),

@@ -40,15 +40,27 @@ pub struct Member {
 }
 
 const fn field(go: &'static str, result: Option<&'static str>) -> Member {
-    Member { go, kind: MemberKind::Field, result }
+    Member {
+        go,
+        kind: MemberKind::Field,
+        result,
+    }
 }
 
 const fn method0(go: &'static str, result: Option<&'static str>) -> Member {
-    Member { go, kind: MemberKind::MethodZero, result }
+    Member {
+        go,
+        kind: MemberKind::MethodZero,
+        result,
+    }
 }
 
 const fn method(go: &'static str, result: Option<&'static str>) -> Member {
-    Member { go, kind: MemberKind::Method, result }
+    Member {
+        go,
+        kind: MemberKind::Method,
+        result,
+    }
 }
 
 /// A foreign type's member table, keyed by the hy type name
@@ -283,8 +295,18 @@ pub static CONVERSIONS: &[(&str, Conversion)] = &[(
     Conversion {
         go: "http.HandlerFunc",
         params: &[
-            ParamDesc { name: "w", ty_key: "http.response_writer", go: "http.ResponseWriter", pointer: false },
-            ParamDesc { name: "r", ty_key: "http.request", go: "http.Request", pointer: true },
+            ParamDesc {
+                name: "w",
+                ty_key: "http.response_writer",
+                go: "http.ResponseWriter",
+                pointer: false,
+            },
+            ParamDesc {
+                name: "r",
+                ty_key: "http.request",
+                go: "http.Request",
+                pointer: true,
+            },
         ],
         propagate: Some("w"),
     },

@@ -13,7 +13,7 @@
 //!     pushes an expression frame (full sub-lexing, including NESTED
 //!     strings, e.g. `"{m["fox"]}"` — corpus 19), `}` pops it. A string
 //!     therefore lexes as
-//!         StrChunk InterpOpen <expr tokens> InterpClose … StrEnd
+//!     StrChunk InterpOpen <expr tokens> InterpClose … StrEnd
 //!     and the parser assembles `Expr::Interp` (or `Lit::Str` when the
 //!     string has no interpolation). `{{` / `}}` escape literal braces.
 //!     Raw strings (backticks) are verbatim: no escapes, no interpolation.
@@ -72,11 +72,42 @@ pub struct Token {
 
 /// Reserved words (LX3) + the reserved-for-future list (error to use today).
 const KEYWORDS: &[&str] = &[
-    "break", "chan", "const", "continue", "defer", "else", "enum", "false", "fn", "for", "if",
-    "import", "let", "loop", "managed", "match", "move", "package", "pub", "return", "select",
-    "struct", "task", "true", "type", "var",
+    "break",
+    "chan",
+    "const",
+    "continue",
+    "defer",
+    "else",
+    "enum",
+    "false",
+    "fn",
+    "for",
+    "if",
+    "import",
+    "let",
+    "loop",
+    "managed",
+    "match",
+    "move",
+    "package",
+    "pub",
+    "return",
+    "select",
+    "struct",
+    "task",
+    "true",
+    "type",
+    "var",
     // reserved for future use (error to use today):
-    "unsafe", "go", "func", "interface", "trait", "where", "use", "mod", "as",
+    "unsafe",
+    "go",
+    "func",
+    "interface",
+    "trait",
+    "where",
+    "use",
+    "mod",
+    "as",
 ];
 
 /// Lex a whole source file. On success the token stream ends with a single
@@ -84,16 +115,11 @@ const KEYWORDS: &[&str] = &[
 pub fn lex(path: &str, src: &str) -> Result<Vec<Token>, Vec<Diagnostic>> {
     let mut lx = Lexer::new(path, src);
     let mut toks = Vec::new();
-    loop {
-        match lx.produce() {
-            Some(t) => {
-                let is_eof = matches!(t.tok, Tok::Eof);
-                toks.push(t);
-                if is_eof {
-                    break;
-                }
-            }
-            None => break,
+    while let Some(t) = lx.produce() {
+        let is_eof = matches!(t.tok, Tok::Eof);
+        toks.push(t);
+        if is_eof {
+            break;
         }
     }
     if lx.diags.is_empty() {
@@ -172,7 +198,10 @@ impl<'a> Lexer<'a> {
     }
 
     fn tok(&self, start: Pos, tok: Tok) -> Token {
-        Token { tok, span: Span::new(start, self.pos()) }
+        Token {
+            tok,
+            span: Span::new(start, self.pos()),
+        }
     }
 
     fn diag(&mut self, code: &str, start: Pos, msg: impl Into<String>) {
@@ -257,7 +286,11 @@ impl<'a> Lexer<'a> {
             if let Some(f) = self.frames.last().cloned() {
                 if matches!(f, Frame::Interp { .. }) {
                     self.frames.pop();
-                    self.diag(PARSE_ERR_CODE, start, "unterminated interpolation: expected '}'");
+                    self.diag(
+                        PARSE_ERR_CODE,
+                        start,
+                        "unterminated interpolation: expected '}'",
+                    );
                 }
             }
             self.eof_done = true;
@@ -300,7 +333,8 @@ impl<'a> Lexer<'a> {
         }
 
         // numbers (incl. leading `.` floats)
-        if c.is_ascii_digit() || (c == '.' && self.at(1).map(|d| d.is_ascii_digit()) == Some(true)) {
+        if c.is_ascii_digit() || (c == '.' && self.at(1).map(|d| d.is_ascii_digit()) == Some(true))
+        {
             return Some(self.lex_number());
         }
 
@@ -353,7 +387,10 @@ impl<'a> Lexer<'a> {
 
         // prefixed bases
         if self.at(0) == Some('0')
-            && matches!(self.at(1), Some('x') | Some('X') | Some('o') | Some('O') | Some('b') | Some('B'))
+            && matches!(
+                self.at(1),
+                Some('x') | Some('X') | Some('o') | Some('O') | Some('b') | Some('B')
+            )
         {
             let base = self.at(1).unwrap().to_ascii_lowercase();
             self.bump();
@@ -387,9 +424,7 @@ impl<'a> Lexer<'a> {
         }
         // fractional part — only when a digit follows the dot (so `0..n`
         // lexes as Int(0) + `..` + Int(n), and `1..=8` as Int + `..=` + Int)
-        if self.at(0) == Some('.')
-            && self.at(1).map(|d| d.is_ascii_digit()) == Some(true)
-        {
+        if self.at(0) == Some('.') && self.at(1).map(|d| d.is_ascii_digit()) == Some(true) {
             is_float = true;
             s.push('.');
             self.bump();
@@ -525,7 +560,11 @@ impl<'a> Lexer<'a> {
             return self.tok(start, Tok::Punct(static_punct(c)));
         }
         let c = self.bump().unwrap_or('\u{fffd}');
-        self.diag(PARSE_ERR_CODE, start, format!("unexpected character `{}`", c));
+        self.diag(
+            PARSE_ERR_CODE,
+            start,
+            format!("unexpected character `{}`", c),
+        );
         self.tok(start, Tok::Punct("?"))
     }
 
@@ -684,7 +723,11 @@ impl<'a> Lexer<'a> {
                 char::from_u32(v)?
             }
             _ => {
-                self.diag(PARSE_ERR_CODE, start, format!("unknown escape sequence `\\{}`", c));
+                self.diag(
+                    PARSE_ERR_CODE,
+                    start,
+                    format!("unknown escape sequence `\\{}`", c),
+                );
                 return None;
             }
         };
@@ -694,10 +737,30 @@ impl<'a> Lexer<'a> {
 
 fn static_punct(c: char) -> &'static str {
     match c {
-        '+' => "+", '-' => "-", '*' => "*", '/' => "/", '%' => "%", '!' => "!", '<' => "<",
-        '>' => ">", '=' => "=", '&' => "&", '|' => "|", '^' => "^", '.' => ".", ',' => ",",
-        ';' => ";", ':' => ":", '?' => "?", '(' => "(", ')' => ")", '{' => "{", '}' => "}",
-        '[' => "[", ']' => "]", _ => "?",
+        '+' => "+",
+        '-' => "-",
+        '*' => "*",
+        '/' => "/",
+        '%' => "%",
+        '!' => "!",
+        '<' => "<",
+        '>' => ">",
+        '=' => "=",
+        '&' => "&",
+        '|' => "|",
+        '^' => "^",
+        '.' => ".",
+        ',' => ",",
+        ';' => ";",
+        ':' => ":",
+        '?' => "?",
+        '(' => "(",
+        ')' => ")",
+        '{' => "{",
+        '}' => "}",
+        '[' => "[",
+        ']' => "]",
+        _ => "?",
     }
 }
 
@@ -710,7 +773,11 @@ mod tests {
     use super::*;
 
     fn toks(src: &str) -> Vec<Tok> {
-        lex("test.hy", src).expect("lex ok").into_iter().map(|t| t.tok).collect()
+        lex("test.hy", src)
+            .expect("lex ok")
+            .into_iter()
+            .map(|t| t.tok)
+            .collect()
     }
 
     #[test]
@@ -843,11 +910,7 @@ mod tests {
         let t = toks("a // line\n /* block /* not nested */ b");
         assert_eq!(
             t,
-            vec![
-                Tok::Ident("a".into()),
-                Tok::Ident("b".into()),
-                Tok::Eof,
-            ]
+            vec![Tok::Ident("a".into()), Tok::Ident("b".into()), Tok::Eof,]
         );
     }
 
@@ -856,7 +919,12 @@ mod tests {
         // spike-6 04: `fn squarer(in <-chan int, …)` / `for v in in`
         let t = toks("fn squarer(in <-chan int) { for v in in { } }");
         assert!(!t.contains(&Tok::Kw("in")));
-        assert!(t.iter().filter(|t| matches!(t, Tok::Ident(s) if s == "in")).count() >= 3);
+        assert!(
+            t.iter()
+                .filter(|t| matches!(t, Tok::Ident(s) if s == "in"))
+                .count()
+                >= 3
+        );
         assert!(t.contains(&Tok::Kw("chan")));
     }
 

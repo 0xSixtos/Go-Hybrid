@@ -35,8 +35,8 @@ const PROGRAMS: &[&str] = &[
 fn spike6_programs_all_accept_with_zero_errors() {
     for name in PROGRAMS {
         let path = format!("{}/{}", WORK_DIR, name);
-        let src = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("reading {}: {}", path, e));
+        let src =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {}", path, e));
         let ast = parse_file(&path, &src)
             .unwrap_or_else(|diags| panic!("{} must parse (parser contract): {:?}", name, diags));
         let result = check_file(&ast);
@@ -70,7 +70,11 @@ fn spike6_programs_all_accept_with_zero_errors() {
             result.diagnostics.is_empty(),
             "{}: expected zero diagnostics of any severity, got {:?}",
             name,
-            result.diagnostics.iter().map(|d| d.render_head()).collect::<Vec<_>>()
+            result
+                .diagnostics
+                .iter()
+                .map(|d| d.render_head())
+                .collect::<Vec<_>>()
         );
     }
 }

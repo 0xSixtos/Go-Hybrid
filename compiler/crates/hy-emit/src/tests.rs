@@ -35,7 +35,11 @@ fn bug1_struct_first_file_emits_imports_before_types() {
     let pkg = go.find("package main").unwrap();
     let imp = go.find("import (").unwrap();
     let ty = go.find("type job struct").unwrap();
-    assert!(pkg < imp && imp < ty, "order must be package < import < type:\n{}", go);
+    assert!(
+        pkg < imp && imp < ty,
+        "order must be package < import < type:\n{}",
+        go
+    );
     assert!(go.contains("\"fmt\""), "fmt imported:\n{}", go);
 }
 
@@ -43,9 +47,18 @@ fn bug1_struct_first_file_emits_imports_before_types() {
 fn bug2_make_chan_renders_bare_type_not_value_literal() {
     // `make(chan job, 16)` — the parser encodes the type argument as an empty
     // StructLit; rendering it as `job{}` inside make() is invalid Go.
-    let go = emit("struct job {\n    input int\n}\n\nfn main() {\n    jobs := make(chan job, 16)\n}\n");
-    assert!(go.contains("make(chan job, 16)"), "bare type in make:\n{}", go);
-    assert!(!go.contains("make(chan job{}, 16)"), "value literal leaked:\n{}", go);
+    let go =
+        emit("struct job {\n    input int\n}\n\nfn main() {\n    jobs := make(chan job, 16)\n}\n");
+    assert!(
+        go.contains("make(chan job, 16)"),
+        "bare type in make:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("make(chan job{}, 16)"),
+        "value literal leaked:\n{}",
+        go
+    );
 }
 
 #[test]
@@ -84,11 +97,31 @@ fn main() {
     let go = emit(src);
     assert!(go.contains("name := \"Hybrid\""), ":\n{}", go);
     assert!(go.contains("count += 1"), ":\n{}", go);
-    assert!(go.contains("fmt.Println(fmt.Sprintf(\"hello, %v!\", name))"), "interp → Sprintf:\n{}", go);
-    assert!(go.contains("fmt.Printf(\"count=%d ok=%v\\n\", count, count == 1)"), "printf passthrough:\n{}", go);
-    assert!(go.contains("langs := []string{\"Go\", \"Rust\", \"Hybrid\"}"), "inferred string slice:\n{}", go);
-    assert!(go.contains("for i, l := range langs {"), "2-var range:\n{}", go);
-    assert!(go.contains("fmt.Println(fmt.Sprintf(\"%v: %v\", i, l))"), ":\n{}", go);
+    assert!(
+        go.contains("fmt.Println(fmt.Sprintf(\"hello, %v!\", name))"),
+        "interp → Sprintf:\n{}",
+        go
+    );
+    assert!(
+        go.contains("fmt.Printf(\"count=%d ok=%v\\n\", count, count == 1)"),
+        "printf passthrough:\n{}",
+        go
+    );
+    assert!(
+        go.contains("langs := []string{\"Go\", \"Rust\", \"Hybrid\"}"),
+        "inferred string slice:\n{}",
+        go
+    );
+    assert!(
+        go.contains("for i, l := range langs {"),
+        "2-var range:\n{}",
+        go
+    );
+    assert!(
+        go.contains("fmt.Println(fmt.Sprintf(\"%v: %v\", i, l))"),
+        ":\n{}",
+        go
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -122,7 +155,11 @@ fn example02_wrapper_shape_and_exit_contract() {
         "closure carries named results + hidden error:\n{}",
         go
     );
-    assert!(go.contains("code, hyErr := func()"), "receiver vars:\n{}", go);
+    assert!(
+        go.contains("code, hyErr := func()"),
+        "receiver vars:\n{}",
+        go
+    );
     assert!(
         go.contains("fmt.Fprintln(os.Stderr, filepath.Base(os.Args[0])+\":\", hyErr)"),
         "E6 stderr line:\n{}",
@@ -150,7 +187,11 @@ fn example02_try_desugar_and_defer() {
         "error path assigns + returns:\n{}",
         go
     );
-    assert!(go.contains("defer f.Close()"), "foreign method normalized:\n{}", go);
+    assert!(
+        go.contains("defer f.Close()"),
+        "foreign method normalized:\n{}",
+        go
+    );
     assert!(
         go.contains("data, hyErr1 := io.ReadAll(f)"),
         "second desugar, unique temp:\n{}",
@@ -161,7 +202,11 @@ fn example02_try_desugar_and_defer() {
         "byte-binding hint routes print to Write:\n{}",
         go
     );
-    assert!(go.contains("return 1, nil") && go.contains("return 0, nil"), ":\n{}", go);
+    assert!(
+        go.contains("return 1, nil") && go.contains("return 0, nil"),
+        ":\n{}",
+        go
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -221,8 +266,16 @@ fn example03_golden_shape() {
     for p in ["\"fmt\"", "\"sort\"", "\"time\""] {
         assert!(go.contains(p), "auto-import {}:\n{}", p, go);
     }
-    assert!(go.contains("func worker(id int, jobs <-chan job, results chan<- result) {"), ":\n{}", go);
-    assert!(go.contains("for j := range jobs {"), "1-var range over chan:\n{}", go);
+    assert!(
+        go.contains("func worker(id int, jobs <-chan job, results chan<- result) {"),
+        ":\n{}",
+        go
+    );
+    assert!(
+        go.contains("for j := range jobs {"),
+        "1-var range over chan:\n{}",
+        go
+    );
     assert!(
         go.contains("time.Sleep(time.Duration(j.cost_ms) * time.Millisecond)"),
         "duration constructor:\n{}",
@@ -233,22 +286,42 @@ fn example03_golden_shape() {
         "struct literal send:\n{}",
         go
     );
-    assert!(go.contains("for i := 0; i < n_workers; i++ {"), "range-for:\n{}", go);
-    assert!(go.contains("go worker(i, jobs, results)"), "task → go:\n{}", go);
+    assert!(
+        go.contains("for i := 0; i < n_workers; i++ {"),
+        "range-for:\n{}",
+        go
+    );
+    assert!(
+        go.contains("go worker(i, jobs, results)"),
+        "task → go:\n{}",
+        go
+    );
     assert!(
         go.contains("inputs := []int{3, 1, 4, 1, 5, 9, 2, 6}"),
         "inferred int slice:\n{}",
         go
     );
-    assert!(go.contains("for _, v := range inputs {"), "underscore range:\n{}", go);
-    assert!(go.contains("jobs <- job{input: v, cost_ms: (v % 3)}"), ":\n{}", go);
+    assert!(
+        go.contains("for _, v := range inputs {"),
+        "underscore range:\n{}",
+        go
+    );
+    assert!(
+        go.contains("jobs <- job{input: v, cost_ms: (v % 3)}"),
+        ":\n{}",
+        go
+    );
     assert!(go.contains("close(jobs)"), ":\n{}", go);
     assert!(go.contains("var got []int"), ":\n{}", go);
     assert!(go.contains("r := <-results"), "receive-define:\n{}", go);
     assert!(go.contains("got = append(got, r.value)"), ":\n{}", go);
     assert!(go.contains("sort.Ints(got)"), ":\n{}", go);
     assert!(go.contains("fmt.Println(got)"), ":\n{}", go);
-    assert!(go.contains("const n_workers = 4"), "fn-local const:\n{}", go);
+    assert!(
+        go.contains("const n_workers = 4"),
+        "fn-local const:\n{}",
+        go
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -295,8 +368,16 @@ fn cooked_strings_re_escape_and_raw_stay_verbatim() {
 #[test]
 fn precedence_needs_no_parens_for_common_mixes() {
     let go = emit("fn main() {\n    x := 1 + 2 * 3\n    y := (1 + 2) * 3\n}");
-    assert!(go.contains("x := 1 + 2 * 3"), "no redundant parens:\n{}", go);
-    assert!(go.contains("y := (1 + 2) * 3"), "source parens kept:\n{}", go);
+    assert!(
+        go.contains("x := 1 + 2 * 3"),
+        "no redundant parens:\n{}",
+        go
+    );
+    assert!(
+        go.contains("y := (1 + 2) * 3"),
+        "source parens kept:\n{}",
+        go
+    );
 }
 
 #[test]
@@ -341,7 +422,11 @@ fn send_receive_task_and_move_drop() {
 fn var_and_const_locals() {
     let go = emit("fn main() {\n    var got []int\n    var hits atomic.int64\n    const n = 4\n}");
     assert!(go.contains("var got []int"), ":\n{}", go);
-    assert!(go.contains("var hits atomic.Int64"), "dotted foreign type normalized:\n{}", go);
+    assert!(
+        go.contains("var hits atomic.Int64"),
+        "dotted foreign type normalized:\n{}",
+        go
+    );
     assert!(go.contains("const n = 4"), ":\n{}", go);
 }
 
@@ -376,7 +461,11 @@ fn multi_define_from_two_value_call() {
 #[test]
 fn struct_literal_fields_keep_our_names() {
     let go = emit("struct job {\n    cost_ms int\n}\n\nfn main() {\n    j := job{cost_ms: 3}\n}\n");
-    assert!(go.contains("job{cost_ms: 3}"), "our fields NOT camelized:\n{}", go);
+    assert!(
+        go.contains("job{cost_ms: 3}"),
+        "our fields NOT camelized:\n{}",
+        go
+    );
 }
 
 #[test]
@@ -412,7 +501,11 @@ fn main_without_results_or_try_stays_plain() {
 fn main_with_try_but_no_results_gets_wrapper() {
     let go = emit("fn main() {\n    f := os.open(p)?\n}\n");
     assert!(go.contains("func main() {"), ":\n{}", go);
-    assert!(go.contains("func() (hyErr error) {"), "error-only closure:\n{}", go);
+    assert!(
+        go.contains("func() (hyErr error) {"),
+        "error-only closure:\n{}",
+        go
+    );
     assert!(go.contains("os.Exit(1)"), ":\n{}", go);
     assert!(!go.contains("os.Exit(code)"), "no code var:\n{}", go);
 }
@@ -462,16 +555,28 @@ fn inclusive_range_and_labeled_break() {
     let go = emit(
         "fn main() {\n    total := 0\n    loop {\n        select {\n            v, ok := <-sq:\n                if !ok { break loop }\n                total += v\n        }\n    }\n    for i in 1..=8 {\n        total += i\n    }\n}\n",
     );
-    assert!(go.contains("hyLoop: for {"), "loop gets the Go label:\n{}", go);
+    assert!(
+        go.contains("hyLoop: for {"),
+        "loop gets the Go label:\n{}",
+        go
+    );
     assert!(go.contains("break hyLoop"), ":\n{}", go);
-    assert!(go.contains("for i := 1; i <= 8; i++ {"), "inclusive range:\n{}", go);
+    assert!(
+        go.contains("for i := 1; i <= 8; i++ {"),
+        "inclusive range:\n{}",
+        go
+    );
 }
 
 #[test]
 fn exclusive_range_stays_exclusive() {
     let go = emit("fn main() {\n    for i in 0..n {\n    }\n}\n");
     assert!(go.contains("for i := 0; i < n; i++ {"), ":\n{}", go);
-    assert!(!go.contains("hyLoop"), "no label without a labeled break:\n{}", go);
+    assert!(
+        !go.contains("hyLoop"),
+        "no label without a labeled break:\n{}",
+        go
+    );
 }
 
 #[test]
@@ -531,22 +636,42 @@ fn option_match_lowes_to_ok_branch() {
     let go = emit(
         "fn get() option[int] {\n    return some(3)\n}\n\nfn main() {\n    match get() {\n        some(v): fmt.println(\"v={v}\")\n        none:     fmt.println(\"none\")\n    }\n}\n",
     );
-    assert!(go.contains("type option[v any] struct {"), "option prelude:\n{}", go);
-    assert!(go.contains("func some[v any](val v) option[v] {"), ":\n{}", go);
-    assert!(go.contains("func get() option[int] {"), "option result bare:\n{}", go);
+    assert!(
+        go.contains("type option[v any] struct {"),
+        "option prelude:\n{}",
+        go
+    );
+    assert!(
+        go.contains("func some[v any](val v) option[v] {"),
+        ":\n{}",
+        go
+    );
+    assert!(
+        go.contains("func get() option[int] {"),
+        "option result bare:\n{}",
+        go
+    );
     assert!(go.contains("return some(3)"), ":\n{}", go);
     let m = go.find("hyMatch0 := get()").expect("match temp");
     let body = &go[m..];
     assert!(body.contains("if hyMatch0.ok {"), ":\n{}", go);
     assert!(body.contains("v := hyMatch0.val"), ":\n{}", go);
     assert!(body.contains("} else {"), ":\n{}", go);
-    assert!(body.contains("fmt.Println(fmt.Sprintf(\"v=%v\", v))"), ":\n{}", go);
+    assert!(
+        body.contains("fmt.Println(fmt.Sprintf(\"v=%v\", v))"),
+        ":\n{}",
+        go
+    );
 }
 
 #[test]
 fn return_none_lowers_to_option_zero() {
     let go = emit("fn get() option[int] {\n    return none\n}\n");
-    assert!(go.contains("return option[int]{}"), "none → zero option:\n{}", go);
+    assert!(
+        go.contains("return option[int]{}"),
+        "none → zero option:\n{}",
+        go
+    );
 }
 
 #[test]
@@ -556,9 +681,17 @@ fn slot_loan_copies_and_stores_back() {
     let go = emit(
         "struct node {\n    edges []int\n}\n\nstruct graph {\n    nodes map[int]node\n}\n\nfn (g *graph) connect(from int, to int) {\n    n := &g.nodes[from]\n    n.edges = append(n.edges, to)\n}\n",
     );
-    assert!(go.contains("n := g.nodes[from]"), "copy read (no &):\n{}", go);
+    assert!(
+        go.contains("n := g.nodes[from]"),
+        "copy read (no &):\n{}",
+        go
+    );
     assert!(go.contains("n.edges = append(n.edges, to)"), ":\n{}", go);
-    assert!(go.contains("g.nodes[from] = n"), "store-back at block end:\n{}", go);
+    assert!(
+        go.contains("g.nodes[from] = n"),
+        "store-back at block end:\n{}",
+        go
+    );
 }
 
 #[test]
@@ -570,10 +703,12 @@ fn single_var_iterate_value_semantics() {
 
 #[test]
 fn single_var_iterate_over_chan_binds_value() {
-    let go = emit(
-        "fn worker(jobs <-chan int) {\n    for j in jobs {\n        _ = j\n    }\n}\n",
+    let go = emit("fn worker(jobs <-chan int) {\n    for j in jobs {\n        _ = j\n    }\n}\n");
+    assert!(
+        go.contains("for j := range jobs {"),
+        "chan keeps direct range:\n{}",
+        go
     );
-    assert!(go.contains("for j := range jobs {"), "chan keeps direct range:\n{}", go);
 }
 
 #[test]
@@ -581,17 +716,24 @@ fn set_insert_uses_prelude() {
     let go = emit(
         "type node_id = int\n\nfn f() bool {\n    seen := set[node_id]{}\n    return seen.insert(3)\n}\n",
     );
-    assert!(go.contains("type set[t comparable] struct {"), "set prelude:\n{}", go);
+    assert!(
+        go.contains("type set[t comparable] struct {"),
+        "set prelude:\n{}",
+        go
+    );
     assert!(go.contains("seen := set[node_id]{}"), ":\n{}", go);
     assert!(go.contains("return seen.insert(3)"), ":\n{}", go);
 }
 
 #[test]
 fn slice_pop_uses_prelude_helper() {
-    let go = emit(
-        "type node_id = int\n\nfn f(stack []node_id) node_id {\n    return stack.pop()\n}\n",
+    let go =
+        emit("type node_id = int\n\nfn f(stack []node_id) node_id {\n    return stack.pop()\n}\n");
+    assert!(
+        go.contains("func hy_pop[t any](s *[]t) t {"),
+        "pop prelude:\n{}",
+        go
     );
-    assert!(go.contains("func hy_pop[t any](s *[]t) t {"), "pop prelude:\n{}", go);
     assert!(go.contains("return hy_pop(&stack)"), ":\n{}", go);
 }
 
@@ -603,9 +745,7 @@ fn slice_pop_uses_prelude_helper() {
 fn shape_chain_field_method_field() {
     // r.url.query.get("a") — FIELD (r.URL), zero-arg METHOD (Query()),
     // METHOD (Get): the exact three-level chain from example 06.
-    let go = emit(
-        "fn f(r *http.request) string {\n    return r.url.query.get(\"a\")\n}\n",
-    );
+    let go = emit("fn f(r *http.request) string {\n    return r.url.query.get(\"a\")\n}\n");
     assert!(
         go.contains("r.URL.Query().Get(\"a\")"),
         "typed chain lowered exactly:\n{}",
@@ -616,9 +756,7 @@ fn shape_chain_field_method_field() {
 
 #[test]
 fn shape_fields_stay_fields() {
-    let go = emit(
-        "fn f(r *http.request) {\n    fmt.eprintln(\"{r.method} {r.url.path}\")\n}\n",
-    );
+    let go = emit("fn f(r *http.request) {\n    fmt.eprintln(\"{r.method} {r.url.path}\")\n}\n");
     assert!(go.contains("r.Method"), ":\n{}", go);
     assert!(go.contains("r.URL.Path"), ":\n{}", go);
     assert!(!go.contains("r.Url"), ":\n{}", go);
@@ -630,7 +768,11 @@ fn shape_import_paths_map_to_net_packages() {
         "fn f(r *http.request) {\n    mux := http.new_serve_mux()\n    mux.handle(\"/x\", http.handler(fn(w, r) { }))\n}\n",
     );
     assert!(go.contains("\"net/http\""), "mapped import path:\n{}", go);
-    assert!(!go.contains("\n\t\"http\"\n"), "unmapped root import leaked:\n{}", go);
+    assert!(
+        !go.contains("\n\t\"http\"\n"),
+        "unmapped root import leaked:\n{}",
+        go
+    );
 }
 
 #[test]
@@ -676,7 +818,11 @@ fn shape_e11_handler_try_propagates_through_http_error() {
         "E11 propagation:\n{}",
         go
     );
-    assert!(!go.contains("hyErr = hyErr0"), "E3 shape must not leak:\n{}", go);
+    assert!(
+        !go.contains("hyErr = hyErr0"),
+        "E3 shape must not leak:\n{}",
+        go
+    );
 }
 
 #[test]
@@ -684,7 +830,11 @@ fn shape_httptest_get_composite_lowering() {
     let go = emit(
         "fn main() {\n    mux := http.new_serve_mux()\n    code, body := httptest.get(mux, \"/hello\")?\n    fmt.println(\"{code} {body}\")\n}\n",
     );
-    assert!(go.contains("http.NewRequest(\"GET\", \"/hello\", nil)"), ":\n{}", go);
+    assert!(
+        go.contains("http.NewRequest(\"GET\", \"/hello\", nil)"),
+        ":\n{}",
+        go
+    );
     assert!(go.contains("httptest.NewRecorder()"), ":\n{}", go);
     assert!(go.contains("mux.ServeHTTP("), ":\n{}", go);
     assert!(
@@ -751,7 +901,11 @@ fn rust_call_lowers_to_binding_with_bytes_coerce() {
         go
     );
     assert!(go.contains("\"hybrid.program/sha3binding\""), ":\n{}", go);
-    assert!(!go.contains("\"rust/sha3\""), "rust import must not leak:\n{}", go);
+    assert!(
+        !go.contains("\"rust/sha3\""),
+        "rust import must not leak:\n{}",
+        go
+    );
 }
 
 #[test]
@@ -771,7 +925,11 @@ fn rust_named_arg_places_by_descriptor_order() {
 #[test]
 fn rust_unknown_fn_is_clean_error() {
     let msg = emit_err("import \"rust/sha3\"\n\nfn main() {\n    x := sha3.nope(1)?\n}\n");
-    assert!(msg.contains("not in the pinned binding surface"), ":\n{}", msg);
+    assert!(
+        msg.contains("not in the pinned binding surface"),
+        ":\n{}",
+        msg
+    );
 }
 
 #[test]
@@ -784,9 +942,7 @@ fn rust_unknown_arg_name_is_clean_error() {
 
 #[test]
 fn hex_encode_maps_to_encode_to_string() {
-    let go = emit(
-        "fn f(d []byte) {\n    fmt.println(hex.encode(d[..8]))\n}\n",
-    );
+    let go = emit("fn f(d []byte) {\n    fmt.println(hex.encode(d[..8]))\n}\n");
     assert!(go.contains("hex.EncodeToString(d[:8])"), ":\n{}", go);
     assert!(go.contains("\"encoding/hex\""), ":\n{}", go);
 }
@@ -799,7 +955,11 @@ fn duration_members_resolve_property_style() {
         "fn f() {\n    t0 := time.now()\n    dt := time.since(t0)\n    fmt.println(\"{dt.milliseconds}ms\")\n}\n",
     );
     assert!(go.contains("dt.Milliseconds()"), ":\n{}", go);
-    assert!(!go.contains("dt.Milliseconds\n"), "field spelling leaked:\n{}", go);
+    assert!(
+        !go.contains("dt.Milliseconds\n"),
+        "field spelling leaked:\n{}",
+        go
+    );
 }
 
 #[test]
@@ -822,7 +982,11 @@ fn rust_json_handle_types_map_to_binding_package() {
     assert!(go.contains("v := jsonbinding.NewObject()"), ":\n{}", go);
     assert!(go.contains("arr := jsonbinding.NewArray()"), ":\n{}", go);
     assert!(go.contains("v.Set(\"active\", arr)"), ":\n{}", go);
-    assert!(!go.contains("serde_json."), "rust crate spelling leaked:\n{}", go);
+    assert!(
+        !go.contains("serde_json."),
+        "rust crate spelling leaked:\n{}",
+        go
+    );
 }
 
 #[test]
@@ -835,7 +999,11 @@ fn e3_expression_form_hoists_in_conditions_and_args() {
     assert!(go.contains("u.Int(\"logins\")"), ":\n{}", go);
     assert!(go.contains("u.String(\"name\")"), ":\n{}", go);
     assert!(go.contains("names = append(names,"), ":\n{}", go);
-    assert!(go.contains("if hyT3 >= 3"), "cond hoisted to a temp:\n{}", go);
+    assert!(
+        go.contains("if hyT3 >= 3"),
+        "cond hoisted to a temp:\n{}",
+        go
+    );
 }
 
 #[test]
@@ -867,7 +1035,11 @@ fn package_mode_exports_pub_fns() {
         "M4 export mapping:\n{}",
         go
     );
-    assert!(go.contains("func SimplePattern(p string) bool {"), ":\n{}", go);
+    assert!(
+        go.contains("func SimplePattern(p string) bool {"),
+        ":\n{}",
+        go
+    );
     assert!(go.contains("package hybrid\n"), ":\n{}", go);
     // E3 in an error-result fn propagates via the zero-results return.
     assert!(
@@ -884,12 +1056,17 @@ fn package_mode_exports_pub_fns() {
         go
     );
     assert!(go.contains("regexbinding.IsMatch("), ":\n{}", go);
-    assert!(!go.contains("[]byte("), "regex binding takes strings:\n{}", go);
+    assert!(
+        !go.contains("[]byte("),
+        "regex binding takes strings:\n{}",
+        go
+    );
 }
 
 #[test]
 fn package_mode_private_fns_stay_snake_case() {
-    let file = hy_syntax::parse_file("t.hy", "fn helper(n int) int {\n    return n\n}\n").expect("parse");
+    let file =
+        hy_syntax::parse_file("t.hy", "fn helper(n int) int {\n    return n\n}\n").expect("parse");
     let go = super::emit_go_package(&file, "hybrid", "x").expect("emit");
     assert!(go.contains("func helper(n int) int {"), ":\n{}", go);
 }
@@ -903,7 +1080,8 @@ fn package_mode_private_fns_stay_snake_case() {
 fn diff_blank_range_for_uses_fresh_temp() {
     // corpus 16/17/18: `for _ in 0..n` — Go has no blank := variable; the
     // old emission `for _ := 0; _ < n; _++` was invalid Go.
-    let go = emit("fn main() {\n    n := 3\n    for _ in 0..n {\n        fmt.println(\"x\")\n    }\n}");
+    let go =
+        emit("fn main() {\n    n := 3\n    for _ in 0..n {\n        fmt.println(\"x\")\n    }\n}");
     assert!(
         go.contains("for hyBlank0 := 0; hyBlank0 < n; hyBlank0++ {"),
         "fresh temp carries the count:\n{}",
@@ -951,7 +1129,11 @@ fn diff_zero_result_try_hoist_has_no_value_temp() {
     let go = emit(
         "fn main() {\n    doc := serde_json.parse(`{\"a\":1}`)?\n    doc.set(\"audited\", true)?\n}",
     );
-    assert!(go.contains("hyErr1 := doc.Set(\"audited\", true)"), ":\n{}", go);
+    assert!(
+        go.contains("hyErr1 := doc.Set(\"audited\", true)"),
+        ":\n{}",
+        go
+    );
     assert!(!go.contains("hyT"), "value temp leaked:\n{}", go);
 }
 
@@ -983,7 +1165,11 @@ fn diff_composite_const_lands_as_var() {
     // corpus 17/18: `const thresholds = [10, 50, 250, 1000]` — Go's const
     // admits only bool/string/number; composites lower to var.
     let go = emit("const thresholds = [10, 50, 250, 1000]\n\nfn main() {\n    fmt.println(\"{thresholds[0]}\")\n}");
-    assert!(go.contains("var thresholds = []int{10, 50, 250, 1000}"), ":\n{}", go);
+    assert!(
+        go.contains("var thresholds = []int{10, 50, 250, 1000}"),
+        ":\n{}",
+        go
+    );
     assert!(!go.contains("const thresholds"), ":\n{}", go);
 }
 
@@ -1005,7 +1191,11 @@ fn diff_hyfn_rust_typed_result_normalizes_methods() {
     let go = emit(
         "fn summary() (serde_json.value, error) {\n    v := serde_json.new_object()\n    return v\n}\n\nfn main() {\n    s := summary()?\n    s.set(\"cached_at\", \"2026-10-12\")?\n}",
     );
-    assert!(go.contains("s.Set(\"cached_at\", \"2026-10-12\")"), ":\n{}", go);
+    assert!(
+        go.contains("s.Set(\"cached_at\", \"2026-10-12\")"),
+        ":\n{}",
+        go
+    );
     assert!(!go.contains("s.set("), "lowercase leaked:\n{}", go);
 }
 

@@ -56,10 +56,7 @@ use hy_diag::{Diagnostic, Pos, Span};
 /// Parse one source file. On success the full AST; on failure every parse
 /// diagnostic collected (lexer errors first, then parser errors).
 pub fn parse_file(path: &str, src: &str) -> Result<File, Vec<Diagnostic>> {
-    let toks = match lex(path, src) {
-        Ok(t) => t,
-        Err(d) => return Err(d),
-    };
+    let toks = lex(path, src)?;
     let mut p = Parser::new(path, toks);
     let file = p.parse_file_body();
     if p.diags.is_empty() {
@@ -88,7 +85,12 @@ struct Parser {
 
 impl Parser {
     fn new(path: &str, toks: Vec<Token>) -> Self {
-        Parser { path: path.to_string(), toks, pos: 0, diags: Vec::new() }
+        Parser {
+            path: path.to_string(),
+            toks,
+            pos: 0,
+            diags: Vec::new(),
+        }
     }
 
     // -- token cursor ---------------------------------------------------------
@@ -174,7 +176,12 @@ impl Parser {
             PARSE_ERR_CODE,
             self.path.clone(),
             span,
-            format!("parse error: {} (at {}:{})", msg.into(), span.start.line, span.start.col),
+            format!(
+                "parse error: {} (at {}:{})",
+                msg.into(),
+                span.start.line,
+                span.start.col
+            ),
         ));
         Err(ParseErr)
     }
@@ -193,7 +200,10 @@ impl Parser {
             self.bump();
             Ok(s)
         } else {
-            self.err(format!("expected identifier, found {}", self.describe_cur()))
+            self.err(format!(
+                "expected identifier, found {}",
+                self.describe_cur()
+            ))
         }
     }
 
@@ -225,7 +235,10 @@ impl Parser {
                 Err(_) => self.sync_decl(),
             }
         }
-        File { path: self.path.clone(), decls }
+        File {
+            path: self.path.clone(),
+            decls,
+        }
     }
 
     fn sync_decl(&mut self) {
@@ -255,8 +268,12 @@ impl Parser {
     /// Top-level decl head? (used only for error recovery synchronization).
     fn is_decl_starter(&self) -> bool {
         match self.cur() {
-            Tok::Kw("struct") | Tok::Kw("const") | Tok::Kw("enum") | Tok::Kw("type")
-            | Tok::Kw("import") | Tok::Kw("pub") => true,
+            Tok::Kw("struct")
+            | Tok::Kw("const")
+            | Tok::Kw("enum")
+            | Tok::Kw("type")
+            | Tok::Kw("import")
+            | Tok::Kw("pub") => true,
             Tok::Kw("fn") => self.is_fn_decl_shape(),
             _ => false,
         }
@@ -279,7 +296,10 @@ impl Parser {
                     Tok::Punct(")") => {
                         depth -= 1;
                         if depth == 0 {
-                            return matches!(self.toks.get(k + 1).map(|t| &t.tok), Some(Tok::Ident(_)));
+                            return matches!(
+                                self.toks.get(k + 1).map(|t| &t.tok),
+                                Some(Tok::Ident(_))
+                            );
                         }
                     }
                     Tok::Eof => return false,
@@ -307,7 +327,10 @@ impl Parser {
                 return self.err("grouped `import ( … )` is not in the corpus surface — write one import per line");
             }
             let (path_str, _) = self.parse_string_lit()?;
-            return Ok(Decl::Import { path: path_str, span: self.span_from(start) });
+            return Ok(Decl::Import {
+                path: path_str,
+                span: self.span_from(start),
+            });
         }
         if self.at_kw("const") {
             let c = self.parse_const_decl()?;
@@ -328,7 +351,10 @@ impl Parser {
             let f = self.parse_fn_decl(is_pub)?;
             return Ok(Decl::Fn(f));
         }
-        self.err(format!("expected declaration (import/const/struct/enum/type/fn), found {}", self.describe_cur()))
+        self.err(format!(
+            "expected declaration (import/const/struct/enum/type/fn), found {}",
+            self.describe_cur()
+        ))
     }
 
     fn parse_const_decl(&mut self) -> PResult<ConstDecl> {
@@ -338,34 +364,56 @@ impl Parser {
         let ty = self.opt_type_after_name()?;
         self.expect_punct("=")?;
         let value = self.parse_expr(true)?;
-        Ok(ConstDecl { name, ty, value, span: self.span_from(start) })
+        Ok(ConstDecl {
+            name,
+            ty,
+            value,
+            span: self.span_from(start),
+        })
     }
 
     fn parse_struct_decl(&mut self) -> PResult<StructDecl> {
         let start = self.pos;
         self.bump(); // struct
         let name = self.expect_ident()?;
-        let type_params = if self.at_punct("[") { self.parse_type_params()? } else { Vec::new() };
+        let type_params = if self.at_punct("[") {
+            self.parse_type_params()?
+        } else {
+            Vec::new()
+        };
         self.expect_punct("{")?;
         let mut fields = Vec::new();
         while !self.at_punct("}") && !self.at_eof() {
             let fstart = self.pos;
             let fname = self.expect_ident()?;
             let ty = self.parse_type()?;
-            fields.push(FieldDecl { name: fname, ty, span: self.span_from(fstart) });
+            fields.push(FieldDecl {
+                name: fname,
+                ty,
+                span: self.span_from(fstart),
+            });
             if !self.at_punct("}") && !self.at_eof() {
                 // fields are newline-separated; no separators required
             }
         }
         self.expect_punct("}")?;
-        Ok(StructDecl { name, type_params, fields, span: self.span_from(start) })
+        Ok(StructDecl {
+            name,
+            type_params,
+            fields,
+            span: self.span_from(start),
+        })
     }
 
     fn parse_enum_decl(&mut self) -> PResult<EnumDecl> {
         let start = self.pos;
         self.bump(); // enum
         let name = self.expect_ident()?;
-        let type_params = if self.at_punct("[") { self.parse_type_params()? } else { Vec::new() };
+        let type_params = if self.at_punct("[") {
+            self.parse_type_params()?
+        } else {
+            Vec::new()
+        };
         let _ = type_params;
         self.expect_punct("{")?;
         let mut variants = Vec::new();
@@ -388,11 +436,18 @@ impl Parser {
             } else {
                 None
             };
-            variants.push(EnumVariant { name: vname, payload });
+            variants.push(EnumVariant {
+                name: vname,
+                payload,
+            });
             self.eat_punct(",");
         }
         self.expect_punct("}")?;
-        Ok(EnumDecl { name, variants, span: self.span_from(start) })
+        Ok(EnumDecl {
+            name,
+            variants,
+            span: self.span_from(start),
+        })
     }
 
     /// `type X = T` — a transparent alias (Go `type X = Y`), representable
@@ -435,7 +490,11 @@ impl Parser {
     fn parse_fn_decl(&mut self, is_pub: bool) -> PResult<FnDecl> {
         let start = self.pos;
         self.bump(); // fn
-        let receiver = if self.at_punct("(") { Some(self.parse_receiver()?) } else { None };
+        let receiver = if self.at_punct("(") {
+            Some(self.parse_receiver()?)
+        } else {
+            None
+        };
         let mut name = self.expect_ident()?;
         if self.eat_punct(".") {
             // associated function (`fn greeting.build(...)`): dotted name,
@@ -443,12 +502,20 @@ impl Parser {
             let method = self.expect_ident()?;
             name = format!("{}.{}", name, method);
         }
-        let type_params = if self.at_punct("[") { self.parse_type_params()? } else { Vec::new() };
+        let type_params = if self.at_punct("[") {
+            self.parse_type_params()?
+        } else {
+            Vec::new()
+        };
         self.expect_punct("(")?;
         let params = self.parse_params()?;
         self.expect_punct(")")?;
         let results = self.parse_results()?;
-        let body = if self.at_punct("{") { Some(self.parse_block()?) } else { None };
+        let body = if self.at_punct("{") {
+            Some(self.parse_block()?)
+        } else {
+            None
+        };
         Ok(FnDecl {
             is_pub,
             name,
@@ -471,8 +538,16 @@ impl Parser {
         let ty = self.parse_type()?;
         self.expect_punct(")")?;
         match ty {
-            TypeExpr::Pointer { to, .. } => Ok(Receiver { name, ty: *to, is_pointer: true }),
-            ty => Ok(Receiver { name, ty, is_pointer: false }),
+            TypeExpr::Pointer { to, .. } => Ok(Receiver {
+                name,
+                ty: *to,
+                is_pointer: true,
+            }),
+            ty => Ok(Receiver {
+                name,
+                ty,
+                is_pointer: false,
+            }),
         }
     }
 
@@ -487,9 +562,16 @@ impl Parser {
             let ty = if self.is_type_start() {
                 self.parse_type()?
             } else {
-                TypeExpr::Named { name: String::new(), span: self.toks[pstart].span }
+                TypeExpr::Named {
+                    name: String::new(),
+                    span: self.toks[pstart].span,
+                }
             };
-            params.push(Param { name, ty, span: self.span_from(pstart) });
+            params.push(Param {
+                name,
+                ty,
+                span: self.span_from(pstart),
+            });
             if !self.at_punct(",") && !self.at_punct(")") {
                 return self.err(format!(
                     "expected ',' or ')' in parameter list, found {}",
@@ -508,12 +590,15 @@ impl Parser {
             self.bump();
             let mut results = Vec::new();
             while !self.at_punct(")") && !self.at_eof() {
-                let named = matches!(self.cur(), Tok::Ident(_))
-                    && matches!(self.nth(1), Tok::Ident(_));
+                let named =
+                    matches!(self.cur(), Tok::Ident(_)) && matches!(self.nth(1), Tok::Ident(_));
                 if named {
                     let name = self.expect_ident()?;
                     let ty = self.parse_type()?;
-                    results.push(FnResult { name: Some(name), ty });
+                    results.push(FnResult {
+                        name: Some(name),
+                        ty,
+                    });
                 } else {
                     let ty = self.parse_type()?;
                     results.push(FnResult { name: None, ty });
@@ -562,34 +647,60 @@ impl Parser {
             Tok::Punct("*") => {
                 self.bump();
                 let to = Box::new(self.parse_type()?);
-                TypeExpr::Pointer { to, span: self.span_from(start) }
+                TypeExpr::Pointer {
+                    to,
+                    span: self.span_from(start),
+                }
             }
             Tok::Punct("<-") if matches!(self.nth(1), Tok::Kw("chan")) => {
                 self.bump();
                 self.bump();
                 let elem = Box::new(self.parse_type()?);
-                TypeExpr::Chan { dir: ChanDir::Recv, elem, span: self.span_from(start) }
+                TypeExpr::Chan {
+                    dir: ChanDir::Recv,
+                    elem,
+                    span: self.span_from(start),
+                }
             }
             Tok::Kw("chan") => {
                 self.bump();
-                let dir = if self.eat_punct("<-") { ChanDir::Send } else { ChanDir::Both };
+                let dir = if self.eat_punct("<-") {
+                    ChanDir::Send
+                } else {
+                    ChanDir::Both
+                };
                 let elem = Box::new(self.parse_type()?);
-                TypeExpr::Chan { dir, elem, span: self.span_from(start) }
+                TypeExpr::Chan {
+                    dir,
+                    elem,
+                    span: self.span_from(start),
+                }
             }
             Tok::Punct("[") => {
                 self.bump();
                 if self.eat_punct("]") {
                     let elem = Box::new(self.parse_type()?);
-                    TypeExpr::Slice { elem, span: self.span_from(start) }
+                    TypeExpr::Slice {
+                        elem,
+                        span: self.span_from(start),
+                    }
                 } else if self.eat_punct("...") {
                     self.expect_punct("]")?;
                     let elem = Box::new(self.parse_type()?);
-                    TypeExpr::Array { len: None, elem, span: self.span_from(start) }
+                    TypeExpr::Array {
+                        len: None,
+                        elem,
+                        span: self.span_from(start),
+                    }
                 } else {
                     let len = Some(Box::new(self.parse_expr(true)?));
                     self.expect_punct("]")?;
                     let elem = Box::new(self.parse_type()?);
-                    TypeExpr::Array { len, elem, span: self.span_from(start) }
+                    TypeExpr::Array {
+                        len,
+                        elem,
+                        span: self.span_from(start),
+                    }
                 }
             }
             Tok::Kw("fn") => {
@@ -601,7 +712,11 @@ impl Parser {
                 while self.is_type_start() {
                     results.push(self.parse_type()?);
                 }
-                TypeExpr::Fn { params, results, span: self.span_from(start) }
+                TypeExpr::Fn {
+                    params,
+                    results,
+                    span: self.span_from(start),
+                }
             }
             Tok::Ident(name) => {
                 let name = name.clone();
@@ -611,12 +726,19 @@ impl Parser {
                     let key = Box::new(self.parse_type()?);
                     self.expect_punct("]")?;
                     let value = Box::new(self.parse_type()?);
-                    TypeExpr::Map { key, value, span: self.span_from(start) }
+                    TypeExpr::Map {
+                        key,
+                        value,
+                        span: self.span_from(start),
+                    }
                 } else if name == "option" && self.at_punct("[") {
                     self.bump();
                     let elem = Box::new(self.parse_type()?);
                     self.expect_punct("]")?;
-                    TypeExpr::Option { elem, span: self.span_from(start) }
+                    TypeExpr::Option {
+                        elem,
+                        span: self.span_from(start),
+                    }
                 } else {
                     let mut full = name;
                     while self.at_punct(".") {
@@ -634,11 +756,17 @@ impl Parser {
                             args.push(self.parse_type()?);
                         }
                         self.expect_punct("]")?;
-                        let joined =
-                            args.iter().map(|t| t.render()).collect::<Vec<_>>().join(", ");
+                        let joined = args
+                            .iter()
+                            .map(|t| t.render())
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         full = format!("{}[{}]", full, joined);
                     }
-                    TypeExpr::Named { name: full, span: self.span_from(start) }
+                    TypeExpr::Named {
+                        name: full,
+                        span: self.span_from(start),
+                    }
                 }
             }
             _ => {
@@ -666,7 +794,10 @@ impl Parser {
             }
         }
         self.bump(); // }
-        Ok(Block { stmts, span: self.span_from(start) })
+        Ok(Block {
+            stmts,
+            span: self.span_from(start),
+        })
     }
 
     fn sync_stmt(&mut self) {
@@ -728,7 +859,11 @@ impl Parser {
             Tok::Kw("loop") => {
                 self.bump();
                 let body = self.parse_block()?;
-                Ok(Stmt::For { kind: ForKind::Infinite, body, span: self.span_from(start) })
+                Ok(Stmt::For {
+                    kind: ForKind::Infinite,
+                    body,
+                    span: self.span_from(start),
+                })
             }
             Tok::Kw("match") => self.parse_match(start),
             Tok::Kw("select") => self.parse_select(start),
@@ -739,7 +874,10 @@ impl Parser {
                 } else {
                     self.parse_expr_list(true)?
                 };
-                Ok(Stmt::Return { values, span: self.span_from(start) })
+                Ok(Stmt::Return {
+                    values,
+                    span: self.span_from(start),
+                })
             }
             Tok::Kw("task") => {
                 self.bump();
@@ -756,12 +894,18 @@ impl Parser {
             Tok::Kw("managed") => {
                 self.bump();
                 let body = self.parse_block()?;
-                Ok(Stmt::Managed { body, span: self.span_from(start) })
+                Ok(Stmt::Managed {
+                    body,
+                    span: self.span_from(start),
+                })
             }
             Tok::Kw("defer") => {
                 self.bump();
                 let call = self.parse_expr(true)?;
-                Ok(Stmt::Defer { call, span: self.span_from(start) })
+                Ok(Stmt::Defer {
+                    call,
+                    span: self.span_from(start),
+                })
             }
             Tok::Kw("break") => {
                 self.bump();
@@ -776,7 +920,10 @@ impl Parser {
                 } else {
                     None
                 };
-                Ok(Stmt::Break { span: self.span_from(start), label })
+                Ok(Stmt::Break {
+                    span: self.span_from(start),
+                    label,
+                })
             }
             Tok::Kw("continue") => {
                 self.bump();
@@ -786,7 +933,10 @@ impl Parser {
                 } else {
                     None
                 };
-                Ok(Stmt::Continue { span: self.span_from(start), label })
+                Ok(Stmt::Continue {
+                    span: self.span_from(start),
+                    label,
+                })
             }
             Tok::Punct("{") => {
                 let block = self.parse_block()?;
@@ -808,7 +958,12 @@ impl Parser {
                             name: "panic".to_string(),
                             span: self.span_from(start),
                         }),
-                        args: vec![CallArg { name: None, value, spread: false, span: vspan }],
+                        args: vec![CallArg {
+                            name: None,
+                            value,
+                            spread: false,
+                            span: vspan,
+                        }],
                         span,
                     },
                     span,
@@ -873,7 +1028,7 @@ impl Parser {
             self.bump();
             let mut targets = Vec::with_capacity(exprs.len());
             for e in exprs {
-                targets.push(self.to_place(e)?);
+                targets.push(self.place_of(e)?);
             }
             let values = self.parse_expr_list(true)?;
             return Ok(Stmt::Assign {
@@ -885,12 +1040,16 @@ impl Parser {
         }
 
         if self.at_punct("++") || self.at_punct("--") {
-            let op = if self.at_punct("++") { AssignOp::Inc } else { AssignOp::Dec };
+            let op = if self.at_punct("++") {
+                AssignOp::Inc
+            } else {
+                AssignOp::Dec
+            };
             self.bump();
             if exprs.len() != 1 {
                 return self.err("++/-- applies to a single place");
             }
-            let target = self.to_place(exprs.pop().unwrap())?;
+            let target = self.place_of(exprs.pop().unwrap())?;
             return Ok(Stmt::Assign {
                 targets: vec![target],
                 op,
@@ -973,7 +1132,10 @@ impl Parser {
                 return self.err("expression initializer takes one expression");
             }
             let span = self.span_from(start);
-            let init = Stmt::Expr { expr: exprs.pop().unwrap(), span };
+            let init = Stmt::Expr {
+                expr: exprs.pop().unwrap(),
+                span,
+            };
             let cond = self.parse_expr(false)?;
             (Some(Box::new(init)), cond)
         } else {
@@ -996,14 +1158,24 @@ impl Parser {
         } else {
             None
         };
-        Ok(Stmt::If { init, cond, then, otherwise, span: self.span_from(start) })
+        Ok(Stmt::If {
+            init,
+            cond,
+            then,
+            otherwise,
+            span: self.span_from(start),
+        })
     }
 
     fn parse_for(&mut self, start: usize) -> PResult<Stmt> {
         self.bump(); // for
         if self.at_punct("{") {
             let body = self.parse_block()?;
-            return Ok(Stmt::For { kind: ForKind::Infinite, body, span: self.span_from(start) });
+            return Ok(Stmt::For {
+                kind: ForKind::Infinite,
+                body,
+                span: self.span_from(start),
+            });
         }
         if self.peek_in_clause() {
             let mut vars = vec![self.expect_ident()?];
@@ -1026,7 +1198,12 @@ impl Parser {
                 let var = vars.pop().unwrap();
                 let body = self.parse_block()?;
                 return Ok(Stmt::For {
-                    kind: ForKind::Range { var, lo: src, hi, inclusive },
+                    kind: ForKind::Range {
+                        var,
+                        lo: src,
+                        hi,
+                        inclusive,
+                    },
                     body,
                     span: self.span_from(start),
                 });
@@ -1040,7 +1217,11 @@ impl Parser {
         }
         let cond = self.parse_expr(false)?;
         let body = self.parse_block()?;
-        Ok(Stmt::For { kind: ForKind::While { cond }, body, span: self.span_from(start) })
+        Ok(Stmt::For {
+            kind: ForKind::While { cond },
+            body,
+            span: self.span_from(start),
+        })
     }
 
     /// `Ident (, Ident)* in` lookahead (contextual `in`).
@@ -1084,12 +1265,23 @@ impl Parser {
                 // ArmBody = Statement (spec §1.3): one statement, no braces
                 let s = self.parse_stmt()?;
                 let span = s.span();
-                Block { stmts: vec![s], span }
+                Block {
+                    stmts: vec![s],
+                    span,
+                }
             };
-            arms.push(MatchArm { pattern, guard, body });
+            arms.push(MatchArm {
+                pattern,
+                guard,
+                body,
+            });
         }
         self.expect_punct("}")?;
-        Ok(Stmt::Match { subject, arms, span: self.span_from(start) })
+        Ok(Stmt::Match {
+            subject,
+            arms,
+            span: self.span_from(start),
+        })
     }
 
     fn parse_pattern(&mut self) -> PResult<MatchPattern> {
@@ -1144,7 +1336,10 @@ impl Parser {
                 self.bump();
                 Ok(MatchPattern::Lit(LitKind::Bool(false)))
             }
-            _ => self.err(format!("expected match pattern, found {}", self.describe_cur())),
+            _ => self.err(format!(
+                "expected match pattern, found {}",
+                self.describe_cur()
+            )),
         }
     }
 
@@ -1160,7 +1355,10 @@ impl Parser {
                 // bare receive arm head: `<-deadline:`
                 let e = self.parse_expr(true)?;
                 match e {
-                    Expr::Receive { chan, .. } => SelectArmKind::Recv { names: Vec::new(), chan: *chan },
+                    Expr::Receive { chan, .. } => SelectArmKind::Recv {
+                        names: Vec::new(),
+                        chan: *chan,
+                    },
                     _ => return self.err("select receive arm must be `<-chan`"),
                 }
             } else {
@@ -1169,16 +1367,21 @@ impl Parser {
                 match stmt {
                     Stmt::Local(l) if l.kind == LocalKind::Define && l.values.len() == 1 => {
                         match l.values.into_iter().next().unwrap() {
-                            Expr::Receive { chan, .. } => {
-                                SelectArmKind::Recv { names: l.names, chan: *chan }
-                            }
+                            Expr::Receive { chan, .. } => SelectArmKind::Recv {
+                                names: l.names,
+                                chan: *chan,
+                            },
                             _ => return self.err("select arm must be send, receive, or default"),
                         }
                     }
                     Stmt::Send { chan, value, .. } => SelectArmKind::Send { chan, value },
-                    Stmt::Expr { expr: Expr::Receive { chan, .. }, .. } => {
-                        SelectArmKind::Recv { names: Vec::new(), chan: *chan }
-                    }
+                    Stmt::Expr {
+                        expr: Expr::Receive { chan, .. },
+                        ..
+                    } => SelectArmKind::Recv {
+                        names: Vec::new(),
+                        chan: *chan,
+                    },
                     _ => {
                         return self.err("select arm must be send, receive, or default");
                     }
@@ -1197,19 +1400,24 @@ impl Parser {
                 // arm head or the closing `}`
                 let bstart = self.pos;
                 let mut stmts = Vec::new();
-                while !self.at_punct("}") && !self.at_eof() && !self.looks_like_select_arm_head()
-                {
+                while !self.at_punct("}") && !self.at_eof() && !self.looks_like_select_arm_head() {
                     match self.parse_stmt() {
                         Ok(s) => stmts.push(s),
                         Err(_) => self.sync_stmt(),
                     }
                 }
-                Block { stmts, span: self.span_from(bstart) }
+                Block {
+                    stmts,
+                    span: self.span_from(bstart),
+                }
             };
             arms.push(SelectArm { kind, body });
         }
         self.expect_punct("}")?;
-        Ok(Stmt::Select { arms, span: self.span_from(start) })
+        Ok(Stmt::Select {
+            arms,
+            span: self.span_from(start),
+        })
     }
 
     /// Recovery/loop lookahead: does a new select arm start here?
@@ -1238,21 +1446,36 @@ impl Parser {
         }
     }
 
-    fn to_place(&mut self, e: Expr) -> PResult<Place> {
+    fn place_of(&mut self, e: Expr) -> PResult<Place> {
         let span = e.span();
         match e {
-            Expr::Ident { name, .. } => Ok(Place { kind: PlaceKind::Ident(name), span }),
+            Expr::Ident { name, .. } => Ok(Place {
+                kind: PlaceKind::Ident(name),
+                span,
+            }),
             Expr::Field { base, name, .. } => {
-                let base = Box::new(self.to_place(*base)?);
-                Ok(Place { kind: PlaceKind::Field { base, name }, span })
+                let base = Box::new(self.place_of(*base)?);
+                Ok(Place {
+                    kind: PlaceKind::Field { base, name },
+                    span,
+                })
             }
             Expr::Index { base, index, .. } => {
-                let base = Box::new(self.to_place(*base)?);
-                Ok(Place { kind: PlaceKind::Index { base, index: *index }, span })
+                let base = Box::new(self.place_of(*base)?);
+                Ok(Place {
+                    kind: PlaceKind::Index {
+                        base,
+                        index: *index,
+                    },
+                    span,
+                })
             }
             Expr::AddrOf { operand, .. } => {
-                let base = Box::new(self.to_place(*operand)?);
-                Ok(Place { kind: PlaceKind::AddrOf { base }, span })
+                let base = Box::new(self.place_of(*operand)?);
+                Ok(Place {
+                    kind: PlaceKind::AddrOf { base },
+                    span,
+                })
             }
             _ => self.err(format!("`{}` is not assignable", e.render())),
         }
@@ -1279,8 +1502,7 @@ impl Parser {
     fn parse_binary(&mut self, lit: bool, min_prec: u8) -> PResult<Expr> {
         let start = self.pos;
         let mut lhs = self.parse_unary(lit)?;
-        loop {
-            let Some((op, prec)) = bin_op(self.cur()) else { break };
+        while let Some((op, prec)) = bin_op(self.cur()) {
             if prec < min_prec {
                 break;
             }
@@ -1302,29 +1524,46 @@ impl Parser {
             Tok::Punct("!") => {
                 self.bump();
                 let operand = Box::new(self.parse_unary(lit)?);
-                Ok(Expr::Unary { op: UnOp::Not, operand, span: self.span_from(start) })
+                Ok(Expr::Unary {
+                    op: UnOp::Not,
+                    operand,
+                    span: self.span_from(start),
+                })
             }
             Tok::Punct("-") => {
                 self.bump();
                 let operand = Box::new(self.parse_unary(lit)?);
-                Ok(Expr::Unary { op: UnOp::Neg, operand, span: self.span_from(start) })
+                Ok(Expr::Unary {
+                    op: UnOp::Neg,
+                    operand,
+                    span: self.span_from(start),
+                })
             }
             Tok::Punct("&") => {
                 // `&stats`, `&reg.counters[i]` — AddrOf is THE spelling used
                 // by this parser (synonymous with Unary{Addr} in the contract).
                 self.bump();
                 let operand = Box::new(self.parse_unary(lit)?);
-                Ok(Expr::AddrOf { operand, span: self.span_from(start) })
+                Ok(Expr::AddrOf {
+                    operand,
+                    span: self.span_from(start),
+                })
             }
             Tok::Punct("<-") if !matches!(self.nth(1), Tok::Kw("chan")) => {
                 self.bump();
                 let chan = Box::new(self.parse_unary(lit)?);
-                Ok(Expr::Receive { chan, span: self.span_from(start) })
+                Ok(Expr::Receive {
+                    chan,
+                    span: self.span_from(start),
+                })
             }
             Tok::Kw("move") => {
                 self.bump();
                 let operand = Box::new(self.parse_unary(lit)?);
-                Ok(Expr::Move { operand, span: self.span_from(start) })
+                Ok(Expr::Move {
+                    operand,
+                    span: self.span_from(start),
+                })
             }
             _ => self.parse_primary(lit),
         }
@@ -1336,37 +1575,58 @@ impl Parser {
             Tok::Int(s) => {
                 let s = s.clone();
                 self.bump();
-                Expr::Lit { kind: LitKind::Int(s), span: self.span_from(start) }
+                Expr::Lit {
+                    kind: LitKind::Int(s),
+                    span: self.span_from(start),
+                }
             }
             Tok::Float(s) => {
                 let s = s.clone();
                 self.bump();
-                Expr::Lit { kind: LitKind::Float(s), span: self.span_from(start) }
+                Expr::Lit {
+                    kind: LitKind::Float(s),
+                    span: self.span_from(start),
+                }
             }
             Tok::CharLit(c) => {
                 let c = *c;
                 self.bump();
-                Expr::Lit { kind: LitKind::Char(c), span: self.span_from(start) }
+                Expr::Lit {
+                    kind: LitKind::Char(c),
+                    span: self.span_from(start),
+                }
             }
             Tok::RawStr(s) => {
                 let s = s.clone();
                 self.bump();
-                Expr::Lit { kind: LitKind::RawStr(s), span: self.span_from(start) }
+                Expr::Lit {
+                    kind: LitKind::RawStr(s),
+                    span: self.span_from(start),
+                }
             }
             Tok::Kw("true") => {
                 self.bump();
-                Expr::Lit { kind: LitKind::Bool(true), span: self.span_from(start) }
+                Expr::Lit {
+                    kind: LitKind::Bool(true),
+                    span: self.span_from(start),
+                }
             }
             Tok::Kw("false") => {
                 self.bump();
-                Expr::Lit { kind: LitKind::Bool(false), span: self.span_from(start) }
+                Expr::Lit {
+                    kind: LitKind::Bool(false),
+                    span: self.span_from(start),
+                }
             }
             Tok::StrChunk(_) => self.parse_interp_string()?,
             Tok::Punct("(") => {
                 self.bump();
                 let inner = Box::new(self.parse_expr(true)?); // parens re-enable literals
                 self.expect_punct(")")?;
-                Expr::Paren { inner, span: self.span_from(start) }
+                Expr::Paren {
+                    inner,
+                    span: self.span_from(start),
+                }
             }
             Tok::Punct("[") => self.parse_bracket_literal(start)?,
             Tok::Punct("{") if lit => {
@@ -1380,17 +1640,28 @@ impl Parser {
                 // bare TypeExpr (contract gap): an empty literal of the type
                 // is the standing encoding.
                 let ty = self.parse_type()?;
-                Expr::StructLit { ty: Some(ty), fields: Vec::new(), span: self.span_from(start) }
+                Expr::StructLit {
+                    ty: Some(ty),
+                    fields: Vec::new(),
+                    span: self.span_from(start),
+                }
             }
             Tok::Punct("<-") if matches!(self.nth(1), Tok::Kw("chan")) => {
                 let ty = self.parse_type()?;
-                Expr::StructLit { ty: Some(ty), fields: Vec::new(), span: self.span_from(start) }
+                Expr::StructLit {
+                    ty: Some(ty),
+                    fields: Vec::new(),
+                    span: self.span_from(start),
+                }
             }
             Tok::Ident(name) => {
                 let name = name.clone();
                 self.bump();
                 match name.as_str() {
-                    "nil" => Expr::Lit { kind: LitKind::Nil, span: self.span_from(start) },
+                    "nil" => Expr::Lit {
+                        kind: LitKind::Nil,
+                        span: self.span_from(start),
+                    },
                     "map" if self.at_punct("[") => self.parse_map_lit(start)?,
                     "set" if self.at_punct("[") => {
                         // `set[T]{…}` (spike-6 08) — no SetLit in the AST
@@ -1405,11 +1676,17 @@ impl Parser {
                             span: self.span_from(start),
                         }
                     }
-                    _ => Expr::Ident { name, span: self.span_from(start) },
+                    _ => Expr::Ident {
+                        name,
+                        span: self.span_from(start),
+                    },
                 }
             }
             _ => {
-                return self.err(format!("expected expression, found {}", self.describe_cur()));
+                return self.err(format!(
+                    "expected expression, found {}",
+                    self.describe_cur()
+                ));
             }
         };
         self.parse_postfix(e, lit)
@@ -1467,7 +1744,10 @@ impl Parser {
         if saw_interp {
             Ok(Expr::Interp { parts, span })
         } else {
-            Ok(Expr::Lit { kind: LitKind::Str(first), span })
+            Ok(Expr::Lit {
+                kind: LitKind::Str(first),
+                span,
+            })
         }
     }
 
@@ -1487,7 +1767,10 @@ impl Parser {
                 self.bump();
                 Ok((s, self.span_from(start)))
             }
-            _ => self.err(format!("expected string literal, found {}", self.describe_cur())),
+            _ => self.err(format!(
+                "expected string literal, found {}",
+                self.describe_cur()
+            )),
         }
     }
 
@@ -1508,10 +1791,18 @@ impl Parser {
                     self.eat_punct(",");
                 }
                 self.expect_punct("}")?;
-                Ok(Expr::SliceLit { elem, items, span: self.span_from(start) })
+                Ok(Expr::SliceLit {
+                    elem,
+                    items,
+                    span: self.span_from(start),
+                })
             } else {
                 // `[]byte` as a value (make's first argument)
-                Ok(Expr::SliceLit { elem, items: Vec::new(), span: self.span_from(start) })
+                Ok(Expr::SliceLit {
+                    elem,
+                    items: Vec::new(),
+                    span: self.span_from(start),
+                })
             }
         } else {
             let mut items = Vec::new();
@@ -1523,7 +1814,11 @@ impl Parser {
                 self.eat_punct(",");
             }
             self.expect_punct("]")?;
-            Ok(Expr::SliceLit { elem: None, items, span: self.span_from(start) })
+            Ok(Expr::SliceLit {
+                elem: None,
+                items,
+                span: self.span_from(start),
+            })
         }
     }
 
@@ -1547,7 +1842,12 @@ impl Parser {
             self.eat_punct(",");
         }
         self.expect_punct("}")?;
-        Ok(Expr::MapLit { key, value, entries, span: self.span_from(start) })
+        Ok(Expr::MapLit {
+            key,
+            value,
+            entries,
+            span: self.span_from(start),
+        })
     }
 
     fn parse_struct_lit(&mut self, ty: Option<TypeExpr>, start: usize) -> PResult<Expr> {
@@ -1558,14 +1858,22 @@ impl Parser {
             let name = self.expect_ident()?;
             self.expect_punct(":")?;
             let value = self.parse_expr(true)?;
-            fields.push(FieldInit { name, value, span: self.span_from(fstart) });
+            fields.push(FieldInit {
+                name,
+                value,
+                span: self.span_from(fstart),
+            });
             if !self.at_punct(",") && !self.at_punct("}") {
                 return self.err("expected ',' or '}' in struct literal");
             }
             self.eat_punct(",");
         }
         self.expect_punct("}")?;
-        Ok(Expr::StructLit { ty, fields, span: self.span_from(start) })
+        Ok(Expr::StructLit {
+            ty,
+            fields,
+            span: self.span_from(start),
+        })
     }
 
     fn parse_fn_lit(&mut self) -> PResult<Expr> {
@@ -1575,12 +1883,15 @@ impl Parser {
         let params = self.parse_params()?;
         self.expect_punct(")")?;
         if !self.at_punct("{") {
-            return self.err(
-                "fn literal result types are outside the AST surface — expected `{` body",
-            );
+            return self
+                .err("fn literal result types are outside the AST surface — expected `{` body");
         }
         let body = self.parse_block()?;
-        Ok(Expr::FnLit { params, body, span: self.span_from(start) })
+        Ok(Expr::FnLit {
+            params,
+            body,
+            span: self.span_from(start),
+        })
     }
 
     fn parse_postfix(&mut self, mut e: Expr, lit: bool) -> PResult<Expr> {
@@ -1589,7 +1900,10 @@ impl Parser {
             // chain at a literal-allowing position (see module docs).
             if self.at_punct("{") && lit {
                 if let Some(name) = type_name_chain(&e) {
-                    let ty = TypeExpr::Named { name, span: e.span() };
+                    let ty = TypeExpr::Named {
+                        name,
+                        span: e.span(),
+                    };
                     e = self.parse_struct_lit(Some(ty), self.pos)?;
                     continue;
                 }
@@ -1599,18 +1913,29 @@ impl Parser {
                     self.bump();
                     let name = self.expect_ident()?;
                     let span = self.span_to_prev(e.span().start);
-                    e = Expr::Field { base: Box::new(e), name, span };
+                    e = Expr::Field {
+                        base: Box::new(e),
+                        name,
+                        span,
+                    };
                 }
                 Tok::Punct("(") => {
                     let span_start = e.span().start;
                     let args = self.parse_call_args()?;
                     let span = self.span_to_prev(span_start);
-                    e = Expr::Call { callee: Box::new(e), args, span };
+                    e = Expr::Call {
+                        callee: Box::new(e),
+                        args,
+                        span,
+                    };
                 }
                 Tok::Punct("?") => {
                     self.bump();
                     let span = self.span_to_prev(e.span().start);
-                    e = Expr::Try { operand: Box::new(e), span };
+                    e = Expr::Try {
+                        operand: Box::new(e),
+                        span,
+                    };
                 }
                 Tok::Punct("[") => {
                     if self.peek_generic_args() {
@@ -1622,14 +1947,17 @@ impl Parser {
                             args.push(self.parse_type()?);
                         }
                         self.expect_punct("]")?;
-                        let joined =
-                            args.iter().map(|t| t.render()).collect::<Vec<_>>().join(", ");
+                        let joined = args
+                            .iter()
+                            .map(|t| t.render())
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         e = self.fold_type_args(e, &joined)?;
                         continue;
                     }
                     self.bump(); // [
-                    // `buf[..n]` (LX19): a leading `..` (or `:`) omits the
-                    // low bound — 0 by Go semantics.
+                                 // `buf[..n]` (LX19): a leading `..` (or `:`) omits the
+                                 // low bound — 0 by Go semantics.
                     let lo = if self.at_punct(":") || self.at_punct("..") {
                         None
                     } else {
@@ -1643,13 +1971,22 @@ impl Parser {
                         };
                         self.expect_punct("]")?;
                         let span = self.span_to_prev(e.span().start);
-                        e = Expr::Slice { base: Box::new(e), lo, hi, span };
+                        e = Expr::Slice {
+                            base: Box::new(e),
+                            lo,
+                            hi,
+                            span,
+                        };
                     } else {
                         match lo {
                             Some(index) => {
                                 self.expect_punct("]")?;
                                 let span = self.span_to_prev(e.span().start);
-                                e = Expr::Index { base: Box::new(e), index, span };
+                                e = Expr::Index {
+                                    base: Box::new(e),
+                                    index,
+                                    span,
+                                };
                             }
                             None => return self.err("expected expression in index"),
                         }
@@ -1730,7 +2067,10 @@ impl Parser {
     fn fold_type_args(&mut self, e: Expr, rendered: &str) -> PResult<Expr> {
         let suffix = format!("[{}]", rendered);
         match e {
-            Expr::Ident { name, span } => Ok(Expr::Ident { name: format!("{}{}", name, suffix), span }),
+            Expr::Ident { name, span } => Ok(Expr::Ident {
+                name: format!("{}{}", name, suffix),
+                span,
+            }),
             Expr::Field { base, name, span } => Ok(Expr::Field {
                 base,
                 name: format!("{}{}", name, suffix),
@@ -1748,23 +2088,27 @@ impl Parser {
             // named argument `name = expr` (example 10: `seed=7`). The name
             // rides on CallArg (contract extension, logged) — Go has no
             // named args, so the emitter places it by descriptor order.
-            let name = if matches!(self.cur(), Tok::Ident(_))
-                && matches!(self.nth(1), Tok::Punct("="))
-            {
-                let n = match self.cur() {
-                    Tok::Ident(s) => s.clone(),
-                    _ => unreachable!(),
+            let name =
+                if matches!(self.cur(), Tok::Ident(_)) && matches!(self.nth(1), Tok::Punct("=")) {
+                    let n = match self.cur() {
+                        Tok::Ident(s) => s.clone(),
+                        _ => unreachable!(),
+                    };
+                    self.bump();
+                    self.bump();
+                    Some(n)
+                } else {
+                    None
                 };
-                self.bump();
-                self.bump();
-                Some(n)
-            } else {
-                None
-            };
             let value = self.parse_expr(true)?;
             let spread = self.eat_punct("...");
             let span = self.span_from(astart);
-            args.push(CallArg { name, value, spread, span });
+            args.push(CallArg {
+                name,
+                value,
+                spread,
+                span,
+            });
             if !self.at_punct(",") && !self.at_punct(")") {
                 return self.err("expected ',' or ')' in argument list");
             }
@@ -1799,9 +2143,7 @@ fn bin_op(t: &Tok) -> Option<(BinOp, u8)> {
 fn type_name_chain(e: &Expr) -> Option<String> {
     match e {
         Expr::Ident { name, .. } => Some(name.clone()),
-        Expr::Field { base, name, .. } => {
-            type_name_chain(base).map(|b| format!("{}.{}", b, name))
-        }
+        Expr::Field { base, name, .. } => type_name_chain(base).map(|b| format!("{}.{}", b, name)),
         _ => None,
     }
 }
@@ -1823,7 +2165,13 @@ mod tests {
 
     /// First statement of the first fn body in the file.
     fn first_stmt(f: &File) -> &Stmt {
-        &f.fns().next().expect("a fn").body.as_ref().expect("body").stmts[0]
+        &f.fns()
+            .next()
+            .expect("a fn")
+            .body
+            .as_ref()
+            .expect("body")
+            .stmts[0]
     }
 
     #[test]
@@ -1831,8 +2179,16 @@ mod tests {
         // corpus 19: fmt.println("fox count: {m["fox"]}")
         let f = parse_src(r#"fn main() { fmt.println("fox count: {m["fox"]}") }"#);
         let stmt = first_stmt(&f);
-        let Stmt::Expr { expr: Expr::Call { args, .. }, .. } = stmt else { panic!("call") };
-        let Expr::Interp { parts, .. } = &args[0].value else { panic!("interp") };
+        let Stmt::Expr {
+            expr: Expr::Call { args, .. },
+            ..
+        } = stmt
+        else {
+            panic!("call")
+        };
+        let Expr::Interp { parts, .. } = &args[0].value else {
+            panic!("interp")
+        };
         assert_eq!(parts.len(), 2);
         assert!(matches!(&parts[0], InterpPart::Lit(s) if s == "fox count: "));
         let InterpPart::Expr(Expr::Index { base, index, .. }) = &parts[1] else {
@@ -1849,13 +2205,24 @@ mod tests {
     fn interp_with_binary_expr_and_escapes() {
         let f = parse_src(r#"fn main() { fmt.fprintf(w, "{a}+{b}={a + b}\n") }"#);
         let stmt = first_stmt(&f);
-        let Stmt::Expr { expr: Expr::Call { args, .. }, .. } = stmt else { panic!("call") };
-        let Expr::Interp { parts, .. } = &args[1].value else { panic!("interp") };
+        let Stmt::Expr {
+            expr: Expr::Call { args, .. },
+            ..
+        } = stmt
+        else {
+            panic!("call")
+        };
+        let Expr::Interp { parts, .. } = &args[1].value else {
+            panic!("interp")
+        };
         // {a} "+" {b} "=" {a + b} "\n"
         assert_eq!(parts.len(), 6);
         assert!(matches!(&parts[0], InterpPart::Expr(Expr::Ident { name, .. }) if name == "a"));
         assert!(matches!(&parts[1], InterpPart::Lit(s) if s == "+"));
-        assert!(matches!(&parts[4], InterpPart::Expr(Expr::Binary { op: BinOp::Add, .. })));
+        assert!(matches!(
+            &parts[4],
+            InterpPart::Expr(Expr::Binary { op: BinOp::Add, .. })
+        ));
         assert!(matches!(&parts[5], InterpPart::Lit(s) if s == "\n"));
     }
 
@@ -1864,7 +2231,13 @@ mod tests {
         // corpus 15: for w, n in shard_counts
         let f = parse_src("fn main() { for w, n in shard_counts { merged[w] += n } }");
         let stmt = first_stmt(&f);
-        let Stmt::For { kind: ForKind::Iterate { vars, expr }, .. } = stmt else { panic!("for") };
+        let Stmt::For {
+            kind: ForKind::Iterate { vars, expr },
+            ..
+        } = stmt
+        else {
+            panic!("for")
+        };
         assert_eq!(vars, &vec!["w".to_string(), "n".to_string()]);
         assert!(matches!(expr, Expr::Ident { name, .. } if name == "shard_counts"));
     }
@@ -1881,7 +2254,13 @@ mod tests {
             Stmt::Local(LocalDecl { kind: LocalKind::Let, names, values, .. })
                 if names == &vec!["arr".to_string()] && values.len() == 1
         ));
-        assert!(matches!(&body.stmts[1], Stmt::Local(LocalDecl { kind: LocalKind::Let, .. })));
+        assert!(matches!(
+            &body.stmts[1],
+            Stmt::Local(LocalDecl {
+                kind: LocalKind::Let,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -1889,7 +2268,15 @@ mod tests {
         // corpus 15/16: results <- move local
         let f = parse_src("fn main() { results <- move local }");
         let stmt = first_stmt(&f);
-        let Stmt::Send { chan, value, is_move, .. } = stmt else { panic!("send") };
+        let Stmt::Send {
+            chan,
+            value,
+            is_move,
+            ..
+        } = stmt
+        else {
+            panic!("send")
+        };
         assert!(*is_move);
         assert!(matches!(chan, Expr::Ident { name, .. } if name == "results"));
         assert!(matches!(value, Expr::Ident { name, .. } if name == "local"));
@@ -1913,7 +2300,9 @@ mod tests {
         // corpus 02/18: managed { … }
         let f = parse_src("fn main() { managed { counts := map[string]int{} } }");
         let stmt = first_stmt(&f);
-        let Stmt::Managed { body, .. } = stmt else { panic!("managed") };
+        let Stmt::Managed { body, .. } = stmt else {
+            panic!("managed")
+        };
         assert_eq!(body.stmts.len(), 1);
         assert!(matches!(&body.stmts[0], Stmt::Local(_)));
     }
@@ -1925,14 +2314,18 @@ mod tests {
         );
         let body = &f.fns().next().unwrap().body.as_ref().unwrap().stmts;
         let cases = [
-            (true, true), // words[a0:b0]
+            (true, true),  // words[a0:b0]
             (true, false), // words[1:]
             (false, true), // words[:2]
             (false, true), // buf[..n]
         ];
         for (i, (has_lo, has_hi)) in cases.iter().enumerate() {
-            let Stmt::Local(LocalDecl { values, .. }) = &body[i] else { panic!("local") };
-            let Expr::Slice { lo, hi, .. } = &values[0] else { panic!("slice") };
+            let Stmt::Local(LocalDecl { values, .. }) = &body[i] else {
+                panic!("local")
+            };
+            let Expr::Slice { lo, hi, .. } = &values[0] else {
+                panic!("slice")
+            };
             assert_eq!(lo.is_some(), *has_lo, "case {i} lo");
             assert_eq!(hi.is_some(), *has_hi, "case {i} hi");
         }
@@ -1943,10 +2336,20 @@ mod tests {
         // corpus 14: payload[i*32 : i*32+32]
         let f = parse_src("fn main() { chunk := payload[i * 32: i * 32 + 32] }");
         let stmt = first_stmt(&f);
-        let Stmt::Local(LocalDecl { values, .. }) = stmt else { panic!("local") };
-        let Expr::Slice { lo, hi, .. } = &values[0] else { panic!("slice") };
-        assert!(matches!(lo.as_deref(), Some(Expr::Binary { op: BinOp::Mul, .. })));
-        assert!(matches!(hi.as_deref(), Some(Expr::Binary { op: BinOp::Add, .. })));
+        let Stmt::Local(LocalDecl { values, .. }) = stmt else {
+            panic!("local")
+        };
+        let Expr::Slice { lo, hi, .. } = &values[0] else {
+            panic!("slice")
+        };
+        assert!(matches!(
+            lo.as_deref(),
+            Some(Expr::Binary { op: BinOp::Mul, .. })
+        ));
+        assert!(matches!(
+            hi.as_deref(),
+            Some(Expr::Binary { op: BinOp::Add, .. })
+        ));
     }
 
     #[test]
@@ -1956,13 +2359,21 @@ mod tests {
         let fn_decl = f.fns().next().unwrap();
         let ty = |i: usize| &fn_decl.params[i].ty;
         match ty(1) {
-            TypeExpr::Chan { dir: ChanDir::Recv, elem, .. } => {
+            TypeExpr::Chan {
+                dir: ChanDir::Recv,
+                elem,
+                ..
+            } => {
                 assert!(matches!(&**elem, TypeExpr::Named { name, .. } if name == "string"));
             }
             _ => panic!("<-chan string"),
         }
         match ty(2) {
-            TypeExpr::Chan { dir: ChanDir::Send, elem, .. } => {
+            TypeExpr::Chan {
+                dir: ChanDir::Send,
+                elem,
+                ..
+            } => {
                 assert!(matches!(&**elem, TypeExpr::Named { name, .. } if name == "bool"));
             }
             _ => panic!("chan<- bool"),
@@ -1975,7 +2386,11 @@ mod tests {
         let f = parse_src("fn sink(results <-chan map[string]int, done chan<- bool) { }");
         let fn_decl = f.fns().next().unwrap();
         match &fn_decl.params[0].ty {
-            TypeExpr::Chan { dir: ChanDir::Recv, elem, .. } => {
+            TypeExpr::Chan {
+                dir: ChanDir::Recv,
+                elem,
+                ..
+            } => {
                 assert!(matches!(&**elem, TypeExpr::Map { .. }));
             }
             _ => panic!("<-chan map"),
@@ -1989,10 +2404,21 @@ mod tests {
             "fn main() { e := env{services: map[string]service{\n\"frontend\": {replicas: 2, tag: \"prod\"},\n}} }",
         );
         let stmt = first_stmt(&f);
-        let Stmt::Local(LocalDecl { values, .. }) = stmt else { panic!("local") };
-        let Expr::StructLit { fields, .. } = &values[0] else { panic!("env lit") };
-        let Expr::MapLit { entries, .. } = &fields[0].value else { panic!("map lit") };
-        let Expr::StructLit { ty: None, fields: in_fields, .. } = &entries[0].1 else {
+        let Stmt::Local(LocalDecl { values, .. }) = stmt else {
+            panic!("local")
+        };
+        let Expr::StructLit { fields, .. } = &values[0] else {
+            panic!("env lit")
+        };
+        let Expr::MapLit { entries, .. } = &fields[0].value else {
+            panic!("map lit")
+        };
+        let Expr::StructLit {
+            ty: None,
+            fields: in_fields,
+            ..
+        } = &entries[0].1
+        else {
             panic!("elided struct literal in map value")
         };
         assert_eq!(in_fields.len(), 2);
@@ -2004,9 +2430,15 @@ mod tests {
         // corpus 08/09: n := &g.nodes[from] / svc := &e.services[existing]
         let f = parse_src("fn main() { svc := &e.services[existing] }");
         let stmt = first_stmt(&f);
-        let Stmt::Local(LocalDecl { values, .. }) = stmt else { panic!("local") };
-        let Expr::AddrOf { operand, .. } = &values[0] else { panic!("addr of") };
-        let Expr::Index { base, index, .. } = &**operand else { panic!("index") };
+        let Stmt::Local(LocalDecl { values, .. }) = stmt else {
+            panic!("local")
+        };
+        let Expr::AddrOf { operand, .. } = &values[0] else {
+            panic!("addr of")
+        };
+        let Expr::Index { base, index, .. } = &**operand else {
+            panic!("index")
+        };
         assert!(matches!(&**base, Expr::Field { name, .. } if name == "services"));
         assert!(matches!(&**index, Expr::Ident { name, .. } if name == "existing"));
     }
@@ -2016,7 +2448,13 @@ mod tests {
         // corpus 04: p, f := stats.processed, stats.failures
         let f = parse_src("fn main() { p, f := stats.processed, stats.failures }");
         let stmt = first_stmt(&f);
-        let Stmt::Local(LocalDecl { kind: LocalKind::Define, names, values, .. }) = stmt else {
+        let Stmt::Local(LocalDecl {
+            kind: LocalKind::Define,
+            names,
+            values,
+            ..
+        }) = stmt
+        else {
             panic!("define")
         };
         assert_eq!(names, &vec!["p".to_string(), "f".to_string()]);
@@ -2028,7 +2466,9 @@ mod tests {
         // corpus 10: code, body := httptest.get(mux, "/ping")?
         let f = parse_src("fn main() { code, body := httptest.get(mux, \"/ping\")? }");
         let stmt = first_stmt(&f);
-        let Stmt::Local(LocalDecl { names, values, .. }) = stmt else { panic!("define") };
+        let Stmt::Local(LocalDecl { names, values, .. }) = stmt else {
+            panic!("define")
+        };
         assert_eq!(names.len(), 2);
         assert!(matches!(&values[0], Expr::Try { .. }));
     }
@@ -2038,9 +2478,16 @@ mod tests {
         // corpus 07: if v, ok := c.entries[key]; ok { }
         let f = parse_src("fn main() { if v, ok := c.entries[key]; ok { return } }");
         let stmt = first_stmt(&f);
-        let Stmt::If { init, cond, .. } = stmt else { panic!("if") };
+        let Stmt::If { init, cond, .. } = stmt else {
+            panic!("if")
+        };
         let init = init.as_ref().unwrap();
-        let Stmt::Local(LocalDecl { kind: LocalKind::Define, names, values, .. }) = &**init
+        let Stmt::Local(LocalDecl {
+            kind: LocalKind::Define,
+            names,
+            values,
+            ..
+        }) = &**init
         else {
             panic!("init define")
         };
@@ -2054,7 +2501,9 @@ mod tests {
         // THE load-bearing ambiguity: `if ok {` — `{` starts the block
         let f = parse_src("fn main() { if ok { x := 1 } }");
         let stmt = first_stmt(&f);
-        let Stmt::If { cond, then, .. } = stmt else { panic!("if") };
+        let Stmt::If { cond, then, .. } = stmt else {
+            panic!("if")
+        };
         assert!(matches!(cond, Expr::Ident { name, .. } if name == "ok"));
         assert_eq!(then.stmts.len(), 1);
     }
@@ -2071,12 +2520,36 @@ mod tests {
         }";
         let f = parse_src(src);
         let body = &f.fns().next().unwrap().body.as_ref().unwrap().stmts;
-        assert!(matches!(&body[0], Stmt::For { kind: ForKind::Infinite, .. }));
-        assert!(matches!(&body[1], Stmt::For { kind: ForKind::While { .. }, .. }));
-        assert!(matches!(&body[2], Stmt::For { kind: ForKind::Range { var, .. }, .. } if var == "i"));
-        assert!(matches!(&body[3], Stmt::For { kind: ForKind::Iterate { vars, .. }, .. } if vars.len() == 1));
-        assert!(matches!(&body[4], Stmt::For { kind: ForKind::Iterate { vars, .. }, .. } if vars == &vec!["_".to_string(), "url".to_string()]));
-        assert!(matches!(&body[5], Stmt::For { kind: ForKind::Range { .. }, .. }));
+        assert!(matches!(
+            &body[0],
+            Stmt::For {
+                kind: ForKind::Infinite,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &body[1],
+            Stmt::For {
+                kind: ForKind::While { .. },
+                ..
+            }
+        ));
+        assert!(
+            matches!(&body[2], Stmt::For { kind: ForKind::Range { var, .. }, .. } if var == "i")
+        );
+        assert!(
+            matches!(&body[3], Stmt::For { kind: ForKind::Iterate { vars, .. }, .. } if vars.len() == 1)
+        );
+        assert!(
+            matches!(&body[4], Stmt::For { kind: ForKind::Iterate { vars, .. }, .. } if vars == &vec!["_".to_string(), "url".to_string()])
+        );
+        assert!(matches!(
+            &body[5],
+            Stmt::For {
+                kind: ForKind::Range { .. },
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2100,8 +2573,20 @@ mod tests {
             Stmt::Assign { op: AssignOp::Inc, targets, .. }
                 if matches!(&targets[0].kind, PlaceKind::Field { name, .. } if name == "processed")
         ));
-        assert!(matches!(&body[2], Stmt::Assign { op: AssignOp::AddAssign, .. }));
-        assert!(matches!(&body[3], Stmt::Assign { op: AssignOp::Assign, .. }));
+        assert!(matches!(
+            &body[2],
+            Stmt::Assign {
+                op: AssignOp::AddAssign,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &body[3],
+            Stmt::Assign {
+                op: AssignOp::Assign,
+                ..
+            }
+        ));
         assert!(matches!(
             &body[4],
             Stmt::Assign { targets, values, .. }
@@ -2115,7 +2600,14 @@ mod tests {
         // corpus 01: for _ in 0..n_shards { <-done }
         let f = parse_src("fn main() { for _ in 0..n_shards { <-done } }");
         let stmt = first_stmt(&f);
-        let Stmt::For { kind: ForKind::Range { var, .. }, body, .. } = stmt else { panic!("for") };
+        let Stmt::For {
+            kind: ForKind::Range { var, .. },
+            body,
+            ..
+        } = stmt
+        else {
+            panic!("for")
+        };
         assert_eq!(var, "_");
         assert!(matches!(
             &body.stmts[0],
@@ -2129,7 +2621,9 @@ mod tests {
         // corpus 15: shard_counts := <-results
         let f = parse_src("fn main() { shard_counts := <-results }");
         let stmt = first_stmt(&f);
-        let Stmt::Local(LocalDecl { values, .. }) = stmt else { panic!("local") };
+        let Stmt::Local(LocalDecl { values, .. }) = stmt else {
+            panic!("local")
+        };
         assert!(matches!(&values[0], Expr::Receive { .. }));
     }
 
@@ -2138,7 +2632,9 @@ mod tests {
         // corpus 01: task tally(move chunk, counts, done)
         let f = parse_src("fn main() { task tally(move chunk, counts, done) }");
         let stmt = first_stmt(&f);
-        let Stmt::Task { callee, args, .. } = stmt else { panic!("task") };
+        let Stmt::Task { callee, args, .. } = stmt else {
+            panic!("task")
+        };
         assert!(matches!(callee, Expr::Ident { name, .. } if name == "tally"));
         assert_eq!(args.len(), 3);
         assert!(matches!(&args[0].value, Expr::Move { operand, .. }
@@ -2182,19 +2678,41 @@ mod tests {
         //                         http.handler(fn(w, r) { … })
         let f = parse_src("fn main() { mux.handle(\"/p\", http.handler(fn(w http.response_writer, r *http.request) { })) }");
         let stmt = first_stmt(&f);
-        let Stmt::Expr { expr: Expr::Call { args, .. }, .. } = stmt else { panic!("call") };
+        let Stmt::Expr {
+            expr: Expr::Call { args, .. },
+            ..
+        } = stmt
+        else {
+            panic!("call")
+        };
         // http.handler(fn...) — arg is the handler call
-        let Expr::Call { args: hargs, .. } = &args[1].value else { panic!("handler call") };
-        let Expr::FnLit { params, .. } = &hargs[0].value else { panic!("fn lit") };
+        let Expr::Call { args: hargs, .. } = &args[1].value else {
+            panic!("handler call")
+        };
+        let Expr::FnLit { params, .. } = &hargs[0].value else {
+            panic!("fn lit")
+        };
         assert_eq!(params.len(), 2);
-        assert!(matches!(&params[0].ty, TypeExpr::Named { name, .. } if name == "http.response_writer"));
+        assert!(
+            matches!(&params[0].ty, TypeExpr::Named { name, .. } if name == "http.response_writer")
+        );
         assert!(matches!(&params[1].ty, TypeExpr::Pointer { .. }));
 
         let f2 = parse_src("fn main() { mux.handle(\"/p\", http.handler(fn(w, r) { })) }");
         let stmt = first_stmt(&f2);
-        let Stmt::Expr { expr: Expr::Call { args, .. }, .. } = stmt else { panic!("call") };
-        let Expr::Call { args: hargs, .. } = &args[1].value else { panic!("handler call") };
-        let Expr::FnLit { params, .. } = &hargs[0].value else { panic!("fn lit") };
+        let Stmt::Expr {
+            expr: Expr::Call { args, .. },
+            ..
+        } = stmt
+        else {
+            panic!("call")
+        };
+        let Expr::Call { args: hargs, .. } = &args[1].value else {
+            panic!("handler call")
+        };
+        let Expr::FnLit { params, .. } = &hargs[0].value else {
+            panic!("fn lit")
+        };
         assert_eq!(params.len(), 2);
         // inferred types: Named { name: "" } (contract-gap encoding)
         assert!(matches!(&params[0].ty, TypeExpr::Named { name, .. } if name.is_empty()));
@@ -2209,7 +2727,10 @@ mod tests {
         let fns: Vec<&FnDecl> = f.fns().collect();
         assert_eq!(fns[0].name, "lru_cache.new");
         assert_eq!(fns[0].type_params.len(), 2);
-        assert_eq!(fns[0].type_params[0].constraint.as_deref(), Some("comparable"));
+        assert_eq!(
+            fns[0].type_params[0].constraint.as_deref(),
+            Some("comparable")
+        );
         match &fns[0].results[0].ty {
             TypeExpr::Named { name, .. } => assert_eq!(name, "lru_cache[k, v]"),
             t => panic!("folded result type, got {:?}", t.render()),
@@ -2221,9 +2742,15 @@ mod tests {
 
         // body: return lru_cache[k, v]{cap: cap}
         let body = fns[0].body.as_ref().unwrap();
-        let Stmt::Return { values, .. } = &body.stmts[0] else { panic!("return") };
+        let Stmt::Return { values, .. } = &body.stmts[0] else {
+            panic!("return")
+        };
         match &values[0] {
-            Expr::StructLit { ty: Some(TypeExpr::Named { name, .. }), fields, .. } => {
+            Expr::StructLit {
+                ty: Some(TypeExpr::Named { name, .. }),
+                fields,
+                ..
+            } => {
                 assert_eq!(name, "lru_cache[k, v]");
                 assert_eq!(fields.len(), 1);
             }
@@ -2236,7 +2763,9 @@ mod tests {
         // spike-6 07: c := lru_cache.new[string, int](2)
         let f = parse_src("fn main() { c := lru_cache.new[string, int](2) }");
         let stmt = first_stmt(&f);
-        let Stmt::Local(LocalDecl { values, .. }) = stmt else { panic!("local") };
+        let Stmt::Local(LocalDecl { values, .. }) = stmt else {
+            panic!("local")
+        };
         match &values[0] {
             Expr::Call { callee, .. } => {
                 assert!(
@@ -2255,9 +2784,15 @@ mod tests {
             "fn main() { counts := map[string]int{} got := []string{} xs := [10, 50, 250, 1000] }",
         );
         let body = &f.fns().next().unwrap().body.as_ref().unwrap().stmts;
-        assert!(matches!(&body[0], Stmt::Local(LocalDecl { values, .. }) if matches!(&values[0], Expr::MapLit { entries, .. } if entries.is_empty())));
-        assert!(matches!(&body[1], Stmt::Local(LocalDecl { values, .. }) if matches!(&values[0], Expr::SliceLit { elem: Some(_), items, .. } if items.is_empty())));
-        assert!(matches!(&body[2], Stmt::Local(LocalDecl { values, .. }) if matches!(&values[0], Expr::SliceLit { elem: None, items, .. } if items.len() == 4)));
+        assert!(
+            matches!(&body[0], Stmt::Local(LocalDecl { values, .. }) if matches!(&values[0], Expr::MapLit { entries, .. } if entries.is_empty()))
+        );
+        assert!(
+            matches!(&body[1], Stmt::Local(LocalDecl { values, .. }) if matches!(&values[0], Expr::SliceLit { elem: Some(_), items, .. } if items.is_empty()))
+        );
+        assert!(
+            matches!(&body[2], Stmt::Local(LocalDecl { values, .. }) if matches!(&values[0], Expr::SliceLit { elem: None, items, .. } if items.len() == 4))
+        );
     }
 
     #[test]
@@ -2265,8 +2800,12 @@ mod tests {
         // corpus 01: append([]string{}, words[a:b]...)
         let f = parse_src("fn main() { return append([]string{}, words[a:b]...) }");
         let stmt = first_stmt(&f);
-        let Stmt::Return { values, .. } = stmt else { panic!("return") };
-        let Expr::Call { args, .. } = &values[0] else { panic!("call") };
+        let Stmt::Return { values, .. } = stmt else {
+            panic!("return")
+        };
+        let Expr::Call { args, .. } = &values[0] else {
+            panic!("call")
+        };
         assert!(args[1].spread);
         assert!(matches!(&args[1].value, Expr::Slice { .. }));
         assert!(!args[0].spread);
@@ -2275,14 +2814,24 @@ mod tests {
     #[test]
     fn make_type_argument_encoding() {
         // corpus: make(chan bool, n_shards) / make([]byte, 64*1024)
-        let f = parse_src("fn main() { done := make(chan bool, n) buf := make([]byte, 64 * 1024) }");
+        let f =
+            parse_src("fn main() { done := make(chan bool, n) buf := make([]byte, 64 * 1024) }");
         let body = &f.fns().next().unwrap().body.as_ref().unwrap().stmts;
         match &body[0] {
             Stmt::Local(LocalDecl { values, .. }) => {
-                let Expr::Call { callee, args, .. } = &values[0] else { panic!("call") };
+                let Expr::Call { callee, args, .. } = &values[0] else {
+                    panic!("call")
+                };
                 assert!(matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "make"));
                 match &args[0].value {
-                    Expr::StructLit { ty: Some(TypeExpr::Chan { dir: ChanDir::Both, .. }), fields, .. } => {
+                    Expr::StructLit {
+                        ty:
+                            Some(TypeExpr::Chan {
+                                dir: ChanDir::Both, ..
+                            }),
+                        fields,
+                        ..
+                    } => {
                         assert!(fields.is_empty());
                     }
                     e => panic!("chan type-as-value, got {}", e.render()),
@@ -2292,8 +2841,12 @@ mod tests {
         }
         match &body[1] {
             Stmt::Local(LocalDecl { values, .. }) => {
-                let Expr::Call { args, .. } = &values[0] else { panic!("call") };
-                assert!(matches!(&args[0].value, Expr::SliceLit { elem: Some(_), items, .. } if items.is_empty()));
+                let Expr::Call { args, .. } = &values[0] else {
+                    panic!("call")
+                };
+                assert!(
+                    matches!(&args[0].value, Expr::SliceLit { elem: Some(_), items, .. } if items.is_empty())
+                );
             }
             _ => panic!("local"),
         }
@@ -2305,9 +2858,15 @@ mod tests {
         // (contract gap: CallArg has no name field — value kept, name dropped)
         let f = parse_src("fn main() { checksum := sha3.stream_checksum(1_000_000, seed=7)? }");
         let stmt = first_stmt(&f);
-        let Stmt::Local(LocalDecl { values, .. }) = stmt else { panic!("local") };
-        let Expr::Try { operand, .. } = &values[0] else { panic!("try") };
-        let Expr::Call { args, .. } = operand.as_ref() else { panic!("call") };
+        let Stmt::Local(LocalDecl { values, .. }) = stmt else {
+            panic!("local")
+        };
+        let Expr::Try { operand, .. } = &values[0] else {
+            panic!("try")
+        };
+        let Expr::Call { args, .. } = operand.as_ref() else {
+            panic!("call")
+        };
         assert_eq!(args.len(), 2);
         assert!(matches!(&args[1].value, Expr::Lit { kind: LitKind::Int(s), .. } if s == "7"));
     }
@@ -2333,9 +2892,15 @@ mod tests {
         // spike-6 08: seen := set[node_id]{}
         let f = parse_src("fn main() { seen := set[node_id]{} }");
         let stmt = first_stmt(&f);
-        let Stmt::Local(LocalDecl { values, .. }) = stmt else { panic!("local") };
+        let Stmt::Local(LocalDecl { values, .. }) = stmt else {
+            panic!("local")
+        };
         match &values[0] {
-            Expr::StructLit { ty: Some(TypeExpr::Named { name, .. }), fields, .. } => {
+            Expr::StructLit {
+                ty: Some(TypeExpr::Named { name, .. }),
+                fields,
+                ..
+            } => {
                 assert_eq!(name, "set[node_id]");
                 assert!(fields.is_empty());
             }
@@ -2359,10 +2924,17 @@ mod tests {
         }";
         let f = parse_src(src);
         let body = &f.fns().next().unwrap().body.as_ref().unwrap().stmts;
-        let Stmt::For { kind: ForKind::Infinite, body: loop_body, .. } = &body[0] else {
+        let Stmt::For {
+            kind: ForKind::Infinite,
+            body: loop_body,
+            ..
+        } = &body[0]
+        else {
             panic!("loop")
         };
-        let Stmt::Select { arms, .. } = &loop_body.stmts[0] else { panic!("select") };
+        let Stmt::Select { arms, .. } = &loop_body.stmts[0] else {
+            panic!("select")
+        };
         assert_eq!(arms.len(), 2);
         match &arms[0].kind {
             SelectArmKind::Recv { names, chan } => {
@@ -2383,7 +2955,10 @@ mod tests {
         }
         // panic "…" arm body → Call{Ident("panic")} expression statement
         match &arms[1].body.stmts[0] {
-            Stmt::Expr { expr: Expr::Call { callee, .. }, .. } => {
+            Stmt::Expr {
+                expr: Expr::Call { callee, .. },
+                ..
+            } => {
                 assert!(matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "panic"));
             }
             s => panic!("panic call, got {:?}", s),
@@ -2401,7 +2976,9 @@ mod tests {
         }";
         let f = parse_src(src);
         let stmt = first_stmt(&f);
-        let Stmt::Match { subject, arms, .. } = stmt else { panic!("match") };
+        let Stmt::Match { subject, arms, .. } = stmt else {
+            panic!("match")
+        };
         assert!(matches!(subject, Expr::Call { .. }));
         assert_eq!(arms.len(), 2);
         match &arms[0].pattern {
@@ -2425,7 +3002,9 @@ mod tests {
     fn match_accepts_fat_arrow_separator() {
         let f = parse_src("fn main() { match x { some(v) => { a := 1 } _ => { } } }");
         let stmt = first_stmt(&f);
-        let Stmt::Match { arms, .. } = stmt else { panic!("match") };
+        let Stmt::Match { arms, .. } = stmt else {
+            panic!("match")
+        };
         assert_eq!(arms.len(), 2);
         assert!(matches!(arms[1].pattern, MatchPattern::Wildcard));
     }
@@ -2435,18 +3014,47 @@ mod tests {
         // 1 + 2 * 3 == 7 && true  →  And( Eq( Add(1, Mul(2,3)), 7 ), true )
         let f = parse_src("fn main() { x := 1 + 2 * 3 == 7 && true }");
         let stmt = first_stmt(&f);
-        let Stmt::Local(LocalDecl { values, .. }) = stmt else { panic!("local") };
-        let Expr::Binary { op: BinOp::And, lhs, rhs, .. } = &values[0] else { panic!("and") };
-        assert!(matches!(rhs.as_ref(), Expr::Lit { kind: LitKind::Bool(true), .. }));
-        let Expr::Binary { op: BinOp::Eq, lhs: eq_lhs, rhs: eq_rhs, .. } = lhs.as_ref()
+        let Stmt::Local(LocalDecl { values, .. }) = stmt else {
+            panic!("local")
+        };
+        let Expr::Binary {
+            op: BinOp::And,
+            lhs,
+            rhs,
+            ..
+        } = &values[0]
+        else {
+            panic!("and")
+        };
+        assert!(matches!(
+            rhs.as_ref(),
+            Expr::Lit {
+                kind: LitKind::Bool(true),
+                ..
+            }
+        ));
+        let Expr::Binary {
+            op: BinOp::Eq,
+            lhs: eq_lhs,
+            rhs: eq_rhs,
+            ..
+        } = lhs.as_ref()
         else {
             panic!("eq")
         };
         assert!(matches!(eq_rhs.as_ref(), Expr::Lit { kind: LitKind::Int(s), .. } if s == "7"));
-        let Expr::Binary { op: BinOp::Add, rhs: add_rhs, .. } = eq_lhs.as_ref() else {
+        let Expr::Binary {
+            op: BinOp::Add,
+            rhs: add_rhs,
+            ..
+        } = eq_lhs.as_ref()
+        else {
             panic!("add")
         };
-        assert!(matches!(add_rhs.as_ref(), Expr::Binary { op: BinOp::Mul, .. }));
+        assert!(matches!(
+            add_rhs.as_ref(),
+            Expr::Binary { op: BinOp::Mul, .. }
+        ));
     }
 
     #[test]
@@ -2456,10 +3064,20 @@ mod tests {
             "fn main() { fmt.println(\"processed={stats.processed} failures={stats.failures}\") }",
         );
         let stmt = first_stmt(&f);
-        let Stmt::Expr { expr: Expr::Call { args, .. }, .. } = stmt else { panic!("call") };
-        let Expr::Interp { parts, .. } = &args[0].value else { panic!("interp") };
+        let Stmt::Expr {
+            expr: Expr::Call { args, .. },
+            ..
+        } = stmt
+        else {
+            panic!("call")
+        };
+        let Expr::Interp { parts, .. } = &args[0].value else {
+            panic!("interp")
+        };
         assert_eq!(parts.len(), 4);
-        assert!(matches!(&parts[1], InterpPart::Expr(Expr::Field { name, .. }) if name == "processed"));
+        assert!(
+            matches!(&parts[1], InterpPart::Expr(Expr::Field { name, .. }) if name == "processed")
+        );
         assert!(matches!(&parts[2], InterpPart::Lit(s) if s == " failures="));
     }
 
@@ -2493,7 +3111,10 @@ mod tests {
         assert!(matches!(&f.decls[0], Decl::Import { path, .. } if path == "rust/serde_json"));
         assert!(matches!(&f.decls[1], Decl::Const(ConstDecl { name, .. }) if name == "min_logins"));
         match &f.decls[2] {
-            Decl::Const(ConstDecl { value: Expr::Binary { op: BinOp::Add, .. }, .. }) => {}
+            Decl::Const(ConstDecl {
+                value: Expr::Binary { op: BinOp::Add, .. },
+                ..
+            }) => {}
             d => panic!("concat const, got {:?}", d),
         }
     }
@@ -2521,11 +3142,17 @@ mod tests {
             );
         }
         match &body[1] {
-            Stmt::Local(LocalDecl { ty: Some(TypeExpr::Slice { .. }), .. }) => {}
+            Stmt::Local(LocalDecl {
+                ty: Some(TypeExpr::Slice { .. }),
+                ..
+            }) => {}
             _ => panic!("[]int var"),
         }
         match &body[2] {
-            Stmt::Local(LocalDecl { ty: Some(TypeExpr::Named { name, .. }), .. }) if true => {}
+            Stmt::Local(LocalDecl {
+                ty: Some(TypeExpr::Named { name, .. }),
+                ..
+            }) if true => {}
             _ => panic!("atomic.int64 var"),
         }
     }
@@ -2535,7 +3162,9 @@ mod tests {
         // spike-6 02: defer f.close()
         let f = parse_src("fn main() { defer f.close() }");
         let stmt = first_stmt(&f);
-        let Stmt::Defer { call, .. } = stmt else { panic!("defer") };
+        let Stmt::Defer { call, .. } = stmt else {
+            panic!("defer")
+        };
         assert!(matches!(call, Expr::Call { .. }));
     }
 
@@ -2543,19 +3172,37 @@ mod tests {
     fn else_if_chain() {
         let f = parse_src("fn main() { if a { } else if b { } else { } }");
         let stmt = first_stmt(&f);
-        let Stmt::If { otherwise, .. } = stmt else { panic!("if") };
+        let Stmt::If { otherwise, .. } = stmt else {
+            panic!("if")
+        };
         let otherwise = otherwise.as_ref().unwrap();
         assert!(matches!(otherwise.as_ref(), Stmt::If { .. }));
-        let Stmt::If { otherwise: inner, .. } = otherwise.as_ref() else { unreachable!() };
-        assert!(matches!(inner.as_ref().unwrap().as_ref(), Stmt::Block { .. }));
+        let Stmt::If {
+            otherwise: inner, ..
+        } = otherwise.as_ref()
+        else {
+            unreachable!()
+        };
+        assert!(matches!(
+            inner.as_ref().unwrap().as_ref(),
+            Stmt::Block { .. }
+        ));
     }
 
     #[test]
     fn try_postfix_and_call_chains() {
         // corpus 07: for u in doc.array("users")? { if u.int("logins")? == 0 { } }
-        let f = parse_src("fn main() { for u in doc.array(\"users\")? { if u.int(\"logins\")? == 0 { } } }");
+        let f = parse_src(
+            "fn main() { for u in doc.array(\"users\")? { if u.int(\"logins\")? == 0 { } } }",
+        );
         let stmt = first_stmt(&f);
-        let Stmt::For { kind: ForKind::Iterate { vars, expr }, .. } = stmt else { panic!("for") };
+        let Stmt::For {
+            kind: ForKind::Iterate { vars, expr },
+            ..
+        } = stmt
+        else {
+            panic!("for")
+        };
         assert_eq!(vars, &vec!["u".to_string()]);
         assert!(matches!(expr, Expr::Try { .. }));
     }
@@ -2565,9 +3212,15 @@ mod tests {
         // corpus 07: serde_json.parse(`{"users":[…]}`)?
         let f = parse_src("fn main() { doc := serde_json.parse(`{\"a\":1}`)? }");
         let stmt = first_stmt(&f);
-        let Stmt::Local(LocalDecl { values, .. }) = stmt else { panic!("local") };
-        let Expr::Try { operand, .. } = &values[0] else { panic!("try") };
-        let Expr::Call { args, .. } = operand.as_ref() else { panic!("call") };
+        let Stmt::Local(LocalDecl { values, .. }) = stmt else {
+            panic!("local")
+        };
+        let Expr::Try { operand, .. } = &values[0] else {
+            panic!("try")
+        };
+        let Expr::Call { args, .. } = operand.as_ref() else {
+            panic!("call")
+        };
         assert!(
             matches!(&args[0].value, Expr::Lit { kind: LitKind::RawStr(s), .. } if s.contains("\"a\""))
         );
@@ -2590,7 +3243,9 @@ mod tests {
         // corpus 02: if rerr == io.eof { — rhs is a dotted name before `{`
         let f = parse_src("fn main() { if rerr == io.eof { return } }");
         let stmt = first_stmt(&f);
-        let Stmt::If { cond, then, .. } = stmt else { panic!("if") };
+        let Stmt::If { cond, then, .. } = stmt else {
+            panic!("if")
+        };
         assert!(matches!(
             cond,
             Expr::Binary { op: BinOp::Eq, rhs, .. } if matches!(rhs.as_ref(), Expr::Field { .. })
@@ -2605,7 +3260,14 @@ mod tests {
         // type-name-chain rule, so `{` is the body.
         let f = parse_src("fn main() { for e in g.nodes[cur].edges { x := 1 } }");
         let stmt = first_stmt(&f);
-        let Stmt::For { kind: ForKind::Iterate { expr, .. }, body, .. } = stmt else { panic!("for") };
+        let Stmt::For {
+            kind: ForKind::Iterate { expr, .. },
+            body,
+            ..
+        } = stmt
+        else {
+            panic!("for")
+        };
         assert!(matches!(expr, Expr::Field { .. }));
         assert_eq!(body.stmts.len(), 1);
     }
@@ -2615,7 +3277,14 @@ mod tests {
         // corpus: for i in 0..n_shards { — hi is a bare ident before `{`
         let f = parse_src("fn main() { for i in 0..n_shards { x := 1 } }");
         let stmt = first_stmt(&f);
-        let Stmt::For { kind: ForKind::Range { hi, .. }, body, .. } = stmt else { panic!("for") };
+        let Stmt::For {
+            kind: ForKind::Range { hi, .. },
+            body,
+            ..
+        } = stmt
+        else {
+            panic!("for")
+        };
         assert!(matches!(hi, Expr::Ident { name, .. } if name == "n_shards"));
         assert_eq!(body.stmts.len(), 1);
     }
@@ -2633,8 +3302,16 @@ mod tests {
     fn multi_line_string_concat() {
         // corpus 01: const corpus = "…" +
         //                 "…"      (continuation line; no semicolons in Hybrid)
-        let f = parse_src("const corpus = \"the quick brown fox \" +\n    \"jumps over\"\nfn main() { }");
-        assert!(matches!(&f.decls[0], Decl::Const(ConstDecl { value: Expr::Binary { op: BinOp::Add, .. }, .. })));
+        let f = parse_src(
+            "const corpus = \"the quick brown fox \" +\n    \"jumps over\"\nfn main() { }",
+        );
+        assert!(matches!(
+            &f.decls[0],
+            Decl::Const(ConstDecl {
+                value: Expr::Binary { op: BinOp::Add, .. },
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -2666,13 +3343,22 @@ mod tests {
     fn spans_point_at_the_right_region() {
         // node spans are plausible: the `:=` of line 2 and the callee
         // `fmt.println` on line 3 land on their own lines.
-        let f = parse_file("t.hy", "fn main() {\n    count := 1\n    fmt.println(\"x\")\n}")
-            .unwrap();
+        let f = parse_file(
+            "t.hy",
+            "fn main() {\n    count := 1\n    fmt.println(\"x\")\n}",
+        )
+        .unwrap();
         let body = &f.fns().next().unwrap().body.as_ref().unwrap();
-        let Stmt::Local(l) = &body.stmts[0] else { panic!("local") };
+        let Stmt::Local(l) = &body.stmts[0] else {
+            panic!("local")
+        };
         assert_eq!(l.span.start.line, 2);
         assert_eq!(l.span.start.col, 5); // `count`
-        let Stmt::Expr { expr: Expr::Call { callee, .. }, .. } = &body.stmts[1] else {
+        let Stmt::Expr {
+            expr: Expr::Call { callee, .. },
+            ..
+        } = &body.stmts[1]
+        else {
             panic!("call")
         };
         assert_eq!(callee.span().start.line, 3);

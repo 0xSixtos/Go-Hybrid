@@ -6,9 +6,7 @@
 //! read form, 20 the alias-write form), is HYB-E3003 with tier0_rule A1b
 //! (moves) or A7 (consuming APIs, via `.with_rule("A7")`).
 
-use crate::model::{
-    move_operand_ident, Checker, FnState, MoveKind, MoveInfo,
-};
+use crate::model::{move_operand_ident, Checker, FnState, MoveInfo, MoveKind};
 use crate::walk::Use;
 use hy_diag::Diagnostic;
 use hy_syntax::Expr;
@@ -121,8 +119,8 @@ impl<'a> Checker<'a> {
             }
         }
 
-        let mut d = Diagnostic::error("HYB-E3003", self.path.clone(), u.span, msg)
-            .with_notes(notes);
+        let mut d =
+            Diagnostic::error("HYB-E3003", self.path.clone(), u.span, msg).with_notes(notes);
         if mv.kind == MoveKind::Consumed {
             d = d.with_rule("A7");
         }
@@ -154,7 +152,11 @@ impl<'a> Checker<'a> {
         }
         for m in &members {
             if let Some(b) = st.env.get_mut(m) {
-                b.moved = Some(MoveInfo { span, kind, desc: desc.clone() });
+                b.moved = Some(MoveInfo {
+                    span,
+                    kind,
+                    desc: desc.clone(),
+                });
             }
         }
     }
@@ -162,12 +164,7 @@ impl<'a> Checker<'a> {
     /// Process an expression that may carry a move transfer at a
     /// define/assign/return site (`x := move y`, `x = move y`,
     /// `return move y`).
-    pub(crate) fn mark_move_in_value(
-        &self,
-        st: &mut FnState,
-        value: &Expr,
-        desc: String,
-    ) {
+    pub(crate) fn mark_move_in_value(&self, st: &mut FnState, value: &Expr, desc: String) {
         if let Some(name) = move_operand_ident(value) {
             self.mark_move(st, &name, value.span(), desc, MoveKind::Moved);
         }

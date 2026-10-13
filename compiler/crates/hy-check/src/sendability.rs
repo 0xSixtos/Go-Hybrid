@@ -79,9 +79,7 @@ impl<'a> Checker<'a> {
                 }
                 self.classify_composite(st, expr, parts.into_iter())
             }
-            Expr::SliceLit { items, .. } => {
-                self.classify_composite(st, expr, items.iter())
-            }
+            Expr::SliceLit { items, .. } => self.classify_composite(st, expr, items.iter()),
             // field/index/slice reads: classify the read's shape, but honor
             // immutable roots (views of const values stay immutable, OQ5)
             Expr::Field { .. } | Expr::Index { .. } | Expr::Slice { .. } => {
@@ -154,7 +152,11 @@ impl<'a> Checker<'a> {
                 "as written this also panics in Go — concurrent map writes are a runtime fatal; the checker tells you earlier".to_string(),
             );
         }
-        Outcome::Rejected(RejectInfo { value: name.to_string(), ty, notes })
+        Outcome::Rejected(RejectInfo {
+            value: name.to_string(),
+            ty,
+            notes,
+        })
     }
 
     fn classify_addr_of(&self, st: &FnState, expr: &Expr, operand: &Expr) -> Outcome {
@@ -180,10 +182,10 @@ impl<'a> Checker<'a> {
         }
         match &b.shape {
             // `&hits` where hits is atomic-typed — the mediated route (OQ6)
-            TypeShape::Atomic => return Outcome::Ok,
+            TypeShape::Atomic => Outcome::Ok,
             // `&ch` — channels are share-safe by type
-            TypeShape::Chan(_) => return Outcome::Ok,
-            TypeShape::Unknown => return Outcome::Ok,
+            TypeShape::Chan(_) => Outcome::Ok,
+            TypeShape::Unknown => Outcome::Ok,
             TypeShape::Struct(Some(sname)) => {
                 let contested = self.struct_has_mutex_field(sname);
                 let mut notes = vec![format!(
@@ -198,14 +200,14 @@ impl<'a> Checker<'a> {
                         "an \"externally synchronized\" amendment (checker-verified exclusive access behind a lock) is under discussion for a later tier — this rejection is expected to be revisited; it is tracked, not silent (OQ2)".to_string(),
                     );
                 }
-                return Outcome::Rejected(RejectInfo {
+                Outcome::Rejected(RejectInfo {
                     value: expr.render(),
                     ty: format!("*{}", self.binding_ty_str(b)),
                     notes,
-                });
+                })
             }
             _ => {
-                return Outcome::Rejected(RejectInfo {
+                Outcome::Rejected(RejectInfo {
                     value: expr.render(),
                     ty: format!("*{}", self.binding_ty_str(b)),
                     notes: vec![format!(
@@ -213,7 +215,7 @@ impl<'a> Checker<'a> {
                         root,
                         b.shape.noun()
                     )],
-                });
+                })
             }
         }
     }
@@ -357,8 +359,10 @@ impl<'a> Checker<'a> {
                     "managed does not remove Go's own runtime fatals (concurrent map writes are still a runtime fatal) — prefer the channel redesign or add a lock".to_string(),
                     "counted by --report-managed — the hatch is greppable, auditable, countable (O6.3)".to_string(),
                 ];
-                self.diags
-                    .push(Diagnostic::warning("HYB-E8001", self.path.clone(), span, msg).with_notes(notes));
+                self.diags.push(
+                    Diagnostic::warning("HYB-E8001", self.path.clone(), span, msg)
+                        .with_notes(notes),
+                );
             } else {
                 let site_word = if code == "HYB-E3001" {
                     "across tasks"
@@ -384,8 +388,9 @@ impl<'a> Checker<'a> {
                 "a value born inside a `managed` block is sendable everywhere but stays outside the §9.2 guarantee for its whole lifetime (O6.2)".to_string(),
                 "counted by --report-managed (O6.3)".to_string(),
             ];
-            self.diags
-                .push(Diagnostic::warning("HYB-E8001", self.path.clone(), span, msg).with_notes(notes));
+            self.diags.push(
+                Diagnostic::warning("HYB-E8001", self.path.clone(), span, msg).with_notes(notes),
+            );
         }
 
         // O5.1: mark moved bindings (+ freeze live aliases)

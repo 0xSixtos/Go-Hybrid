@@ -55,7 +55,10 @@ impl Span {
     }
 
     pub fn point(pos: Pos) -> Self {
-        Span { start: pos, end: pos }
+        Span {
+            start: pos,
+            end: pos,
+        }
     }
 
     /// Merge two spans into one covering both.
@@ -143,7 +146,9 @@ impl Diagnostic {
         let reg = Registry::global();
         let entry = reg.lookup(code);
         Diagnostic {
-            code: entry.map(|e| e.code.clone()).unwrap_or_else(|| code.to_string()),
+            code: entry
+                .map(|e| e.code.clone())
+                .unwrap_or_else(|| code.to_string()),
             name: entry.map(|e| e.name.clone()).unwrap_or_default(),
             severity: Severity::Error,
             file: file.into(),
@@ -154,7 +159,10 @@ impl Diagnostic {
                 .map(|e| {
                     e.fixits
                         .iter()
-                        .map(|d| FixIt { description: d.clone(), replacement: None })
+                        .map(|d| FixIt {
+                            description: d.clone(),
+                            replacement: None,
+                        })
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -208,7 +216,10 @@ pub struct Envelope<'a> {
 
 /// Render the JSON envelope for a slice of diagnostics.
 pub fn envelope(diags: &[Diagnostic]) -> String {
-    let env = Envelope { diagnostics: diags, version: 1 };
+    let env = Envelope {
+        diagnostics: diags,
+        version: 1,
+    };
     serde_json::to_string_pretty(&env).expect("diagnostics serialize")
 }
 
@@ -257,7 +268,11 @@ pub struct CheckOutput<'a> {
 }
 
 pub fn check_output_json(diags: &[Diagnostic], summary: &CheckSummary) -> String {
-    let out = CheckOutput { diagnostics: diags, summary, version: 1 };
+    let out = CheckOutput {
+        diagnostics: diags,
+        summary,
+        version: 1,
+    };
     serde_json::to_string_pretty(&out).expect("check output serializes")
 }
 
@@ -385,7 +400,11 @@ mod tests {
     #[test]
     fn registry_loads_and_has_seed_set() {
         let reg = Registry::global();
-        assert!(reg.entries().len() >= 17, "seed set >= 17 codes, got {}", reg.entries().len());
+        assert!(
+            reg.entries().len() >= 17,
+            "seed set >= 17 codes, got {}",
+            reg.entries().len()
+        );
         for e in reg.entries() {
             assert!(e.code.starts_with("HYB-E"), "code format: {}", e.code);
             assert!(e.code.len() == 9, "code format HYB-Exxxx: {}", e.code);
@@ -414,7 +433,10 @@ mod tests {
         let codes: Vec<&str> = reg.entries().iter().map(|e| e.code.as_str()).collect();
         let mut sorted = codes.clone();
         sorted.sort();
-        assert_eq!(codes, sorted, "seed codes must be registered in ascending order");
+        assert_eq!(
+            codes, sorted,
+            "seed codes must be registered in ascending order"
+        );
     }
 
     #[test]

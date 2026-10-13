@@ -46,7 +46,10 @@ impl File {
 #[derive(Debug, Clone)]
 pub enum Decl {
     /// `import "sync"` / `import "rust/serde_json"`
-    Import { path: String, span: Span },
+    Import {
+        path: String,
+        span: Span,
+    },
     /// `const n_workers = 4` (file-level or fn-local)
     Const(ConstDecl),
     Struct(StructDecl),
@@ -167,17 +170,33 @@ pub enum TypeExpr {
     /// `[]T`
     Slice { elem: Box<TypeExpr>, span: Span },
     /// `[N]T` (fixed array; `len` may be an expression or None for `[...]`)
-    Array { len: Option<Box<Expr>>, elem: Box<TypeExpr>, span: Span },
+    Array {
+        len: Option<Box<Expr>>,
+        elem: Box<TypeExpr>,
+        span: Span,
+    },
     /// `map[K]V`
-    Map { key: Box<TypeExpr>, value: Box<TypeExpr>, span: Span },
+    Map {
+        key: Box<TypeExpr>,
+        value: Box<TypeExpr>,
+        span: Span,
+    },
     /// `chan T` / `<-chan T` / `chan<- T`
-    Chan { dir: ChanDir, elem: Box<TypeExpr>, span: Span },
+    Chan {
+        dir: ChanDir,
+        elem: Box<TypeExpr>,
+        span: Span,
+    },
     /// `option[T]`
     Option { elem: Box<TypeExpr>, span: Span },
     /// Function type for fn-literal params: `fn(w http.response_writer) {...}`
     /// — used only inside `FnLit`; a standalone named fn type is not in the
     /// corpus surface.
-    Fn { params: Vec<Param>, results: Vec<TypeExpr>, span: Span },
+    Fn {
+        params: Vec<Param>,
+        results: Vec<TypeExpr>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,7 +242,6 @@ impl TypeExpr {
             TypeExpr::Fn { .. } => "fn".to_string(),
         }
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -252,35 +270,87 @@ pub enum Stmt {
     /// Assignment/inc-dec through places:
     ///   `agg[w]++` / `count += 1` / `m2["total"] = len(m2)` /
     ///   `rows = append(rows, row{...})` / `stats.processed++`
-    Assign { targets: Vec<Place>, op: AssignOp, values: Vec<Expr>, span: Span },
+    Assign {
+        targets: Vec<Place>,
+        op: AssignOp,
+        values: Vec<Expr>,
+        span: Span,
+    },
     /// Expression statement: calls, bare receives (`<-done`).
-    Expr { expr: Expr, span: Span },
+    Expr {
+        expr: Expr,
+        span: Span,
+    },
     /// Channel send: `results <- move agg`, `jobs <- url`, `done <- true`.
     /// `value: None` = bare send `<-ch`? (not in corpus; receive covers it).
-    Send { chan: Expr, value: Expr, is_move: bool, span: Span },
+    Send {
+        chan: Expr,
+        value: Expr,
+        is_move: bool,
+        span: Span,
+    },
     /// `if ok { } else { }` / `if v, ok := m[k]; ok { }` / `else if`
-    If { init: Option<Box<Stmt>>, cond: Expr, then: Block, otherwise: Option<Box<Stmt>>, span: Span },
+    If {
+        init: Option<Box<Stmt>>,
+        cond: Expr,
+        then: Block,
+        otherwise: Option<Box<Stmt>>,
+        span: Span,
+    },
     /// All loop forms (see `ForKind`).
-    For { kind: ForKind, body: Block, span: Span },
+    For {
+        kind: ForKind,
+        body: Block,
+        span: Span,
+    },
     /// `return` / `return a, b` / `return &reg.counters[i]`
-    Return { values: Vec<Expr>, span: Span },
+    Return {
+        values: Vec<Expr>,
+        span: Span,
+    },
     /// `task tally(move chunk, counts, done)` — THE spawn check-site.
-    Task { callee: Expr, args: Vec<CallArg>, span: Span },
+    Task {
+        callee: Expr,
+        args: Vec<CallArg>,
+        span: Span,
+    },
     /// `managed { ... }` — the escape hatch (O6). Checker: sites inside are
     /// permitted + linted; values born inside are managed-tainted.
-    Managed { body: Block, span: Span },
+    Managed {
+        body: Block,
+        span: Span,
+    },
     /// `match x { pattern => body }` (spec §2.5; corpus-stretch)
-    Match { subject: Expr, arms: Vec<MatchArm>, span: Span },
+    Match {
+        subject: Expr,
+        arms: Vec<MatchArm>,
+        span: Span,
+    },
     /// `defer f.close()?`
-    Defer { call: Expr, span: Span },
+    Defer {
+        call: Expr,
+        span: Span,
+    },
     /// `break` / `break loop` / `break <label>` (example 04: breaking the
     /// LOOP from inside a select — the label is representable).
-    Break { span: Span, label: Option<String> },
-    Continue { span: Span, label: Option<String> },
+    Break {
+        span: Span,
+        label: Option<String>,
+    },
+    Continue {
+        span: Span,
+        label: Option<String>,
+    },
     /// Bare nested block `{ ... }`
-    Block { block: Block, span: Span },
+    Block {
+        block: Block,
+        span: Span,
+    },
     /// `select { ... }` (examples 04 surface; corpus-stretch)
-    Select { arms: Vec<SelectArm>, span: Span },
+    Select {
+        arms: Vec<SelectArm>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -315,14 +385,14 @@ impl LocalKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssignOp {
-    Assign,     // =
-    AddAssign,  // +=
-    SubAssign,  // -=
-    MulAssign,  // *=
-    DivAssign,  // /=
-    ModAssign,  // %=
-    Inc,        // ++ (values empty)
-    Dec,        // -- (values empty)
+    Assign,    // =
+    AddAssign, // +=
+    SubAssign, // -=
+    MulAssign, // *=
+    DivAssign, // /=
+    ModAssign, // %=
+    Inc,       // ++ (values empty)
+    Dec,       // -- (values empty)
 }
 
 /// Assignable lvalue.
@@ -336,12 +406,20 @@ pub struct Place {
 pub enum PlaceKind {
     Ident(String),
     /// `agg[w]`, `e.services[fresh]`
-    Index { base: Box<Place>, index: Expr },
+    Index {
+        base: Box<Place>,
+        index: Expr,
+    },
     /// `stats.processed`, `svc.tag`, `stats.mu`
-    Field { base: Box<Place>, name: String },
+    Field {
+        base: Box<Place>,
+        name: String,
+    },
     /// `&stats`, `&hits`, `&reg.counters[i]` — address-of in place/arg
     /// position (the parser may also yield Expr::Unary{Addr} there).
-    AddrOf { base: Box<Place> },
+    AddrOf {
+        base: Box<Place>,
+    },
 }
 
 impl Place {
@@ -378,7 +456,12 @@ pub enum ForKind {
     While { cond: Expr },
     /// `for i in 0..n_shards { }` (exclusive) / `for i in 1..=8 { }`
     /// (inclusive — the `..=` flag is representable, example 04).
-    Range { var: String, lo: Expr, hi: Expr, inclusive: bool },
+    Range {
+        var: String,
+        lo: Expr,
+        hi: Expr,
+        inclusive: bool,
+    },
     /// `for w in shard { }` / `for i, l in langs { }` / `for w, n in m { }`
     /// / `for _, url in seed_urls { }` — vars[0] is the value or index.
     Iterate { vars: Vec<String>, expr: Expr },
@@ -390,45 +473,112 @@ pub enum ForKind {
 
 #[derive(Debug, Clone)]
 pub enum Expr {
-    Ident { name: String, span: Span },
-    Lit { kind: LitKind, span: Span },
+    Ident {
+        name: String,
+        span: Span,
+    },
+    Lit {
+        kind: LitKind,
+        span: Span,
+    },
     /// Interpolated string: `"count={count} done"` — parts are literal
     /// chunks and embedded expressions (which may contain nested strings:
     /// `"{m["fox"]}"`).
-    Interp { parts: Vec<InterpPart>, span: Span },
-    Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr>, span: Span },
-    Unary { op: UnOp, operand: Box<Expr>, span: Span },
+    Interp {
+        parts: Vec<InterpPart>,
+        span: Span,
+    },
+    Binary {
+        op: BinOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+        span: Span,
+    },
+    Unary {
+        op: UnOp,
+        operand: Box<Expr>,
+        span: Span,
+    },
     /// `&stats`, `&reg.counters[i]`, `&hits` — address-of. Synonymous with
     /// `Unary { Addr }`; both spellings are legal AST (parser picks one —
     /// the checker handles both).
-    AddrOf { operand: Box<Expr>, span: Span },
+    AddrOf {
+        operand: Box<Expr>,
+        span: Span,
+    },
     /// `move agg` — ownership transfer marker (O5). Legal in spawn/send
     /// argument position and (later) assignment/return.
-    Move { operand: Box<Expr>, span: Span },
+    Move {
+        operand: Box<Expr>,
+        span: Span,
+    },
     /// Postfix `?` — error propagation (E-rules): `doc.array("users")?`.
-    Try { operand: Box<Expr>, span: Span },
+    Try {
+        operand: Box<Expr>,
+        span: Span,
+    },
     /// `<-results` (expression form; as a statement it is Expr{Receive}).
-    Receive { chan: Box<Expr>, span: Span },
+    Receive {
+        chan: Box<Expr>,
+        span: Span,
+    },
     /// `agg[w]`, `thresholds[3]`
-    Index { base: Box<Expr>, index: Box<Expr>, span: Span },
+    Index {
+        base: Box<Expr>,
+        index: Box<Expr>,
+        span: Span,
+    },
     /// `words[a:b]`, `payload[i*32 : i*32+32]` (lo/hi optional)
-    Slice { base: Box<Expr>, lo: Option<Box<Expr>>, hi: Option<Box<Expr>>, span: Span },
+    Slice {
+        base: Box<Expr>,
+        lo: Option<Box<Expr>>,
+        hi: Option<Box<Expr>>,
+        span: Span,
+    },
     /// `stats.processed`, `doc.array`, `fmt.println`, `serde_json.parse`
-    Field { base: Box<Expr>, name: String, span: Span },
+    Field {
+        base: Box<Expr>,
+        name: String,
+        span: Span,
+    },
     /// `f(x)`, `fmt.println(...)`, `doc.set("k", true)`, `min(a, b)`
-    Call { callee: Box<Expr>, args: Vec<CallArg>, span: Span },
+    Call {
+        callee: Box<Expr>,
+        args: Vec<CallArg>,
+        span: Span,
+    },
     /// `pool_stats{}`, `sample{probe: id, above: above}`,
     /// `{replicas: 2, tag: "prod"}` (type-elided, inside a typed context)
-    StructLit { ty: Option<TypeExpr>, fields: Vec<FieldInit>, span: Span },
+    StructLit {
+        ty: Option<TypeExpr>,
+        fields: Vec<FieldInit>,
+        span: Span,
+    },
     /// `[]string{}` (elem Some, no items) / `["a","b"]` / `[c1, c2]` (elem None)
-    SliceLit { elem: Option<Box<TypeExpr>>, items: Vec<Expr>, span: Span },
+    SliceLit {
+        elem: Option<Box<TypeExpr>>,
+        items: Vec<Expr>,
+        span: Span,
+    },
     /// `map[string]int{}` / `map[string]service{"frontend": {...}, ...}`
-    MapLit { key: Box<TypeExpr>, value: Box<TypeExpr>, entries: Vec<(Expr, Expr)>, span: Span },
+    MapLit {
+        key: Box<TypeExpr>,
+        value: Box<TypeExpr>,
+        entries: Vec<(Expr, Expr)>,
+        span: Span,
+    },
     /// `fn(w http.response_writer, r *http.request) { ... }` — closure
     /// literal (corpus 10: http.handler capture — the A5 perimeter shape)
-    FnLit { params: Vec<Param>, body: Block, span: Span },
+    FnLit {
+        params: Vec<Param>,
+        body: Block,
+        span: Span,
+    },
     /// Parenthesized expression (kept for faithful spans).
-    Paren { inner: Box<Expr>, span: Span },
+    Paren {
+        inner: Box<Expr>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -453,9 +603,19 @@ pub enum InterpPart {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
-    Add, Sub, Mul, Div, Mod,
-    Eq, Ne, Lt, Gt, Le, Ge,
-    And, Or,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    And,
+    Or,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -510,7 +670,10 @@ pub struct MatchArm {
 pub enum MatchPattern {
     Wildcard,
     /// `shape.circle` / `ok` / `some(x)` (with binding)
-    Path { segments: Vec<String>, binding: Option<String> },
+    Path {
+        segments: Vec<String>,
+        binding: Option<String>,
+    },
     Lit(LitKind),
 }
 
@@ -610,12 +773,19 @@ impl Expr {
 impl BinOp {
     pub fn render(&self) -> &'static str {
         match self {
-            BinOp::Add => "+", BinOp::Sub => "-", BinOp::Mul => "*",
-            BinOp::Div => "/", BinOp::Mod => "%",
-            BinOp::Eq => "==", BinOp::Ne => "!=",
-            BinOp::Lt => "<", BinOp::Gt => ">",
-            BinOp::Le => "<=", BinOp::Ge => ">=",
-            BinOp::And => "&&", BinOp::Or => "||",
+            BinOp::Add => "+",
+            BinOp::Sub => "-",
+            BinOp::Mul => "*",
+            BinOp::Div => "/",
+            BinOp::Mod => "%",
+            BinOp::Eq => "==",
+            BinOp::Ne => "!=",
+            BinOp::Lt => "<",
+            BinOp::Gt => ">",
+            BinOp::Le => "<=",
+            BinOp::Ge => ">=",
+            BinOp::And => "&&",
+            BinOp::Or => "||",
         }
     }
 }

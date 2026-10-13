@@ -1,15 +1,15 @@
 //! loans.rs — the loan rule family (SPEC §9.1 / §9.0 O2):
 //!
 //!   * A2  (O7)   HYB-E3101 — mutating-mode call on a boundary handle while
-//!                a borrow-mode loan on the same handle is live.
+//!     a borrow-mode loan on the same handle is live.
 //!   * A3  (O8)   HYB-E3102 — map insert/delete inside a live `&m[k]`
-//!                map-slot loan window (creation → last use, non-lexical).
+//!     map-slot loan window (creation → last use, non-lexical).
 //!   * A6  (O12)  HYB-E3103 — struct fields never hold borrows (declared
-//!                borrow-handle fields, and borrow values stored into fields).
+//!     borrow-handle fields, and borrow values stored into fields).
 //!   * LOAN-ESCAPE (O2) HYB-E3104 — a returned `&...` loan would outlive the
-//!                callee frame; loans are function-local by construction.
+//!     callee frame; loans are function-local by construction.
 //!   * A7  (O11/O13) HYB-E3003 rule A7 — consuming APIs transfer ownership;
-//!                later uses are use-after-consume.
+//!     later uses are use-after-consume.
 //!
 //! Plus the environment updates that feed all of the above: local defines
 //! (shapes, aliases, managed taint, A3 loan creation), assignments
@@ -32,11 +32,20 @@ use hy_syntax::{AssignOp, Expr, LocalDecl, Place, PlaceKind};
 
 enum Resolved {
     /// `pkg.method(...)` — the base ident is a known package, not a binding.
-    Package { pkg: String, method: String },
+    Package {
+        pkg: String,
+        method: String,
+    },
     /// `recv.method(...)` — receiver root binding + its shape.
-    Method { root: String, method: String, recv: TypeShape },
+    Method {
+        root: String,
+        method: String,
+        recv: TypeShape,
+    },
     /// `name(...)` — a plain function call (or builtin).
-    Fn { name: String },
+    Fn {
+        name: String,
+    },
     None,
 }
 
@@ -46,12 +55,19 @@ impl<'a> Checker<'a> {
             Expr::Field { base, name, .. } => {
                 if let Expr::Ident { name: b, .. } = &**base {
                     if self.lookup_binding(st, b).is_none() && self.known_package(b) {
-                        return Resolved::Package { pkg: b.clone(), method: name.clone() };
+                        return Resolved::Package {
+                            pkg: b.clone(),
+                            method: name.clone(),
+                        };
                     }
                 }
                 if let Some(root) = base.root_ident() {
                     let recv = self.shape_of_expr(st, base);
-                    return Resolved::Method { root: root.to_string(), method: name.clone(), recv };
+                    return Resolved::Method {
+                        root: root.to_string(),
+                        method: name.clone(),
+                        recv,
+                    };
                 }
                 Resolved::None
             }
@@ -95,7 +111,9 @@ impl<'a> Checker<'a> {
                     CallMode::Borrow => {
                         let last = loop_end.unwrap_or(idx);
                         st.loans.push(Loan {
-                            target: LoanTarget::Handle { handle: root.clone() },
+                            target: LoanTarget::Handle {
+                                handle: root.clone(),
+                            },
                             created: idx,
                             last,
                             span: cr.span,
@@ -103,7 +121,11 @@ impl<'a> Checker<'a> {
                                 "the borrow-mode call `{}` on `{}`{}",
                                 cr.callee.render(),
                                 root,
-                                if loop_end.is_some() { " (live across the whole loop)" } else { "" }
+                                if loop_end.is_some() {
+                                    " (live across the whole loop)"
+                                } else {
+                                    ""
+                                }
                             ),
                         });
                     }
@@ -171,7 +193,9 @@ impl<'a> Checker<'a> {
                 if let Some(b) = self.lookup_binding(st, name) {
                     if b.shape.is_handle() {
                         st.loans.push(Loan {
-                            target: LoanTarget::Handle { handle: name.clone() },
+                            target: LoanTarget::Handle {
+                                handle: name.clone(),
+                            },
                             created: idx,
                             last: idx,
                             span: a.span,
@@ -191,7 +215,9 @@ impl<'a> Checker<'a> {
     /// window invalidates the slot loan.
     fn check_delete_conflict(&mut self, st: &FnState, cr: &CallRef, idx: usize) {
         let Some(first) = cr.args.first() else { return };
-        let Some(path) = walk::expr_path(&first.value) else { return };
+        let Some(path) = walk::expr_path(&first.value) else {
+            return;
+        };
         self.emit_a3_if_live(st, &path, cr.span, idx, "delete");
     }
 
@@ -222,9 +248,8 @@ impl<'a> Checker<'a> {
             ),
             "a rehash may move the slot — reorder so the slot mutation finishes before any insert/delete on the same map (corpus 09 is the legal twin), or copy-out / modify / store-back (reads are copies, O9)".to_string(),
         ];
-        self.diags.push(
-            Diagnostic::error("HYB-E3102", self.path.clone(), span, msg).with_notes(notes),
-        );
+        self.diags
+            .push(Diagnostic::error("HYB-E3102", self.path.clone(), span, msg).with_notes(notes));
     }
 
     // -----------------------------------------------------------------------
@@ -242,14 +267,12 @@ impl<'a> Checker<'a> {
         if l.names.len() == 1 && l.values.len() == 1 {
             if let Some(path) = walk::addr_of_index_base_path(&l.values[0]) {
                 let binding = l.names[0].clone();
-                let last = st
-                    .last_use
-                    .get(&binding)
-                    .copied()
-                    .unwrap_or(idx)
-                    .max(idx);
+                let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
                 st.loans.push(Loan {
-                    target: LoanTarget::MapSlot { binding: binding.clone(), path },
+                    target: LoanTarget::MapSlot {
+                        binding: binding.clone(),
+                        path,
+                    },
                     created: idx,
                     last,
                     span: l.values[0].span(),
@@ -263,11 +286,10 @@ impl<'a> Checker<'a> {
         if l.values.is_empty() {
             // `var hits atomic.int64` / `var got []int` — shape from the
             // ascription (there is no initializer to infer from).
-            let shape = l
-                .ty
-                .as_ref()
-                .map(|t| self.shape_of_type(t))
-                .unwrap_or(TypeShape::Unknown);
+            let shape =
+                l.ty.as_ref()
+                    .map(|t| self.shape_of_type(t))
+                    .unwrap_or(TypeShape::Unknown);
             let ty = l.ty.clone();
             for name in &l.names {
                 self.define_binding(st, name, shape.clone(), ty.clone(), immutable, managed);
@@ -320,13 +342,7 @@ impl<'a> Checker<'a> {
     /// Extend call-scoped borrow loans opened by the calls inside `value`
     /// to the last use of the view binding `name` (the A2 non-lexical
     /// window for define-stored element views).
-    fn extend_call_loans_to_view(
-        &self,
-        st: &mut FnState,
-        value: &Expr,
-        name: &str,
-        idx: usize,
-    ) {
+    fn extend_call_loans_to_view(&self, st: &mut FnState, value: &Expr, name: &str, idx: usize) {
         let mut calls = Vec::new();
         walk::expr_calls(value, &mut calls);
         let mut roots = Vec::new();
@@ -345,10 +361,7 @@ impl<'a> Checker<'a> {
         let view_last = st.last_use.get(name).copied().unwrap_or(idx).max(idx);
         for loan in st.loans.iter_mut() {
             if let LoanTarget::Handle { handle } = &loan.target {
-                if loan.created == idx
-                    && loan.last == idx
-                    && roots.iter().any(|r| r == handle)
-                {
+                if loan.created == idx && loan.last == idx && roots.iter().any(|r| r == handle) {
                     loan.last = view_last;
                 }
             }
@@ -484,7 +497,9 @@ fn contains_addr_of_in_literal(e: &Expr) -> bool {
         return true;
     }
     match e {
-        Expr::StructLit { fields, .. } => fields.iter().any(|f| contains_addr_of_in_literal(&f.value)),
+        Expr::StructLit { fields, .. } => {
+            fields.iter().any(|f| contains_addr_of_in_literal(&f.value))
+        }
         Expr::MapLit { entries, .. } => entries
             .iter()
             .any(|(k, v)| contains_addr_of_in_literal(k) || contains_addr_of_in_literal(v)),
@@ -507,7 +522,10 @@ impl<'a> Checker<'a> {
             .filter_map(|d| match d {
                 hy_syntax::Decl::Struct(s) => Some((
                     s.name.clone(),
-                    s.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect(),
+                    s.fields
+                        .iter()
+                        .map(|f| (f.name.clone(), f.ty.clone()))
+                        .collect(),
                 )),
                 _ => None,
             })
@@ -534,9 +552,7 @@ impl<'a> Checker<'a> {
                                 .with_notes(notes),
                         );
                     }
-                    TypeShape::Pointer(inner)
-                        if !matches!(**inner, TypeShape::Atomic) =>
-                    {
+                    TypeShape::Pointer(inner) if !matches!(**inner, TypeShape::Atomic) => {
                         // O12's own example (`cur &node`): pointer fields are
                         // borrows — store an id or the value instead.
                         let msg = format!(

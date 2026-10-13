@@ -71,10 +71,7 @@ impl TypeShape {
 
     /// An L3 boundary handle (loan rules O7/O11 apply).
     pub(crate) fn is_handle(&self) -> bool {
-        matches!(
-            self,
-            TypeShape::OwnHandle(_) | TypeShape::BorrowHandle(_)
-        )
+        matches!(self, TypeShape::OwnHandle(_) | TypeShape::BorrowHandle(_))
     }
 
     /// Go reference semantics: assigning `b := a` makes `b` an ALIAS of `a`
@@ -82,10 +79,10 @@ impl TypeShape {
     /// Structs and arrays are copied by value in Go, so they are NOT
     /// binding-level aliases. Used by the freeze rule (O5.2).
     pub(crate) fn is_reference_alias(&self) -> bool {
-        match self {
-            TypeShape::Map(_, _) | TypeShape::Slice(_) | TypeShape::Pointer(_) => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            TypeShape::Map(_, _) | TypeShape::Slice(_) | TypeShape::Pointer(_)
+        )
     }
 
     /// Short human name for diagnostics.
@@ -238,18 +235,16 @@ impl<'a> Checker<'a> {
     }
 
     /// Binding lookup: locals first, then file-level consts.
-    pub(crate) fn lookup_binding<'b>(
-        &'b self,
-        st: &'b FnState,
-        name: &str,
-    ) -> Option<&'b Binding> {
+    pub(crate) fn lookup_binding<'b>(&'b self, st: &'b FnState, name: &str) -> Option<&'b Binding> {
         st.env.get(name).or_else(|| self.consts.get(name))
     }
 
     /// The type string for diagnostics: the source type when we have it,
     /// else the shape fallback.
     pub(crate) fn binding_ty_str(&self, b: &Binding) -> String {
-        b.ty.as_ref().map(|t| t.render()).unwrap_or_else(|| b.shape.render())
+        b.ty.as_ref()
+            .map(|t| t.render())
+            .unwrap_or_else(|| b.shape.render())
     }
 }
 
@@ -261,7 +256,11 @@ impl<'a> Checker<'a> {
 pub(crate) fn as_addr_of(e: &Expr) -> Option<&Expr> {
     match e {
         Expr::AddrOf { operand, .. } => Some(operand),
-        Expr::Unary { op: hy_syntax::UnOp::Addr, operand, .. } => Some(operand),
+        Expr::Unary {
+            op: hy_syntax::UnOp::Addr,
+            operand,
+            ..
+        } => Some(operand),
         _ => None,
     }
 }
