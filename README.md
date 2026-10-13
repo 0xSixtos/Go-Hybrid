@@ -118,10 +118,21 @@ unsafe boundaries hand-audited and two build systems hand-run. Hybrid's bet is
 
 ## Get it
 
-Not installable yet — this is a research-phase repo. Watch
-[releases](https://github.com/limitlessprojects/Go-Hybrid/releases), or build
-from source once MVP-0 lands. Toolchain pins: Go 1.26.9, Rust 1.99.0
-([tools/env.sh](tools/env.sh)).
+Research-phase repo; the MVP-0 walking skeleton **has landed** — six of the ten
+target programs build and run end-to-end through the Tier-0-checked pipeline
+(parse → ownership check → emit Go → `go build`). From source:
+
+```bash
+git clone https://github.com/limitlessprojects/Go-Hybrid.git && cd Go-Hybrid
+# toolchain pins: Go 1.26.9, Rust 1.99.0 (tools/env.sh)
+make examples   # builds + runs examples 01/02/03/04/07/08, diffs vs expected.txt
+make test-quick # 157 compiler tests + checker-corpus verdict agreement (20/20)
+```
+
+`hyb build <file.hy> -o <bin>` compiles one program (enforces the toolchain
+pins: HYB-E9001 on drift). Programs 05/10 (Rust-crate boundary) and 09
+(Go-consumable packages) land with Phase 2.
+
 
 ## Learn more
 

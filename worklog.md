@@ -39,3 +39,23 @@ Stage Summary:
 - Commits: 9b2fe31 (MVP-0 milestone) → 97285d3 (version script) → 8639e0b (Makefile tabs) → 1f8ad9e (example 04 + batch B) → batch C commit pending
 - PLAN.md task queue now: enum/option/match + generics (07/08) then Phase-2 bridge (05/09/10)
 - Sandbox lesson (repeat): background installs die silently; foreground curl+tar+rustup works
+
+---
+Task ID: 9 (session 5 — batch D + CI fix + docs)
+Agent: lead (Super Z)
+Task: programs 07/08 (Phase-1 exit), CI fix, README/docs refresh
+
+Work Log:
+- Batch D: option[T] prelude (val+ok struct, some() ctor, none=zero; return none lowers vs declared result); option-match → hyMatchN temp + .ok/.val if-else (guard = nested if); set[T] prelude (insert returns is-new); .pop() → hy_pop(&x); TypeAlias decl (type node_id = int — was a zero-field struct approximation); assoc fns mangle lru_cache.new → lru_cache_new; generic fns emit [k comparable, v any]; single unnamed results bare
+- O8 map-slot loan desugar: x := &m[k] → copy-read + store-back at declaring block's end (Go cannot &m[k]; O9 honesty made operational; block-scoped loan_frames flushed via emit_block_body, ALL block sites routed through it)
+- Chan binding hint: single-var iterate binds the VALUE — slices/maps emit '_, v', channels keep 'v' (hints from chan params + make)
+- Parser: peek_generic_args accepts single type-shaped args (box[t]{v: 1}); ambiguity documented (ident[index](/{ favors generics; index-call shapes absent from surface)
+- Example 07: touch() implemented per its own intent comment; Example 08: stack := []node_id{from} (bare-ident slice literal needs full local inference — deferred + logged)
+- 157 tests (48 emit + 10 batch-D tests); corpus 20/20; examples 6/6 PASS
+- CI failure diagnosed via API logs: runner rustup shim (no default toolchain) shadowed the fresh install → check-versions now tolerates empty versions + CI step prepends the installed toolchain PATH
+- README 'Get it' rewritten (MVP-0 landed: real quickstart); PLAN/STATUS/worklog refreshed
+
+Stage Summary:
+- Phase-1 exit criteria MET (programs 1, 2, 7, 8 compile + match expected)
+- Commits this session: 9b2fe31 → 97285d3 → 8639e0b → 1f8ad9e → 2bebc0c → 4000d4b → cfee21f (CI fix) → final docs commit
+- Remaining plan work: Phase 2 (Rust bridge: programs 05/09/10 + call-overhead bench) — new phase, awaits G1 human review per the gate discipline

@@ -1,9 +1,9 @@
 # Hybrid Language: Development Plan
 
 ## Status
-- Current phase: 1 — IN PROGRESS (G1 gate doc WRITTEN — awaiting human review; MVP-0 walking skeleton LANDED: 4 target programs end-to-end)
+- Current phase: 1 — IN PROGRESS (Phase-1 exit criteria MET: programs 1, 2, 7, 8 green; G1 gate doc WRITTEN — awaiting human review; SIX target programs end-to-end)
 - State: In Progress
-- Last session: 2026-10-13, summary: session 5 (recovery + MVP-0). Fresh sandbox re-recovered (clone + toolchain re-pins Go 1.26.9 / Rust 1.99.0; background installs die silently here — foreground only). Recreated the lost hy-emit crate (the crashed session never committed it): two-pass emission fixes recovered bug #1 (imports-before-types), make()-type-as-bare-type fixes bug #2; E3 ?-desugar + E6 main-exit-wrapper; M4 normalization; binding hints. hyb build wired (version-pin enforcement HYB-E9001). Registry +2 (E0002 parse-error, E9001 toolchain-mismatch → 19 codes). Example 03 struct decls restored from the spike-6 twin. Examples 01/02/03 end-to-end exact; then example 04 (inclusive ranges, labeled loop breaks, select emission — was a silent-wrongness contract gap). tools/run_examples.sh + make examples/test-quick; version-drift script; CI compiler job. 147 tests, corpus 20/20, tripwire not fired. G1 written.
+- Last session: 2026-10-13, summary: session 5 (recovery + MVP-0 + Phase-1 exit). Fresh sandbox re-recovered (clone + toolchain re-pins Go 1.26.9 / Rust 1.99.0; background installs die silently here — foreground only). Recreated the lost hy-emit crate (the crashed session never committed it): two-pass emission fixes recovered bug #1 (imports-before-types), make()-type-as-bare-type fixes bug #2; E3 ?-desugar + E6 main-exit-wrapper; M4 normalization; binding hints. hyb build wired (version-pin enforcement HYB-E9001). Registry +2 (E0002 parse-error, E9001 toolchain-mismatch → 19 codes). Examples 01/02/03 end-to-end exact; then 04 (inclusive ranges, labeled loop breaks, select); then **07 + 08 (Phase-1 exit: generics + option/match + type aliases + set/pop + O8 slot-loan desugar)**. SIX target programs now run byte-exact. Version-drift script; CI compiler job (fixed runner rustup-shim PATH precedence); G1 written. 157 tests, corpus 20/20, tripwire not fired.
 
 ## Environment
 - OS/arch: Debian 13 (trixie), x86_64, Linux 5.10
@@ -67,7 +67,7 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 - [x] Tier-0 checker MVP (Polonius-style dataflow) | done = corpus 20/20 agreement + spike-6 ten programs pass | lead | done (c3ff649; rustc = CI oracle only; verdict changes only via logged amendment)
 - [x] MVP-0 walking skeleton (examples 01–04 end-to-end) | done = parse→check→emit→go build→run, output == expected.txt | lead | done (9b2fe31 emitter+build+01/02/03; 1f8ad9e 04 + inclusive ranges + labeled breaks + select; SPEC asked ONE program, FOUR landed; version-pin enforcement rode along)
 - [x] Version-drift check script | done = asserts go1.26.9/Rust 1.99.0 across tools/env.sh, README, hyb defaults, PLAN | lead | done (97285d3; negative-tested; wired into make check + CI)
-- [ ] Enum/option/match emission design + generics surface (programs 07, 08 — Phase-1 exit) | done = 07/08 compile + match expected output | lead | pending (needs enum Go-representation + match lowering + TypeAlias decl + set[T]/slice-methods; emitter clean-errors today)
+- [x] Enum/option/match emission design + generics surface (programs 07, 08 — Phase-1 exit) | done = 07/08 compile + match expected output | lead | done (4000d4b: option/set/pop prelude, TypeAlias decl, assoc-fn mangling, O8 slot-loan copy+store-back desugar, Chan binding hint for value-semantics iterate, single-type-arg generic lookahead; example 07's touch() implemented per its own intent; 08 uses explicit []node_id — bare-ident slice literals need full inference, deferred) | **Phase-1 exit criteria MET: programs 1, 2, 7, 8 compile + match expected**
 - [ ] Phase-2 bridge (programs 05, 09, 10 + call-overhead bench vs budget) | done = target programs 9 and 10 work + G2 evidence | lead | pending (05/10 = rust crate boundary; 09 = multi-package Go-consumable emission; G1 doc written gates/G1.md awaits human)
 
 ## Blockers
@@ -92,8 +92,8 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 - G0: **PASSED 2026-10-12** (all six spikes both tiers; spike-report written; build-vs-extend re-run confirms Option B; two open human decisions logged in QUESTIONS.md — sendability reading + thread-budget config — defaults proceed per SPEC §9) | G1: **WRITTEN 2026-10-13 — gates/G1.md, READY FOR HUMAN REVIEW** (spec draft + MVP-0 both machine-verified; emitter lowering decisions need ratification) | G2: [ ] | G3: [ ]
 
 ## Test Results
-- Compiler (session 5): **147 tests green** (8 diag + 74+4 parser + 25+2 checker + 38 emit) — corpus 20/20 verdict agreement, tripwire not fired (10.0% / 15.0% vs ~25%)
-- MVP-0 end-to-end (make examples, go1.26.9): 01-hello exact; 02-cli-cat BOTH paths exact (bytes verbatim / E6 stderr+exit 1); 03-worker-pool exact [2 2 4 6 8 10 12 18]; 04-pipeline-backpressure exact total=204 — 4/4 PASS on sandbox AND wired into CI
+- Compiler (session 5): **157 tests green** (8 diag + 75+4 parser + 25+2 checker + 48 emit) — corpus 20/20 verdict agreement, tripwire not fired (10.0% / 15.0% vs ~25%)
+- MVP-0 end-to-end (make examples, go1.26.9): **6/6 PASS** — 01-hello exact; 02-cli-cat BOTH paths exact (bytes verbatim / E6 stderr+exit 1); 03-worker-pool exact [2 2 4 6 8 10 12 18]; 04-pipeline-backpressure exact total=204; 07-lru-generics exact (b evicted / a=1); 08-graph-ownership exact (a reaches d: true / d reaches a: false) — wired into CI
 - Version-pin guard: positive + negative tested (injected hyb-pin drift → DRIFT DETECTED, exit 1)
 - Spike 1 probes (correctness / 20k-deep recursion / scheduler-migration / GC-hammer / race): PASS on sandbox AND Kaggle worker
 - Spike 2 emission suite: 14/14 PASS (sandbox)
