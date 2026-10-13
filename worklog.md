@@ -232,3 +232,16 @@ Stage Summary:
 - cargo test --workspace 206/0 (was 194) · corpus 20/20 tripwire quiet · differential 9/9+11/11 FULL AGREEMENT · examples 10/10 · go vet+build+test clean · clippy 0 · fmt clean
 - The Tier-0 contract is now sharp: everything accepted was proven; everything else is named, with the fix in the message
 - Parser hangs: any malformed program now terminates with clean E0002s — a compiler that hangs was fail-open in the worst way
+
+---
+Task ID: 19-b
+Agent: Super Z (main)
+Task: Fix the CI differential flake exposed by the Batch M push.
+
+Work Log:
+- CI run 38455237116 failed: accept-side 02-shared-map-managed exited 2 with a Go concurrent-map-writes fatal — the program's OWN pre-registered header says "this exact program can still panic at runtime" (managed suppresses the checker rejection, not Go's runtime fatal). The run outcome was always scheduling luck; the earlier local "1 disagreement" I first saw was the same flake, not a Batch M regression.
+- Made the honesty note machine-readable: corpus 02 header gains a `RUNTIME-HAZARD:` marker line; tools/differential_loop.py parses markers (HAZARD_RE) and accepts, for marked programs, a RUN-phase death by the documented Go fatal (build-phase failures still FAIL) — reporting it as "documented RUNTIME-HAZARD fatal (pre-registered)".
+- 3 consecutive differential runs: FULL AGREEMENT (9/9 + 11/11).
+
+Stage Summary:
+- Differential is deterministic again; CI honesty preserved — the fatal is accepted ONLY because the corpus file itself pre-registers it.

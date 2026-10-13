@@ -35,6 +35,8 @@
 //   remove Go's own concurrent-map-write fatal — this exact program can
 //   still panic at runtime. The runtime-honest managed shape adds a lock
 //   (see 18); the Tier-0-native shape needs no hatch at all (see 15).
+// RUNTIME-HAZARD: concurrent map writes (Go fatal, pre-registered above) —
+//   the differential accept-side accepts exit 0 OR this documented fatal.
 //
 // ---- Annotations / managed ----
 //   lifetime annotations: 0. `managed` blocks: 1 (the point).

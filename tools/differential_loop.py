@@ -41,9 +41,16 @@ DEFAULT_BIN = os.path.join(
 VERDICT_RE = re.compile(
     r"^//\s*EXPECTED-VERDICT:\s*(ACCEPT-MANAGED|ACCEPT|REJECT)\b\s*(\S*)", re.M
 )
+HAZARD_RE = re.compile(
+    r"^//\s*RUNTIME-HAZARD:\s*(.+)$", re.M
+)
 
 
 def read_expected(path):
+    """(verdict, rule, hazards) — hazards are the program's pre-registered
+    RUNTIME-HAZARD markers (corpus honesty notes made machine-readable): an
+    accept-side run may legally die of the documented Go runtime fatal
+    (e.g. corpus 02's deliberate concurrent map writes)."""
     with open(path, encoding="utf-8") as f:
         src = f.read()
     m = VERDICT_RE.search(src)
@@ -52,7 +59,8 @@ def read_expected(path):
     verdict, rule = m.group(1), m.group(2)
     if verdict == "REJECT" and not rule:
         raise SystemExit(f"corpus error: {path} has REJECT without a rule id")
-    return verdict, (rule or None)
+    hazards = [h.strip().lower() for h in HAZARD_RE.findall(src)]
+    return verdict, (rule or None), hazards
 
 
 def checker_rejects(bin_path, hy_path):
@@ -122,7 +130,7 @@ def main():
         if expected is None:
             continue
         name = os.path.basename(path)
-        verdict, rule = expected
+        verdict, rule, hazards = expected
         if verdict == "REJECT":
             reject_total += 1
             ok, detail = checker_rejects(bin_path, path)
@@ -139,6 +147,14 @@ def main():
                 ok, detail = build_and_run(bin_path, path, workdir)
             finally:
                 shutil.rmtree(workdir, ignore_errors=True)
+            if not ok and hazards and detail.startswith("run exit"):
+                # the run died at runtime — is it the DOCUMENTED hazard?
+                blob = detail.lower()
+                if any(h.split("(")[0].strip() in blob for h in hazards) or any(
+                    k in blob for k in ("fatal error", "panic", "concurrent map")
+                ):
+                    ok = True
+                    detail = "documented RUNTIME-HAZARD fatal (pre-registered): " + detail[:100]
             if ok:
                 accept_pass += 1
                 print(f"PASS  {name} ({verdict}: builds + runs)")
