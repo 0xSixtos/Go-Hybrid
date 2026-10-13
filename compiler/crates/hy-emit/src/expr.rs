@@ -12,6 +12,8 @@ use hy_syntax::*;
 
 use super::{go_quote, is_package_root, special_member, to_go_name, BindingKind, Emitter, EmitError, MemberSpecial};
 
+use super::shapes::{lookup_conversion, lookup_member, MemberKind};
+
 /// Operator precedence (Go tiers; higher binds tighter).
 fn bin_prec(op: BinOp) -> u8 {
     match op {
@@ -23,7 +25,7 @@ fn bin_prec(op: BinOp) -> u8 {
     }
 }
 
-const ATOM: u8 = 100;
+pub(crate) const ATOM: u8 = 100;
 
 impl Emitter {
     /// The full expression emitter. `min_prec` = the precedence the CALLER
@@ -118,7 +120,7 @@ impl Emitter {
                         self.use_package(root);
                     }
                 }
-                Ok(format!("{}.{}", b, self.member_name(base, name)))
+                Ok(format!("{}.{}", b, self.member_of_typed(base, name)))
             }
 
             Expr::Call { callee, args, .. } => self.emit_call(callee, args),
@@ -159,18 +161,84 @@ impl Emitter {
             }
 
             Expr::FnLit { params, body, .. } => {
+                // Conversion target (Batch E): untyped params take the
+                // TARGET's types (`http.handler(fn(w, r) {…})` — the
+                // literal's `w, r` are typed by HandlerFunc's signature).
+                // Typed params in the source win; a count mismatch errors.
+                let conv = self.pending_fnlit_conv.take(); // only the params consume it
+                let mut untyped_params: Vec<usize> = Vec::new();
+                let params: Vec<Param> = if let Some(conv) = conv {
+                    if params.len() != conv.params.len() {
+                        return Err(EmitError::unsupported(format!(
+                            "function literal takes {} params; the {} target's signature has {}",
+                            params.len(),
+                            conv.go,
+                            conv.params.len()
+                        )));
+                    }
+                    params
+                        .iter()
+                        .zip(conv.params)
+                        .enumerate()
+                        .map(|(i, (p, d))| {
+                            let untyped =
+                                matches!(&p.ty, TypeExpr::Named { name, .. } if name.is_empty());
+                            if untyped {
+                                untyped_params.push(i);
+                                // The Go spelling the target's signature uses
+                                // (`w ResponseWriter` interface vs `r *Request`
+                                // pointer — ParamDesc carries the difference).
+                                let base = TypeExpr::Named {
+                                    name: d.go.to_string(),
+                                    span: p.ty.span(),
+                                };
+                                let ty = if d.pointer {
+                                    TypeExpr::Pointer { to: Box::new(base), span: p.ty.span() }
+                                } else {
+                                    base
+                                };
+                                Param { name: p.name.clone(), ty, span: p.span }
+                            } else {
+                                p.clone()
+                            }
+                        })
+                        .collect()
+                } else {
+                    params.clone()
+                };
                 let rendered_params = params
                     .iter()
                     .map(|p| format!("{} {}", p.name, self.type_text(&p.ty)))
                     .collect::<Vec<_>>()
                     .join(", ");
                 // Hints from closure param types (example-06's w, r) —
-                // scoped: removed again when the literal ends.
+                // scoped: removed again when the literal ends. Conv-typed
+                // params bind through the DESCRIPTOR's shape key (the Go
+                // spelling in the signature is not the table's key).
                 let known: Vec<String> = self.bindings.keys().cloned().collect();
-                for p in params {
-                    if self.type_is_foreign(&p.ty) {
+                for (i, p) in params.iter().enumerate() {
+                    let desc_kind = conv
+                        .and_then(|c| c.params.get(i))
+                        .filter(|_| untyped_params.contains(&i))
+                        .map(|d| BindingKind::ForeignTy(d.ty_key));
+                    let kind = desc_kind.or_else(|| self.binding_kind_of_ty(&p.ty));
+                    if let Some(kind) = kind {
+                        self.bindings.insert(p.name.clone(), kind);
+                    } else if self.type_is_foreign(&p.ty) {
                         self.bindings.insert(p.name.clone(), BindingKind::Foreign);
                     }
+                }
+                // E11: inside a propagation-carrying conversion the `?`
+                // contract names the writer param.
+                let saved_writer = self.handler_writer.take();
+                if let Some(w) = conv.and_then(|c| c.propagate) {
+                    // The writer param's NAME as the literal spells it
+                    // (falls back to the descriptor's conventional one).
+                    let name = params
+                        .first()
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| w.to_string());
+                    self.handler_writer = Some(name);
                 }
                 self.fnlit_depth += 1;
                 let mut out = String::from("func(");
@@ -187,6 +255,7 @@ impl Emitter {
                 let closure_body = std::mem::take(&mut self.body);
                 self.body = main_body;
                 self.fnlit_depth -= 1;
+                self.handler_writer = saved_writer;
                 self.bindings.retain(|k, _| known.contains(k));
                 out.push_str(&closure_body);
                 for _ in 0..self.indent {
@@ -229,6 +298,19 @@ impl Emitter {
             }
             return Ok(go_quote(&s));
         }
+        let (format_str, args) = self.interp_parts(parts)?;
+        self.use_package("fmt");
+        Ok(format!(
+            "fmt.Sprintf({}, {})",
+            go_quote(&format_str),
+            args.join(", ")
+        ))
+    }
+
+    /// The interpolation's (format, args) pieces — shared by `emit_interp`
+    /// (Sprintf wrap) and the fprintf/printf splice (Batch E), which need
+    /// the pieces SEPARATELY so Fprintf's format param consumes them.
+    fn interp_parts(&mut self, parts: &[InterpPart]) -> Result<(String, Vec<String>), EmitError> {
         let mut format_str = String::new();
         let mut args = Vec::new();
         for p in parts {
@@ -242,12 +324,7 @@ impl Emitter {
                 }
             }
         }
-        self.use_package("fmt");
-        Ok(format!(
-            "fmt.Sprintf({}, {})",
-            go_quote(&format_str),
-            args.join(", ")
-        ))
+        Ok((format_str, args))
     }
 
     fn field_inits(&mut self, fields: &[FieldInit]) -> Result<String, EmitError> {
@@ -295,6 +372,53 @@ impl Emitter {
     // Calls — builtins, package specials, foreign methods
     // -----------------------------------------------------------------------
 
+    /// Descriptor type of an expression, when the shape table knows it
+    /// (Batch E chain resolution):
+    ///
+    /// ```text
+    /// r              → r's binding: ForeignTy("http.request")
+    /// r.url          → http.request.url's result: "url.url"
+    /// r.url.query    → url.url.query's result: "url.values"
+    /// r.url.query.get("a")  — the CALL resolves its callee's base likewise
+    /// ```
+    /// Returns None the moment a link is unknown — the caller falls back to
+    /// the M4 heuristic. Never guesses.
+    pub fn type_of_expr(&self, e: &Expr) -> Option<&'static str> {
+        match e {
+            Expr::Ident { name, .. } => match self.bindings.get(name)? {
+                BindingKind::ForeignTy(t) => Some(t),
+                _ => None,
+            },
+            Expr::Field { base, name, .. } => {
+                let bt = self.type_of_expr(base)?;
+                let m = lookup_member(bt, name)?;
+                m.result
+            }
+            // A zero-arg/method call's result type is the member's result.
+            Expr::Call { callee, .. } => self.type_of_expr(callee),
+            _ => None,
+        }
+    }
+
+    /// Member spelling for a FIELD-position access, shape-table first.
+    /// A MethodZero member in field position emits WITH parens — the hy
+    /// surface spells `r.url.query`; Go requires `r.URL.Query()`.
+    pub fn member_of_typed(&self, base: &Expr, name: &str) -> String {
+        if let Some(t) = self.type_of_expr(base) {
+            if let Some(m) = lookup_member(t, name) {
+                return match m.kind {
+                    MemberKind::Field => m.go.to_string(),
+                    MemberKind::MethodZero => format!("{}()", m.go),
+                    // A Method member in FIELD position (never called) is
+                    // not expressible in Go; emit the bare name and let Go
+                    // reject — a clean failure, never a wrong emission.
+                    MemberKind::Method => m.go.to_string(),
+                };
+            }
+        }
+        self.member_name(base, name)
+    }
+
     fn emit_call(&mut self, callee: &Expr, args: &[CallArg]) -> Result<String, EmitError> {
         // --- make(...): the first argument is a TYPE (bug-#2 fix) ---
         if matches!(callee, Expr::Ident { name, .. } if name == "make") {
@@ -310,8 +434,26 @@ impl Emitter {
             }
         }
 
-        // --- method calls on foreign bindings normalize (M4) ---
+        // --- method calls on foreign bindings normalize (M4 + shapes) ---
+        // Shape-table first (Batch E): a typed chain resolves
+        // field-vs-method exactly (`r.url.query.get("a")` →
+        // `r.URL.Query().Get("a")`); generic Foreign falls back to M4.
         if let Expr::Field { base, name, .. } = callee {
+            if let Some(bt) = self.type_of_expr(base) {
+                if let Some(m) = lookup_member(bt, name) {
+                    if m.kind == MemberKind::Method {
+                        let b = self.emit_expr(base, ATOM)?;
+                        let mut parts = Vec::new();
+                        for a in args {
+                            parts.push(self.emit_call_arg(a)?);
+                        }
+                        return Ok(format!("{}.{}({})", b, m.go, parts.join(", ")));
+                    }
+                    // MethodZero called WITH args (or a Field called) is a
+                    // surface error — fall through; Go rejects Field(args)
+                    // — a clean failure, never a wrong emission.
+                }
+            }
             if let Expr::Ident { name: root, .. } = base.as_ref() {
                 if let Some(BindingKind::Foreign) = self.bindings.get(root) {
                     let b = self.emit_expr(base, ATOM)?;
@@ -415,6 +557,42 @@ impl Emitter {
     ) -> Result<String, EmitError> {
         self.use_package(pkg);
 
+        // --- conversion targets (Batch E): `http.handler(fn(w, r) { … })`
+        //     → `http.HandlerFunc(func(w http.ResponseWriter, r *http.
+        //     Request) { … })`. Untyped fn-lit params take the TARGET's
+        //     types (pending_fnlit_conv); `?` inside takes the E11
+        //     handler contract (handler_writer). ---
+        if let Some(conv) = lookup_conversion(&format!("{}.{}", pkg, name)) {
+            if args.len() != 1 {
+                return Err(EmitError::unsupported(format!(
+                    "{}.{} conversion takes exactly one function literal",
+                    pkg, name
+                )));
+            }
+            if !matches!(args[0].value, Expr::FnLit { .. }) {
+                return Err(EmitError::unsupported(format!(
+                    "{}.{} conversion argument must be a function literal",
+                    pkg, name
+                )));
+            }
+            self.pending_fnlit_conv = Some(conv);
+            let lit = self.emit_expr(&args[0].value, ATOM)?;
+            self.pending_fnlit_conv = None;
+            return Ok(format!("{}({})", conv.go, lit));
+        }
+
+        // --- the httptest smoke client is a COMPOSITE lowering (Batch E):
+        //     `httptest.get(mux, path)` is the in-process recorder dance.
+        //     It carries (code, body, error) — only legal at a `?` binding
+        //     (emit_try_define expands it statement-wise); a bare call
+        //     errors cleanly here. ---
+        if pkg == "httptest" && (name == "get" || name == "post") {
+            return Err(EmitError::unsupported(
+                "httptest.get/post is a (code, body, error) call — bind it with `?` \
+                 (the E3/E6 desugar expands the recorder dance)",
+            ));
+        }
+
         if let Some(special) = special_member(pkg, name) {
             return match special {
                 MemberSpecial::Var(text) => {
@@ -458,6 +636,24 @@ impl Emitter {
                     let t = self.emit_call_arg(&args[0])?;
                     return Ok(format!("os.Stdout.Write({})", t));
                 }
+            }
+        }
+
+        // Interpolation in a FORMAT-carrying call (Batch E, example 06):
+        // `fmt.fprintf(w, "{a}+{b}={a+b}\n")` must splice the interp's
+        // arguments into the call — `fmt.Fprintf(w, "%v+%v=%v\n", a, b, a+b)`.
+        // (Wrapping the whole interp in Sprintf would print the %v's as
+        // literals — Fprintf's format param consumes them.)
+        if (pkg == "fmt" && (name == "fprintf" || name == "printf")) && !args.is_empty() {
+            if let Expr::Interp { parts, .. } = &args[args.len() - 1].value {
+                let (fmt_str, interp_args) = self.interp_parts(parts)?;
+                let mut call_args = Vec::new();
+                for a in &args[..args.len() - 1] {
+                    call_args.push(self.emit_call_arg(a)?);
+                }
+                call_args.push(format!("{:?}", fmt_str));
+                call_args.extend(interp_args);
+                return Ok(format!("{}.{}({})", pkg, to_go_name(name), call_args.join(", ")));
             }
         }
 

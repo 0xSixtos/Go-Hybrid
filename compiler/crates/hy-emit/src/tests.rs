@@ -585,3 +585,144 @@ fn slice_pop_uses_prelude_helper() {
     assert!(go.contains("func hy_pop[t any](s *[]t) t {"), "pop prelude:\n{}", go);
     assert!(go.contains("return hy_pop(&stack)"), ":\n{}", go);
 }
+
+// ---------------------------------------------------------------------------
+// Batch E — the foreign shape table (example 06: net/http surface)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn shape_chain_field_method_field() {
+    // r.url.query.get("a") — FIELD (r.URL), zero-arg METHOD (Query()),
+    // METHOD (Get): the exact three-level chain from example 06.
+    let go = emit(
+        "fn f(r *http.request) string {\n    return r.url.query.get(\"a\")\n}\n",
+    );
+    assert!(
+        go.contains("r.URL.Query().Get(\"a\")"),
+        "typed chain lowered exactly:\n{}",
+        go
+    );
+    assert!(!go.contains("r.Url"), "naive M4 CamelCase leaked:\n{}", go);
+}
+
+#[test]
+fn shape_fields_stay_fields() {
+    let go = emit(
+        "fn f(r *http.request) {\n    fmt.eprintln(\"{r.method} {r.url.path}\")\n}\n",
+    );
+    assert!(go.contains("r.Method"), ":\n{}", go);
+    assert!(go.contains("r.URL.Path"), ":\n{}", go);
+    assert!(!go.contains("r.Url"), ":\n{}", go);
+}
+
+#[test]
+fn shape_import_paths_map_to_net_packages() {
+    let go = emit(
+        "fn f(r *http.request) {\n    mux := http.new_serve_mux()\n    mux.handle(\"/x\", http.handler(fn(w, r) { }))\n}\n",
+    );
+    assert!(go.contains("\"net/http\""), "mapped import path:\n{}", go);
+    assert!(!go.contains("\n\t\"http\"\n"), "unmapped root import leaked:\n{}", go);
+}
+
+#[test]
+fn shape_handler_conversion_types_untyped_params() {
+    // http.handler(fn(w, r) { … }) — the literal's untyped params take the
+    // TARGET's signature: w ResponseWriter (interface), r *Request (pointer).
+    let go = emit(
+        "fn f(mux *http.serve_mux) {\n    mux.handle(\"/x\", http.handler(fn(w, r) {\n        fmt.fprintln(w, \"hi\")\n    }))\n}\n",
+    );
+    assert!(
+        go.contains("http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {"),
+        "conversion + typed params:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("*http.ResponseWriter"),
+        "interface must not be a pointer:\n{}",
+        go
+    );
+}
+
+#[test]
+fn shape_handler_conversion_count_mismatch_is_clean_error() {
+    let msg = emit_err(
+        "fn f() {\n    mux := http.new_serve_mux()\n    mux.handle(\"/x\", http.handler(fn(w) { }))\n}\n",
+    );
+    assert!(
+        msg.contains("target's signature has"),
+        "clean arity error:\n{}",
+        msg
+    );
+}
+
+#[test]
+fn shape_e11_handler_try_propagates_through_http_error() {
+    // E11: `?` inside an http.handler closure has no error result to land
+    // in — the target's propagation contract is http.Error + return.
+    let go = emit(
+        "fn f() {\n    mux := http.new_serve_mux()\n    mux.handle(\"/x\", http.handler(fn(w, r) {\n        n := strconv.atoi(\"3\")?\n        fmt.fprintln(w, n)\n    }))\n}\n",
+    );
+    assert!(
+        go.contains("http.Error(w, hyErr0.Error(), http.StatusBadRequest)"),
+        "E11 propagation:\n{}",
+        go
+    );
+    assert!(!go.contains("hyErr = hyErr0"), "E3 shape must not leak:\n{}", go);
+}
+
+#[test]
+fn shape_httptest_get_composite_lowering() {
+    let go = emit(
+        "fn main() {\n    mux := http.new_serve_mux()\n    code, body := httptest.get(mux, \"/hello\")?\n    fmt.println(\"{code} {body}\")\n}\n",
+    );
+    assert!(go.contains("http.NewRequest(\"GET\", \"/hello\", nil)"), ":\n{}", go);
+    assert!(go.contains("httptest.NewRecorder()"), ":\n{}", go);
+    assert!(go.contains("mux.ServeHTTP("), ":\n{}", go);
+    assert!(
+        go.contains("strings.TrimSuffix("),
+        "body-line trim pinned by example 06's expected output:\n{}",
+        go
+    );
+}
+
+#[test]
+fn shape_httptest_get_bare_call_is_clean_error() {
+    let msg = emit_err(
+        "fn main() {\n    mux := http.new_serve_mux()\n    x := httptest.get(mux, \"/h\")\n}\n",
+    );
+    assert!(msg.contains("bind it with `?`"), ":\n{}", msg);
+}
+
+#[test]
+fn shape_return_fnlit_wraps_in_handler_func() {
+    // `return fn(...)` where the fn's result is http.handler — Go's
+    // interface needs the HandlerFunc conversion at the return.
+    let go = emit(
+        "fn logging(next http.handler) http.handler {\n    return fn(w http.response_writer, r *http.request) {\n        next.serve_http(w, r)\n    }\n}\n",
+    );
+    assert!(
+        go.contains("return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {"),
+        ":\n{}",
+        go
+    );
+    assert!(
+        go.contains("next.ServeHTTP(w, r)"),
+        "interface method via shape table:\n{}",
+        go
+    );
+}
+
+#[test]
+fn shape_e6_wrapper_terminal_return_after_range_for() {
+    // A main whose wrapper body ends in a range-for (non-terminating in
+    // Go) — the wrapper's named result carries a terminal bare `return`.
+    // (Without `?`/results there is no wrapper and no requirement.)
+    let go = emit(
+        "fn main() {\n    for _, p in [\"/a\"] {\n        n := strconv.atoi(p)?\n        fmt.println(n)\n    }\n}\n",
+    );
+    assert!(
+        go.contains("\n\t\treturn\n\t}()"),
+        "terminal return before the wrapper close:\n{}",
+        go
+    );
+}

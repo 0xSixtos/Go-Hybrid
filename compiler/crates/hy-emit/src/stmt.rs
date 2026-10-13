@@ -4,6 +4,9 @@ use hy_syntax::*;
 
 use super::{is_package_root, to_go_name, BindingKind, EmitError, Emitter};
 
+use super::shapes::lookup_conversion;
+use super::expr::ATOM;
+
 impl Emitter {
     pub fn emit_stmt(&mut self, s: &Stmt) -> Result<(), EmitError> {
         match s {
@@ -224,6 +227,45 @@ impl Emitter {
     /// }
     /// ```
     fn emit_try_define(&mut self, l: &LocalDecl, call: &Expr) -> Result<(), EmitError> {
+        // --- the httptest composite (Batch E): `code, body :=
+        //     httptest.get(mux, path)?` expands to the in-process recorder
+        //     dance. The only error source is NewRequest; the `?` shape
+        //     (E6 main closure vs E11 handler) governs its propagation. ---
+        if let Expr::Call { callee, args, span: _ } = call {
+            if let Expr::Field { base, name, span: _ } = callee.as_ref() {
+                if let Expr::Ident { name: pkg, .. } = base.as_ref() {
+                    if *pkg == "httptest" && (*name == "get" || *name == "post") {
+                        return self.emit_httptest_get(l, args, name);
+                    }
+                }
+            }
+        }
+
+        // --- E11 handler contract: `?` inside a closure converting to a
+        //     propagation-carrying target. The target's signature has no
+        //     error result, so E3's error-return cannot land; the target's
+        //     declared propagation (http.Error on the writer) is the
+        //     contract instead. ---
+        if let Some(w) = self.handler_writer.clone() {
+            let temp = self.next_temp("hyErr");
+            let call_text = self.emit_expr(call, 0)?;
+            let mut names = l.names.clone();
+            names.push(temp.clone());
+            self.push(&format!("{} := {}", names.join(", "), call_text));
+            self.push(&format!("if {} != nil {{", temp));
+            self.indent += 1;
+            self.use_package("http");
+            self.push(&format!(
+                "http.Error({}, {}.Error(), http.StatusBadRequest)",
+                w, temp
+            ));
+            self.push("return");
+            self.indent -= 1;
+            self.push("}");
+            self.hint_from_values(&l.names, std::slice::from_ref(call));
+            return Ok(());
+        }
+
         let err_name = if self.in_main_closure {
             "hyErr".to_string()
         } else {
@@ -243,6 +285,78 @@ impl Emitter {
         self.indent -= 1;
         self.push("}");
         self.hint_from_values(&l.names, std::slice::from_ref(call));
+        Ok(())
+    }
+
+    /// `code, body := httptest.get(mux, path)?` — the in-process smoke
+    /// client (example 06). The stdlib idiom, spelled out honestly:
+    ///
+    /// ```go
+    /// hyReq0, hyErr0 := http.NewRequest("GET", path, nil)
+    /// if hyErr0 != nil { <propagate> }
+    /// hyRec0 := httptest.NewRecorder()
+    /// mux.ServeHTTP(hyRec0, hyReq0)
+    /// code, body := hyRec0.Code, hyRec0.Body.String()
+    /// ```
+    fn emit_httptest_get(&mut self, l: &LocalDecl, args: &[CallArg], verb: &str) -> Result<(), EmitError> {
+        if args.len() != 2 {
+            return Err(EmitError::unsupported(format!(
+                "httptest.{} takes (handler, path)",
+                verb
+            )));
+        }
+        if l.names.len() != 2 {
+            return Err(EmitError::unsupported(
+                "httptest.get/post binds exactly two names: `code, body := httptest.get(…)?`",
+            ));
+        }
+        let handler = self.emit_expr(&args[0].value, ATOM)?;
+        let path = self.emit_expr(&args[1].value, 0)?;
+        let req = self.next_temp("hyReq");
+        let err0 = self.next_temp("hyErr");
+        let rec = self.next_temp("hyRec");
+        self.use_package("http");
+        self.use_package("httptest");
+        self.push(&format!(
+            "{}, {} := http.NewRequest(\"{}\", {}, nil)",
+            req,
+            err0,
+            verb.to_uppercase(),
+            path
+        ));
+        self.push(&format!("if {} != nil {{", err0));
+        self.indent += 1;
+        if let Some(w) = self.handler_writer.clone() {
+            self.push(&format!(
+                "http.Error({}, {}.Error(), http.StatusBadRequest)",
+                w, err0
+            ));
+            self.push("return");
+        } else if self.in_main_closure {
+            self.push(&format!("hyErr = {}", err0));
+            self.push("return");
+        } else {
+            return Err(EmitError::unsupported(
+                "`?` outside main (functions-with-error-results land after the walking skeleton)",
+            ));
+        }
+        self.indent -= 1;
+        self.push("}");
+        self.push(&format!("{} := httptest.NewRecorder()", rec));
+        self.push(&format!("{}.ServeHTTP({}, {})", handler, rec, req));
+        // The smoke client returns the body LINE: the response's single
+        // trailing newline is trimmed, so `fmt.println("{code} {body}")`
+        // prints one line per response (example 06's expected output pins
+        // this — the handler's own Fprintln newline is transport, not
+        // payload). One TrimSuffix — deterministic, never a regexp.
+        self.use_package("strings");
+        self.push(&format!(
+            "{} := {}.Code, strings.TrimSuffix({}.Body.String(), \"\\n\")",
+            l.names.join(", "),
+            rec,
+            rec
+        ));
+        // The recorder path carries no error — hints ride on the handler.
         Ok(())
     }
 
@@ -351,7 +465,12 @@ impl Emitter {
     /// normalize; our own members stay verbatim.
     pub fn place_member_name(&self, base: &Place, name: &str) -> String {
         let root = base.root();
-        if is_package_root(root) || matches!(self.bindings.get(root), Some(BindingKind::Foreign)) {
+        if is_package_root(root)
+            || matches!(
+                self.bindings.get(root),
+                Some(BindingKind::Foreign) | Some(BindingKind::ForeignTy(_))
+            )
+        {
             return super::to_go_name(name);
         }
         name.to_string()
@@ -364,7 +483,10 @@ impl Emitter {
             if is_package_root(root) {
                 return to_go_name(name);
             }
-            if let Some(BindingKind::Foreign) = self.bindings.get(root) {
+            if matches!(
+                self.bindings.get(root),
+                Some(BindingKind::Foreign) | Some(BindingKind::ForeignTy(_))
+            ) {
                 return to_go_name(name);
             }
         }
@@ -587,6 +709,20 @@ impl Emitter {
                 .collect::<Result<Vec<_>, _>>()?;
             self.push(&format!("return {}, nil", vs.join(", ")));
             return Ok(());
+        }
+        // `return fn(…)` where the fn's result is a conversion target
+        // (Batch E): Go's interface needs the HandlerFunc conversion.
+        if let Some(key) = self.cur_fn_conv_result {
+            if values.len() == 1 && matches!(values[0], Expr::FnLit { .. }) {
+                if let Some(conv) = lookup_conversion(key) {
+                    self.pending_fnlit_conv = Some(conv);
+                    let lit = self.emit_expr(&values[0], 0)?;
+                    self.pending_fnlit_conv = None;
+                    self.use_package(key.split('.').next().unwrap_or(key));
+                    self.push(&format!("return {}({})", conv.go, lit));
+                    return Ok(());
+                }
+            }
         }
         // `return none` — lower against the declared option result (the
         // prelude's zero value IS none).

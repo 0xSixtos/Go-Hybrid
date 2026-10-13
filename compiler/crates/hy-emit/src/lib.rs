@@ -30,6 +30,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use hy_syntax::*;
 
+mod shapes;
+use shapes::{import_path_of, lookup_conversion, lookup_member, Conversion, MemberKind};
+
 // ---------------------------------------------------------------------------
 // Hybrid prelude (auto-generated Go, emitted only when the program uses it)
 // ---------------------------------------------------------------------------
@@ -123,6 +126,10 @@ pub enum BindingKind {
     /// Bound from a foreign (package-qualified) call — members normalize
     /// (`f := os.open(p)` → `f.Close()`).
     Foreign,
+    /// Bound with a KNOWN descriptor type (shapes::SHAPES key) — members
+    /// resolve through the shape table field-vs-method (`r.url.query.get`
+    /// → `r.URL.Query().Get`, Batch E / example 06).
+    ForeignTy(&'static str),
     /// Bound from `io.read_all` — a byte buffer: `fmt.print(b)` becomes
     /// `os.Stdout.Write(b)`.
     Bytes,
@@ -235,6 +242,19 @@ pub struct Emitter {
     /// (O9's honesty: Go-heap reads are copies). Frames are block-scoped:
     /// a loan flushes at the end of the block that declared it.
     loan_frames: Vec<Vec<(String, String)>>,
+    /// E11 handler contract: inside a closure that converts to a
+    /// propagation-carrying target (`http.handler`), `?` fires
+    /// `http.Error(w, err, 400)` + return instead of the E3 error-return.
+    /// Some(writer param name) while emitting such a closure.
+    handler_writer: Option<String>,
+    /// While emitting a conversion argument (`http.handler(fn(w, r) { … })`)
+    /// the target's descriptor, so untyped fn-lit params take the TARGET's
+    /// types. Set immediately before the FnLit is emitted, cleared after.
+    pending_fnlit_conv: Option<&'static Conversion>,
+    /// The enclosing top-level fn's single result type, IF it is a
+    /// conversion target (`fn logging(…) http.handler`) — `return fn(…)`
+    /// wraps in the conversion (`return http.HandlerFunc(func…)`).
+    cur_fn_conv_result: Option<&'static str>,
 }
 
 impl Emitter {
@@ -250,6 +270,9 @@ impl Emitter {
             assoc_fns: BTreeSet::new(),
             cur_option_result: None,
             loan_frames: Vec::new(),
+            handler_writer: None,
+            pending_fnlit_conv: None,
+            cur_fn_conv_result: None,
         }
     }
 
@@ -308,7 +331,11 @@ impl Emitter {
                             crate_name
                         )));
                     }
-                    self.imports.insert(path.to_string());
+                    // A dotted Go path maps to its ROOT for the usage-driven
+                    // import set ("net/http" → root "http"; the body says
+                    // `http.X`, and import_path_of maps the line back).
+                    let root = path.split('/').next_back().unwrap_or(path);
+                    self.imports.insert(root.to_string());
                 }
                 Decl::Const(c) => self.emit_file_const(c)?,
                 Decl::Struct(s) => self.emit_struct(s)?,
@@ -333,8 +360,11 @@ impl Emitter {
         let mut out = String::from("package main\n");
         if !self.imports.is_empty() {
             out.push_str("\nimport (\n");
-            for p in &self.imports {
-                out.push_str(&format!("\t\"{}\"\n", p));
+            // Roots map to their real Go import paths (http → net/http,
+            // SPEC M5's curated allowlist); the CODE keeps the root spelling
+            // because that IS Go's package name for those imports.
+            for root in &self.imports {
+                out.push_str(&format!("\t\"{}\"\n", import_path_of(root)));
             }
             out.push_str(")\n");
         }
@@ -429,10 +459,16 @@ impl Emitter {
 
         // `return none` lowers to the declared option result's zero value.
         self.cur_option_result = None;
+        // Batch E: a single conversion-target result (`fn logging(…) http.handler`)
+        // makes `return fn(…)` wrap in the conversion (HandlerFunc).
+        self.cur_fn_conv_result = None;
         if f.results.len() == 1 && f.results[0].name.is_none() {
             let rt = self.type_text(&f.results[0].ty);
             if rt.starts_with("option[") {
                 self.cur_option_result = Some(rt);
+            }
+            if let Some(conv) = self.result_conv_key(&f.results[0].ty) {
+                self.cur_fn_conv_result = Some(conv);
             }
         }
 
@@ -475,6 +511,12 @@ impl Emitter {
             if let Some(body) = &f.body {
                 self.emit_block_body(&body.stmts)?;
             }
+            // Terminal bare `return`: the wrapper closure's named result
+            // makes it legal, and a body ending in a non-terminating
+            // statement (a range-for — example 06's smoke loop) otherwise
+            // fails go build with "missing return". Happy-path fall-through
+            // returns hyErr == nil, exactly the E6 contract's ok path.
+            self.push("return");
             self.in_main_closure = saved;
             self.indent -= 1;
             self.push("}()");
@@ -588,11 +630,52 @@ impl Emitter {
 
     fn emit_hints_from_params(&mut self, params: &[Param]) {
         for p in params {
-            if self.type_is_foreign(&p.ty) {
-                self.bindings.insert(p.name.clone(), BindingKind::Foreign);
+            if let Some(kind) = self.binding_kind_of_ty(&p.ty) {
+                self.bindings.insert(p.name.clone(), kind);
             } else if matches!(p.ty, TypeExpr::Chan { .. }) {
                 self.bindings.insert(p.name.clone(), BindingKind::Chan);
             }
+        }
+    }
+
+    /// Binding kind from a TYPE (Batch E): a dotted type that the shape
+    /// table knows gives ForeignTy(key) — members resolve field-vs-method;
+    /// any other dotted type stays generic Foreign.
+    fn binding_kind_of_ty(&self, t: &TypeExpr) -> Option<BindingKind> {
+        let name = match t {
+            TypeExpr::Named { name, .. } => name.as_str(),
+            TypeExpr::Pointer { to, .. } => return self.binding_kind_of_ty(to),
+            _ => return None,
+        };
+        if name.is_empty() || !name.contains('.') {
+            return None;
+        }
+        if shapes::SHAPES.iter().any(|(k, _)| *k == name) {
+            // &'static from the static table — find returns a reference with
+            // the static lifetime.
+            Some(BindingKind::ForeignTy(
+                shapes::SHAPES.iter().find(|(k, _)| *k == name).unwrap().0,
+            ))
+        } else {
+            Some(BindingKind::Foreign)
+        }
+    }
+
+    /// The conversion-target key of a result type (`http.handler`), if the
+    /// type IS one — `return fn(…)` wrapping (Batch E).
+    fn result_conv_key(&self, t: &TypeExpr) -> Option<&'static str> {
+        let name = match t {
+            TypeExpr::Named { name, .. } => name.as_str(),
+            _ => return None,
+        };
+        if lookup_conversion(name).is_some() {
+            // Promote to 'static via the CONVERSIONS table's own key.
+            shapes::CONVERSIONS
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(k, _)| *k)
+        } else {
+            None
         }
     }
 

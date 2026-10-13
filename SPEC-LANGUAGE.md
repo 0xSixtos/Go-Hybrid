@@ -1040,6 +1040,28 @@ rejected: `?` + `if err != nil` cover the same ground with less syntax.
 First-class `result[T, E]` — rejected for MVP, T21. [decided: Spike-5 ABI +
 Go shape; each recorded above]
 
+**E11 — The handler-conversion propagation contract.** A closure literal
+converting to a *conversion target* (§5's `http.handler`-shaped types) has
+no `error` result for E3's return to land in — the target's Go signature
+decides. A target may therefore declare a **propagation contract**: when `?`
+fires inside such a closure, the declared statement runs and the closure
+returns. `http.handler`'s contract (pinned by example 06):
+`http.Error(w, err, http.StatusBadRequest)` + return — the idiomatic Go
+handler answer, not a silent swallow and not a panic. Everything else from
+E4 still holds (`?` on non-error calls is a type error; E5's allocation
+budget applies). Scope: exactly one target carries a contract at MVP;
+adding one is a Decision Log entry. [decided: Batch E, 2026-10-13]
+
+Two mechanical consequences of the same batch (M5's curated-surface
+mechanics): **import paths map** root → real Go path (`http` → `net/http`,
+`httptest` → `net/http/httptest` — the code keeps the root spelling, which
+IS Go's package name); and the **`httptest.get/post(mux, path)` smoke
+client** is a composite lowering to the in-process recorder dance
+(`http.NewRequest` → `httptest.NewRecorder` → `ServeHTTP`), binding
+`(code, body)` with `?` carrying the NewRequest error; `body` is the
+response's body LINE (the single trailing newline is transport, trimmed) —
+pinned byte-for-byte by example 06's expected output.
+
 ---
 
 ## 7. `defer`, `panic`, `recover` — and THE BOUNDARY RULE

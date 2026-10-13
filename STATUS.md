@@ -1,10 +1,9 @@
 # STATUS (for the human — 15 lines max)
 
-- Phase: 1 — **IN PROGRESS**. **G1 RATIFIED (2026-10-13)** — every lowering decision re-checked against SPEC (T4/E3/E6/C1–C4/M4/O8–O9) + implementation; no redirects; batch order confirmed (gates/G1.md header + PLAN Decision Log)
-- **Phase-1 exit criteria MET (session 5): parse → Tier-0 check → emit Go → go build → run on SIX target programs — 01/02/03/04/07/08 all byte-exact vs expected.txt**
-- Works (verified): example 02's full E6 `?`-exit contract (defers → `cat: open …` on stderr → exit 1) AND byte-verbatim happy path; 03's structs + task→go + channels; 04's select + inclusive ranges + labeled breaks; 07's generics + option/match + set/pop; 08's type aliases + O8 slot-loan desugar
-- Works (verified): Tier-0 checker corpus **20/20 verdict agreement**, tripwire not fired (10.0%/15.0% vs ~25%); 157 compiler tests green; `hyb build` enforces toolchain pins (HYB-E9001); CI green
-- Honest scope: 05/10 need the Rust bridge (Phase 2, NOW UNBLOCKED), 09 needs multi-package emission, 06 needs method-vs-field type knowledge — all error cleanly today, never wrong output
+- Phase: 1→2 — **IN PROGRESS**. G1 **RATIFIED** (2026-10-13); Batch E (example 06) landed; Phase-2 bridge is next
+- **SEVEN target programs end-to-end byte-exact: 01/02/03/04/06/07/08** — 06 landed via the foreign shape table (`r.url.query.get("a")` → `r.URL.Query().Get("a")`), `http.handler`→`http.HandlerFunc` conversion with target-typed closure params, the E11 handler `?` contract (SPEC §6, new rule), and the httptest smoke-client composite
+- Works (verified): Tier-0 corpus 20/20, tripwire not fired; 171 compiler tests; toolchain pins enforced; CI green
+- Honest scope: 05/10 need the Rust bridge (Phase 2 — spike-3 hybridge machinery is the template), 09 needs multi-package emission — all error cleanly today, never wrong output
 - Blocked: nothing
-- Next 3 actions: (1) example 06 — receiver-hint typing for method-vs-field chains, (2) Phase-2 bridge → programs 05/09/10, (3) differential corpus loop + call-overhead bench as G2 evidence
-- Last review gate: **G1 RATIFIED**
+- Next 3 actions: (1) Phase-2 bridge core (runtime crate + address broker + trampolines into the compiler), (2) program 10 (sha3) then 05 (serde_json), (3) program 09 (multi-package) → differential loop + overhead bench → G2 doc
+- Last review gate: G1 RATIFIED (Batch E changes logged in PLAN Decision Log per amendment discipline)
