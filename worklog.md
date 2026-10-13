@@ -270,3 +270,15 @@ Work Log:
 Stage Summary:
 - Row 3: recorded MISS (the budget is sandbox-tier; row 4 per-callee budgets is the follow-up).
 - Row 2: sanitizers legs proven on the fleet; fuzz leg re-dispatching after the one-line fix.
+
+---
+Task ID: 19-e
+Agent: Super Z (main)
+Task: Fleet closeout — row 2 green on both shards; session complete.
+
+Work Log:
+- Heavy job 006 re-run (dba0562): ALL FOUR LEGS GREEN on both shards — build-hyb 10.1 s, asan-bridge 21.0 s (4 bridge packages under ASan), race-bridge 13.1 s (5 packages under -race), fuzz-parser-checker 2.4 s (hyfuzz 800/800: no hangs, no crashes, no ICEs). Shard summary artifacts ok:true (fuzzer's own line captured: "800 cases, seed=20261014, clean-rejects=752, clean-accepts=48 — all invariants held").
+- PLAN.md: row 2 CLOSED (fleet evidence recorded; nightly cargo-fuzz + native Rust sanitizers documented as the follow-up), row 3 CLOSED (worker-tier MISS 6.93 ns vs 5 ns budget recorded honestly; sandbox PASS does not generalize; row 4 per-callee budgets is the follow-up).
+
+Stage Summary:
+- Customer feedback batch fully landed: fail-closed checker (O4.9/O4.10) · two parser crash bugs fixed · v0.1.0 released with a smoke-tested artifact · Discussions + feedback thread live · README repositioned · sanitizers+fuzzing fleet-green vs the release SHA · worker-tier bench measured and recorded.
