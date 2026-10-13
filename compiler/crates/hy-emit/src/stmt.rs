@@ -55,12 +55,21 @@ impl Emitter {
                 self.push(&format!("defer {}", c));
                 Ok(())
             }
-            Stmt::Break { .. } => {
-                self.push("break");
+            Stmt::Break { label, .. } => {
+                // `break loop` → Go label `hyLoop` (`loop` is a Go keyword).
+                // The enclosing loop labels itself when it owns a labeled
+                // break — see emit_for.
+                match label {
+                    Some(_) => self.push("break hyLoop"),
+                    None => self.push("break"),
+                }
                 Ok(())
             }
-            Stmt::Continue { .. } => {
-                self.push("continue");
+            Stmt::Continue { label, .. } => {
+                match label {
+                    Some(_) => self.push("continue hyLoop"),
+                    None => self.push("continue"),
+                }
                 Ok(())
             }
             Stmt::Block { block, .. } => {
@@ -77,9 +86,46 @@ impl Emitter {
                 "match (over `{}`) — the enum/match surface lands with the generics batch",
                 subject.render()
             ))),
-            Stmt::Select { .. } => Err(EmitError::unsupported(
-                "select — lands with the pipeline-backpressure batch",
-            )),
+            Stmt::Select { arms, .. } => {
+                // Go select, 1:1 — Hybrid's arm spelling
+                // (`v, ok := <-sq:` / `<-deadline:` / `ch <- v:`) lowers to
+                // Go's case clauses.
+                self.push("select {");
+                self.indent += 1;
+                for arm in arms {
+                    match &arm.kind {
+                        SelectArmKind::Recv { names, chan } => {
+                            let c = self.emit_expr(chan, 0)?;
+                            let head = match names.len() {
+                                0 => format!("case <-{}:", c),
+                                1 => format!("case {} := <-{}:", names[0], c),
+                                2 => format!("case {}, {} := <-{}:", names[0], names[1], c),
+                                n => {
+                                    return Err(EmitError::unsupported(format!(
+                                        "select receive with {} names",
+                                        n
+                                    )));
+                                }
+                            };
+                            self.push(&head);
+                        }
+                        SelectArmKind::Send { chan, value } => {
+                            let c = self.emit_expr(chan, 0)?;
+                            let v = self.emit_expr(value, 0)?;
+                            self.push(&format!("case {} <- {}:", c, v));
+                        }
+                        SelectArmKind::Default => self.push("default:"),
+                    }
+                    self.indent += 1;
+                    for st in &arm.body.stmts {
+                        self.emit_stmt(st)?;
+                    }
+                    self.indent -= 1;
+                }
+                self.indent -= 1;
+                self.push("}");
+                Ok(())
+            }
         }
     }
 
@@ -414,17 +460,26 @@ impl Emitter {
     }
 
     fn emit_for(&mut self, kind: &ForKind, body: &Block) -> Result<(), EmitError> {
+        // A labeled `break loop` / `continue loop` inside this loop (NOT
+        // inside a nested loop — that one labels itself) makes this loop the
+        // Go label target: `hyLoop: for { … break hyLoop … }`.
+        let needs_label = self.block_has_loop_break(body);
+        let label_prefix = if needs_label { "hyLoop: " } else { "" };
         let head = match kind {
-            ForKind::Infinite => "for {".to_string(),
-            ForKind::While { cond } => format!("for {} {{", self.emit_expr(cond, 0)?),
-            ForKind::Range { var, lo, hi } => {
+            ForKind::Infinite => format!("{}for {{", label_prefix),
+            ForKind::While { cond } => format!("{}for {} {{", label_prefix, self.emit_expr(cond, 0)?),
+            ForKind::Range { var, lo, hi, inclusive } => {
                 let lo_t = self.emit_expr(lo, 0)?;
                 let hi_t = self.emit_expr(hi, 0)?;
-                format!("for {} := {}; {} < {}; {}++ {{", var, lo_t, var, hi_t, var)
+                let op = if *inclusive { "<=" } else { "<" };
+                format!(
+                    "{}for {} := {}; {} {} {}; {}++ {{",
+                    label_prefix, var, lo_t, var, op, hi_t, var
+                )
             }
             ForKind::Iterate { vars, expr } => {
                 let e = self.emit_expr(expr, 0)?;
-                match vars.len() {
+                let core = match vars.len() {
                     1 => format!("for {} := range {} {{", vars[0], e),
                     2 => format!("for {}, {} := range {} {{", vars[0], vars[1], e),
                     n => {
@@ -433,7 +488,8 @@ impl Emitter {
                             n
                         )))
                     }
-                }
+                };
+                format!("{}{}", label_prefix, core)
             }
         };
         self.push(&head);
@@ -444,6 +500,30 @@ impl Emitter {
         self.indent -= 1;
         self.push("}");
         Ok(())
+    }
+
+    /// Does this block contain a labeled break/continue whose nearest
+    /// enclosing loop is THIS one? Does not descend into nested `for`
+    /// statements (a nested loop that owns a labeled break labels itself).
+    fn block_has_loop_break(&self, b: &Block) -> bool {
+        b.stmts.iter().any(|s| self.stmt_has_loop_break(s))
+    }
+
+    fn stmt_has_loop_break(&self, s: &Stmt) -> bool {
+        match s {
+            Stmt::Break { label: Some(_), .. } | Stmt::Continue { label: Some(_), .. } => true,
+            Stmt::If { init, then, otherwise, .. } => {
+                init.as_ref().map(|i| self.stmt_has_loop_break(i)).unwrap_or(false)
+                    || self.block_has_loop_break(then)
+                    || otherwise.as_ref().map(|o| self.stmt_has_loop_break(o)).unwrap_or(false)
+            }
+            Stmt::For { .. } => false, // nested loop labels itself
+            Stmt::Block { block, .. } | Stmt::Managed { body: block, .. } => {
+                self.block_has_loop_break(block)
+            }
+            Stmt::Select { arms, .. } => arms.iter().any(|a| self.block_has_loop_break(&a.body)),
+            _ => false,
+        }
     }
 
     // -----------------------------------------------------------------------

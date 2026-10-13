@@ -38,7 +38,7 @@ run_example() {
     fi
 
     case "$name" in
-    01-hello)
+    01-hello|03-worker-pool|04-pipeline-backpressure)
         if "$bin" >"$WORK/$name.out" 2>&1 && diff -u "$dir/expected.txt" "$WORK/$name.out" >"$WORK/$name.diff"; then
             note "PASS $name (stdout == expected.txt)"
             PASS="$PASS $name"
@@ -81,16 +81,6 @@ run_example() {
         fi
         if [ "$ok" -eq 1 ]; then PASS="$PASS $name"; else FAIL=1; fi
         ;;
-    03-worker-pool)
-        if "$bin" >"$WORK/$name.out" 2>&1 && diff -u "$dir/expected.txt" "$WORK/$name.out" >"$WORK/$name.diff"; then
-            note "PASS $name (stdout == expected.txt)"
-            PASS="$PASS $name"
-        else
-            note "FAIL $name (output diff)"
-            sed 's/^/    /' "$WORK/$name.diff"
-            FAIL=1
-        fi
-        ;;
     *)
         note "SKIP $name (not in the MVP-0 emittable set)"
         ;;
@@ -98,7 +88,7 @@ run_example() {
 }
 
 if [ $# -eq 0 ]; then
-    set -- 01-hello 02-cli-cat 03-worker-pool
+    set -- 01-hello 02-cli-cat 03-worker-pool 04-pipeline-backpressure
 fi
 
 for name in "$@"; do

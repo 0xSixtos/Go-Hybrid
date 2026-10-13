@@ -440,9 +440,38 @@ fn match_stmt_errors_cleanly() {
 }
 
 #[test]
-fn select_stmt_errors_cleanly() {
-    let msg = emit_err("fn main() { select { } }");
-    assert!(msg.contains("select"), "{}", msg);
+fn select_emits_go_cases() {
+    let go = emit(
+        "fn main() {\n    select {\n        v, ok := <-sq:\n            _ = ok\n        <-deadline:\n            _ = deadline\n    }\n}\n",
+    );
+    assert!(go.contains("select {"), ":\n{}", go);
+    assert!(go.contains("case v, ok := <-sq:"), ":\n{}", go);
+    assert!(go.contains("case <-deadline:"), ":\n{}", go);
+}
+
+#[test]
+fn inclusive_range_and_labeled_break() {
+    // Example 04's exact shapes: `1..=8` counts 8; `break loop` inside a
+    // select breaks the LOOP (Go label), not the select.
+    let go = emit(
+        "fn main() {\n    total := 0\n    loop {\n        select {\n            v, ok := <-sq:\n                if !ok { break loop }\n                total += v\n        }\n    }\n    for i in 1..=8 {\n        total += i\n    }\n}\n",
+    );
+    assert!(go.contains("hyLoop: for {"), "loop gets the Go label:\n{}", go);
+    assert!(go.contains("break hyLoop"), ":\n{}", go);
+    assert!(go.contains("for i := 1; i <= 8; i++ {"), "inclusive range:\n{}", go);
+}
+
+#[test]
+fn exclusive_range_stays_exclusive() {
+    let go = emit("fn main() {\n    for i in 0..n {\n    }\n}\n");
+    assert!(go.contains("for i := 0; i < n; i++ {"), ":\n{}", go);
+    assert!(!go.contains("hyLoop"), "no label without a labeled break:\n{}", go);
+}
+
+#[test]
+fn panic_statement_form() {
+    let go = emit("fn main() {\n    panic \"pipeline timed out\"\n}\n");
+    assert!(go.contains("panic(\"pipeline timed out\")"), ":\n{}", go);
 }
 
 #[test]

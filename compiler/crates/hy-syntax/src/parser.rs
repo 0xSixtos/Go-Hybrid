@@ -23,8 +23,12 @@
 //!     string (`lru_cache[k, v]`, callee field name `new[string, int]`).
 //!   * `set[T]{…}` (spike-6 08)                 → `StructLit{ty: Named("set[T]"), ..}`.
 //!   * `panic expr` prefix form (spike-6 04)    → `Expr::Call{Ident("panic")}`.
-//!   * `break loop` label (spike-6 04)          → `Stmt::Break` (label dropped).
-//!   * `..=` inclusive ranges (spike-6 04)      → `ForKind::Range` (flag dropped).
+//!   * `break loop` label (spike-6 04)          → `Stmt::Break{label: Some("loop")}`
+//!     (representable since the MVP-0 emitter batch — example 04 needs to
+//!     break the LOOP from inside a select; user-named loop labels are
+//!     future surface, gated on real newline-aware label grammar).
+//!   * `..=` inclusive ranges (spike-6 04)      → `ForKind::Range{inclusive: true}`
+//!     (representable since the MVP-0 emitter batch).
 //!   * type-as-value (`make(chan bool, n)`)     → empty literal of the type
 //!     (`StructLit{ty: Some(chan bool), fields: []}` / `SliceLit{elem: Some(T)}`).
 //!   * fn-literal params with inferred types    → `TypeExpr::Named{name: ""}`.
@@ -758,16 +762,28 @@ impl Parser {
             }
             Tok::Kw("break") => {
                 self.bump();
-                if self.at_kw("loop") {
-                    // `break loop` (spike-6 04) — the label is not
-                    // representable in Stmt::Break; dropped (contract gap).
+                // `break loop` — the loop-keyword form (example 04: break
+                // the LOOP from inside a select). The lexer skips newlines,
+                // so a bare-ident label is ambiguous with the next
+                // statement's first token — only `loop` is captured;
+                // user-named labels arrive with real loop labels.
+                let label = if self.at_kw("loop") {
                     self.bump();
-                }
-                Ok(Stmt::Break { span: self.span_from(start) })
+                    Some("loop".to_string())
+                } else {
+                    None
+                };
+                Ok(Stmt::Break { span: self.span_from(start), label })
             }
             Tok::Kw("continue") => {
                 self.bump();
-                Ok(Stmt::Continue { span: self.span_from(start) })
+                let label = if self.at_kw("loop") {
+                    self.bump();
+                    Some("loop".to_string())
+                } else {
+                    None
+                };
+                Ok(Stmt::Continue { span: self.span_from(start), label })
             }
             Tok::Punct("{") => {
                 let block = self.parse_block()?;
@@ -996,8 +1012,9 @@ impl Parser {
             // body's `{` must not attach to a bare identifier.
             let src = self.parse_expr(false)?;
             if self.at_punct("..") || self.at_punct("..=") {
-                // `..=` (inclusive) is not representable in ForKind::Range
-                // (contract gap): the flag is dropped; hi is as written.
+                // `..` exclusive, `..=` inclusive (both representable —
+                // example 04's `for i in 1..=8`).
+                let inclusive = self.at_punct("..=");
                 self.bump();
                 let hi = self.parse_expr(false)?;
                 if vars.len() != 1 {
@@ -1006,7 +1023,7 @@ impl Parser {
                 let var = vars.pop().unwrap();
                 let body = self.parse_block()?;
                 return Ok(Stmt::For {
-                    kind: ForKind::Range { var, lo: src, hi },
+                    kind: ForKind::Range { var, lo: src, hi, inclusive },
                     body,
                     span: self.span_from(start),
                 });

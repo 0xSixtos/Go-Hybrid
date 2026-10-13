@@ -259,9 +259,10 @@ pub enum Stmt {
     Match { subject: Expr, arms: Vec<MatchArm>, span: Span },
     /// `defer f.close()?`
     Defer { call: Expr, span: Span },
-    /// `break` / `continue`
-    Break { span: Span },
-    Continue { span: Span },
+    /// `break` / `break loop` / `break <label>` (example 04: breaking the
+    /// LOOP from inside a select — the label is representable).
+    Break { span: Span, label: Option<String> },
+    Continue { span: Span, label: Option<String> },
     /// Bare nested block `{ ... }`
     Block { block: Block, span: Span },
     /// `select { ... }` (examples 04 surface; corpus-stretch)
@@ -357,12 +358,13 @@ impl Place {
 
 #[derive(Debug, Clone)]
 pub enum ForKind {
-    /// `for { }`
+    /// `for { }` / `loop { }`
     Infinite,
     /// `for len(got) < len(inputs) { }`
     While { cond: Expr },
-    /// `for i in 0..n_shards { }`
-    Range { var: String, lo: Expr, hi: Expr },
+    /// `for i in 0..n_shards { }` (exclusive) / `for i in 1..=8 { }`
+    /// (inclusive — the `..=` flag is representable, example 04).
+    Range { var: String, lo: Expr, hi: Expr, inclusive: bool },
     /// `for w in shard { }` / `for i, l in langs { }` / `for w, n in m { }`
     /// / `for _, url in seed_urls { }` — vars[0] is the value or index.
     Iterate { vars: Vec<String>, expr: Expr },
@@ -612,8 +614,8 @@ impl Stmt {
             | Stmt::Managed { span, .. }
             | Stmt::Match { span, .. }
             | Stmt::Defer { span, .. }
-            | Stmt::Break { span }
-            | Stmt::Continue { span }
+            | Stmt::Break { span, .. }
+            | Stmt::Continue { span, .. }
             | Stmt::Block { span, .. }
             | Stmt::Select { span, .. } => *span,
         }
