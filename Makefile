@@ -8,8 +8,8 @@ SHARDS ?= 4
 MAXPAR ?= 4
 
 .PHONY: help env check test-quick ci corpus workspace examples spike0-kaggle spike0-kaggle-status spike0-kaggle-fetch \
-	spike0-actions-4 spike0-actions-20 spike-1 spike-2 spike-3 kaggle-job kaggle-status kaggle-fetch kaggle-wait \
-	actions-dispatch actions-watch actions-fetch clean
+        spike0-actions-4 spike0-actions-20 spike-1 spike-2 spike-3 kaggle-job kaggle-status kaggle-fetch kaggle-wait \
+        actions-dispatch actions-watch actions-fetch clean
 
 CARGO := $(HOME)/.cargo/bin/cargo
 CARGO_TARGET_DIR ?= $(HOME)/go-hybrid-target
@@ -32,9 +32,10 @@ env:
 
 check:
 	@$(PY) -m py_compile tools/runner/runner.py tools/job.py worker/script.py tools/corpus_harness.py && echo "py-syntax OK"
+	@bash tools/check-versions.sh --no-toolchain && echo "versions OK"
 	@cd /tmp && rm -rf gh-selftest && mkdir gh-selftest && cd gh-selftest && \
 	printf '%s\n' '{"job":"selftest","tier":"sandbox","sha":"none","repo":"none","gpu":false,"setup":[],"commands":[{"name":"echo","run":"echo selftest-ok","timeout":30}],"expected_results":[]}' > job.json && \
-	$(PY) $(CURDIR)/tools/runner/runner.py job.json --results-dir results >/dev/null && \
+        $(PY) $(CURDIR)/tools/runner/runner.py job.json --results-dir results >/dev/null && \
 	test -f results/summary.json && grep -q '"ok": true' results/summary.json && echo "runner selftest OK"
 	@$(PY) -c "import glob,json;[json.load(open(p)) for p in glob.glob('jobs/*/job.json')];print('job specs OK')"
 	@! git grep -qE 'ghp_[A-Za-z0-9]{20,}|KGAT_[A-Za-z0-9]{20,}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}' HEAD 2>/dev/null || (echo "SECRET LEAK"; exit 1)
@@ -67,49 +68,49 @@ ci: check
 
 # ---- Spike 0 orchestration ----
 spike0-kaggle:
-	$(PY) tools/job.py kaggle submit jobs/$(JOB)
+        $(PY) tools/job.py kaggle submit jobs/$(JOB)
 
 spike0-kaggle-status:
-	$(PY) tools/job.py kaggle status
+        $(PY) tools/job.py kaggle status
 
 spike0-kaggle-fetch:
-	$(PY) tools/job.py kaggle fetch jobs/$(JOB)
+        $(PY) tools/job.py kaggle fetch jobs/$(JOB)
 
 spike0-actions-4:
-	$(PY) tools/job.py actions dispatch heavy "$(shell git rev-parse --short=40 HEAD)" $(JOB) 4 4
+        $(PY) tools/job.py actions dispatch heavy "$(shell git rev-parse --short=40 HEAD)" $(JOB) 4 4
 
 spike0-actions-20:
-	$(PY) tools/job.py actions dispatch heavy "$(shell git rev-parse --short=40 HEAD)" $(JOB) 20 20
+        $(PY) tools/job.py actions dispatch heavy "$(shell git rev-parse --short=40 HEAD)" $(JOB) 20 20
 
 kaggle-job:
-	$(PY) tools/job.py kaggle submit jobs/$(J)
+        $(PY) tools/job.py kaggle submit jobs/$(J)
 
 kaggle-status:
-	$(PY) tools/job.py kaggle status
+        $(PY) tools/job.py kaggle status
 
 kaggle-wait:
-	$(PY) tools/job.py kaggle wait $(or $(MINUTES),20)
+        $(PY) tools/job.py kaggle wait $(or $(MINUTES),20)
 
 kaggle-fetch:
-	$(PY) tools/job.py kaggle fetch jobs/$(J)
+        $(PY) tools/job.py kaggle fetch jobs/$(J)
 
 spike-1:
-	bash spikes/spike1-call-overhead/work/run.sh
+        bash spikes/spike1-call-overhead/work/run.sh
 
 spike-2:
-	bash spikes/spike2-go-linking/work/run.sh
+        bash spikes/spike2-go-linking/work/run.sh
 
 spike-3:
-	bash spikes/spike3-memory/work/run.sh
+        bash spikes/spike3-memory/work/run.sh
 
 spike-5:
-	bash spikes/spike5-errors/work/run.sh
+        bash spikes/spike5-errors/work/run.sh
 
 spike-4:
-	bash spikes/spike4-scheduling/work/run.sh
+        bash spikes/spike4-scheduling/work/run.sh
 
 actions-watch:
-	$(PY) tools/job.py watch actions
+        $(PY) tools/job.py watch actions
 
 clean:
 	@command -v cargo >/dev/null && cargo clean 2>/dev/null || true
