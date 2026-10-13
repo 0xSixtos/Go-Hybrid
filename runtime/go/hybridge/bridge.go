@@ -12,18 +12,18 @@
 //     KeepAlive) that every binding emits around pointer-typed arguments.
 //
 // Trampoline discipline (both paths — the rules the bridge generator emits):
-//   1. all Go-frame inputs loaded BEFORE any SP adjustment;
-//   2. old SP saved in a SysV callee-saved register (RBX), restored BEFORE
-//      writing results;
-//   3. 16-byte SysV alignment at callee entry (rsp%16==8);
-//   4. NOSPLIT: no Go stack growth inside the trampoline;
-//   5. no callbacks into Go while on a deep stack; panics abort at the Rust
-//      edge (E9) — they never unwind across.
+//  1. all Go-frame inputs loaded BEFORE any SP adjustment;
+//  2. old SP saved in a SysV callee-saved register (RBX), restored BEFORE
+//     writing results;
+//  3. 16-byte SysV alignment at callee entry (rsp%16==8);
+//  4. NOSPLIT: no Go stack growth inside the trampoline;
+//  5. no callbacks into Go while on a deep stack; panics abort at the Rust
+//     edge (E9) — they never unwind across.
 package hybridge
 
 import (
-        "sync/atomic"
-        "unsafe"
+	"sync/atomic"
+	"unsafe"
 )
 
 //go:noescape
@@ -68,46 +68,46 @@ var DeepPathCount atomic.Uint64
 // deep-path retry. Returns the needsDeep sentinel when headroom is short —
 // callers MUST check; production must use Cross1.
 func Cross1Raw(fn unsafe.Pointer, a1 uintptr) uint64 {
-        return callFast1(fn, a1)
+	return callFast1(fn, a1)
 }
 
 func Cross1(fn unsafe.Pointer, a1 uintptr) uint64 {
-        v := callFast1(fn, a1)
-        if v == needsDeep {
-                DeepPathCount.Add(1)
-                i := acquireDeep()
-                v = callDeep1(fn, a1, deepTops[i])
-                releaseDeep(i)
-        }
-        return v
+	v := callFast1(fn, a1)
+	if v == needsDeep {
+		DeepPathCount.Add(1)
+		i := acquireDeep()
+		v = callDeep1(fn, a1, deepTops[i])
+		releaseDeep(i)
+	}
+	return v
 }
 
 func Cross2(fn unsafe.Pointer, a1, a2 uintptr) uint64 {
-        v := callFast2(fn, a1, a2)
-        if v == needsDeep {
-                i := acquireDeep()
-                v = callDeep2(fn, a1, a2, deepTops[i])
-                releaseDeep(i)
-        }
-        return v
+	v := callFast2(fn, a1, a2)
+	if v == needsDeep {
+		i := acquireDeep()
+		v = callDeep2(fn, a1, a2, deepTops[i])
+		releaseDeep(i)
+	}
+	return v
 }
 
 func Cross3(fn unsafe.Pointer, a1, a2, a3 uintptr) uint64 {
-        v := callFast3(fn, a1, a2, a3)
-        if v == needsDeep {
-                i := acquireDeep()
-                v = callDeep3(fn, a1, a2, a3, deepTops[i])
-                releaseDeep(i)
-        }
-        return v
+	v := callFast3(fn, a1, a2, a3)
+	if v == needsDeep {
+		i := acquireDeep()
+		v = callDeep3(fn, a1, a2, a3, deepTops[i])
+		releaseDeep(i)
+	}
+	return v
 }
 
 // CrossDeep1: ALWAYS the pooled stack — for callees with unbounded stack use.
 func CrossDeep1(fn unsafe.Pointer, a1 uintptr) uint64 {
-        i := acquireDeep()
-        v := callDeep1(fn, a1, deepTops[i])
-        releaseDeep(i)
-        return v
+	i := acquireDeep()
+	v := callDeep1(fn, a1, deepTops[i])
+	releaseDeep(i)
+	return v
 }
 
 // SPHeadroomForTest exposes the stackguard headroom for the offsets canary.
@@ -120,11 +120,11 @@ func callFast4(fn unsafe.Pointer, a1, a2, a3, a4 uintptr) uint64
 func callDeep4(fn unsafe.Pointer, a1, a2, a3, a4 uintptr, stack uintptr) uint64
 
 func Cross4(fn unsafe.Pointer, a1, a2, a3, a4 uintptr) uint64 {
-        v := callFast4(fn, a1, a2, a3, a4)
-        if v == needsDeep {
-                i := acquireDeep()
-                v = callDeep4(fn, a1, a2, a3, a4, deepTops[i])
-                releaseDeep(i)
-        }
-        return v
+	v := callFast4(fn, a1, a2, a3, a4)
+	if v == needsDeep {
+		i := acquireDeep()
+		v = callDeep4(fn, a1, a2, a3, a4, deepTops[i])
+		releaseDeep(i)
+	}
+	return v
 }

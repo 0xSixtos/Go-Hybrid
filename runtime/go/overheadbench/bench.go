@@ -25,23 +25,23 @@ static void* a_abi_word(void) { return (void*)&hyrt_abi_word; }
 import "C"
 
 import (
-        "hybrid.program/hybridge"
-        "unsafe"
+	"hybrid.program/hybridge"
+	"unsafe"
 )
 
 // Function addresses (C ABI), resolved once at package init.
 var (
-        FnNop     = unsafe.Pointer(C.a_nop())
-        FnAbiWord = unsafe.Pointer(C.a_abi_word())
+	FnNop     = unsafe.Pointer(C.a_nop())
+	FnAbiWord = unsafe.Pointer(C.a_abi_word())
 )
 
 // abiWordExpected is hyrt_abi_word() for this binding generation.
 const abiWordExpected = 0x68795f61626931 // "hy_abi1"
 
 func init() {
-        if w := hybridge.Cross1(FnAbiWord, 0); w != abiWordExpected {
-                panic("overheadbench: hyrt ABI handshake mismatch (rebuild the runtime)")
-        }
+	if w := hybridge.Cross1(FnAbiWord, 0); w != abiWordExpected {
+		panic("overheadbench: hyrt ABI handshake mismatch (rebuild the runtime)")
+	}
 }
 
 // Nop crosses the boundary and does nothing — the per-call cost of the
@@ -49,7 +49,7 @@ func init() {
 // goroutine stack (the steady-state shape the ≤5 ns budget names); the
 // deep-path retry is Cross1's internal concern, unchanged from spike 3.
 func Nop(x uint64) uint64 {
-        return hybridge.Cross1(FnNop, uintptr(x))
+	return hybridge.Cross1(FnNop, uintptr(x))
 }
 
 // NopRaw — the G2 bench's diagnostic: the fast trampoline with NO Go
@@ -57,11 +57,11 @@ func Nop(x uint64) uint64 {
 // checks it explicitly (the shallow-goroutine scenario EXPECTS the
 // sentinel; that is the finding, not a failure).
 func NopRaw(x uint64) (uint64, bool) {
-        v := hybridge.Cross1Raw(FnNop, uintptr(x))
-        if v == ^uint64(1) {
-                return 0, false
-        }
-        return v, true
+	v := hybridge.Cross1Raw(FnNop, uintptr(x))
+	if v == ^uint64(1) {
+		return 0, false
+	}
+	return v, true
 }
 
 // DeepPathCount reports how many crossings took the deep path (cold-path

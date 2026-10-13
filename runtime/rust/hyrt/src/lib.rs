@@ -17,6 +17,13 @@
 //! surfaces here are exactly what the pinned target programs need, grown by
 //! Decision Log entries — SPEC M5/M6 discipline applies to crates too).
 
+// Every export takes C-ABI raw pointers by definition (abi-types.md §5's
+// pinned-borrow + generation-tag protocol is the safety contract; the Go
+// broker is its only caller, and each export null-guards its own args).
+// The lint would demand `unsafe fn` on all 18 — it changes nothing for the
+// C caller and adds nothing the in-fn guards don't already enforce.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 use std::ptr;
 
 // ---------------------------------------------------------------------------
@@ -80,7 +87,7 @@ pub extern "C" fn hy_nop(x: u64) -> u64 {
 // INVALID. The table's storage is a Mutex<Vec<Option<Box<Value>>>> — MVP
 // scale (example 05 touches ~10 values), contention irrelevant.
 
-use serde_json::{Map, Number, Value as Json};
+use serde_json::{Map, Value as Json};
 use std::sync::Mutex;
 
 struct Table {
@@ -410,8 +417,7 @@ pub extern "C" fn hy_json_to_string_pretty(
     }
     let mut status = 0i32;
     with_table(|t| {
-        let text =
-            serde_json::to_string_pretty(table_get(t, v)?).map_err(|_| ERR_JSON)?;
+        let text = serde_json::to_string_pretty(table_get(t, v)?).map_err(|_| ERR_JSON)?;
         let need = text.len();
         unsafe {
             *out_len = need as u64;
@@ -461,7 +467,6 @@ pub extern "C" fn hy_json_live_count(out: *mut u64) -> i32 {
         Ok(())
     })
 }
-
 
 // ---------------------------------------------------------------------------
 // rust/regex (pinned 1.11.1) — example 09's through-the-package call

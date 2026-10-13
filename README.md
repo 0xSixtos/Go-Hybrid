@@ -136,9 +136,11 @@ hyb build <file.hy> -o <bin>              # one command; enforces the pins (HYB-
 hyb build --package <name> --out-dir <dir> --binding-prefix <path>  # Go-importable package
 ```
 
-Review gates: G0 passed, G1 ratified, G2 passed (`gates/G2.md`), G3
-(MVP-exit sweep) evidence-complete and awaiting human review
-(`gates/G3.md`).
+Review gates: G0 passed, G1 ratified, G2 passed + ratified (`gates/G2.md`),
+G3 (MVP-exit sweep) **reviewed + passed 2026-10-13 — the MVP is done**
+(`gates/G3.md` records the claim-by-claim re-verification: standard
+suites — cargo test, go vet, gofmt, cargo clippy — plus the repo's own
+acceptance/differential/corpus/bench evidence).
 
 
 ## Learn more

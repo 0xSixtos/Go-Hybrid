@@ -22,16 +22,16 @@ import "unsafe"
 import "hybrid.program/hybridge"
 
 var (
-        FnIsMatch = unsafe.Pointer(C.a_is_match())
-        FnIsValid = unsafe.Pointer(C.a_is_valid())
-        FnAbiWord = unsafe.Pointer(C.a_abi_word())
+	FnIsMatch = unsafe.Pointer(C.a_is_match())
+	FnIsValid = unsafe.Pointer(C.a_is_valid())
+	FnAbiWord = unsafe.Pointer(C.a_abi_word())
 )
 
 // ABI handshake — same generation word as the other bindings (one hyrt).
 const abiWordExpected = 0x68795f61626931
 
 func init() {
-        if w := hybridge.Cross1(FnAbiWord, 0); w != abiWordExpected {
-                panic("regexbinding: hyrt ABI handshake mismatch (rebuild the runtime)")
-        }
+	if w := hybridge.Cross1(FnAbiWord, 0); w != abiWordExpected {
+		panic("regexbinding: hyrt ABI handshake mismatch (rebuild the runtime)")
+	}
 }
