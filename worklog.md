@@ -157,3 +157,18 @@ Work Log:
 Stage Summary:
 - Session 7 total: Batch H committed (37f165c) → Batch I differential loop (dae5014) → Batch J bench + G2 (b34d157) → Batch K G3 sweep (this commit)
 - The full plan chain is complete: 10/10 programs, differential FULL AGREEMENT, G2 PASSED, G3 evidence assembled — all pushed
+
+---
+Task ID: 16 (session 7 — closeout)
+Agent: lead (Super Z)
+Task: CI verification + session closeout
+
+Work Log:
+- CI failure diagnosed (differential step: relative --bin resolved inside the temp workspace cwd) → differential_loop.py absolutizes --bin up front + missing-binary guard; verified locally (not-found naming, relative-from-/tmp, default FULL AGREEMENT)
+- CI GREEN on 43e06d3: pins → 194 tests → corpus 20/20 → differential 9/9+11/11 → 10/10 examples
+- README Get-it refreshed to the final state (all ten programs, package emission, make differential/bench, gate statuses)
+- Session commits: 37f165c (H) → dae5014 (I) → b34d157 (J) → 872ef1c (K) → f94ef89 (README) → 43e06d3 (CI fix) — every batch pushed immediately
+
+Stage Summary:
+- THE PLAN IS COMPLETE: PLAN.md task queue zero open rows; 10/10 programs byte-exact; differential FULL AGREEMENT; G2 PASSED; G3 evidence assembled (PROVISIONAL pending human review); CI green
+- For the next session: human review of gates/G2.md + gates/G3.md; on approval the MVP may be called done; fleet dispatch (sanitizers/fuzzing) before any release
