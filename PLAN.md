@@ -89,7 +89,7 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 | R11 | Go codegen ceiling (GC pauses) misses perf budget | M | M | hot paths via ≤5ns Rust calls; macro-benchmarks at Phase 4 |
 
 ## Review Gates
-- G0: **PASSED 2026-10-12** (all six spikes both tiers; spike-report written; build-vs-extend re-run confirms Option B; two open human decisions logged in QUESTIONS.md — sendability reading + thread-budget config — defaults proceed per SPEC §9) | G1: **WRITTEN 2026-10-13 — gates/G1.md, READY FOR HUMAN REVIEW** (spec draft + MVP-0 both machine-verified; emitter lowering decisions need ratification) | G2: [ ] | G3: [ ]
+- G0: **PASSED 2026-10-12** (all six spikes both tiers; spike-report written; build-vs-extend re-run confirms Option B; two open human decisions logged in QUESTIONS.md — sendability reading + thread-budget config — defaults proceed per SPEC §9) | G1: **RATIFIED 2026-10-13** (human directed the review; every lowering decision re-checked against T4/E3/E6/C1–C4/M4/O8–O9 + implementation; no redirects; batch order confirmed: 07/08 landed, Phase-2 next — see gates/G1.md header) | G2: [ ] | G3: [ ]
 
 ## Test Results
 - Compiler (session 5): **157 tests green** (8 diag + 75+4 parser + 25+2 checker + 48 emit) — corpus 20/20 verdict agreement, tripwire not fired (10.0% / 15.0% vs ~25%)
@@ -150,6 +150,7 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 - 2026-10-13 | `break loop` emits `hyLoop:` label + `break hyLoop` (loop is a Go keyword); label ownership = nearest enclosing loop, does not descend into nested loops | example 04's break-from-select | reverse: user-named labels with a real loop-label grammar
 - 2026-10-13 | `hyb build` enforces toolchain pins at runtime (HYB-E9001; option_env! pins with sane defaults + HYB_ALLOW_TOOLCHAIN_DRIFT=1 escape); tools/check-versions.sh guards every version-bearing artifact and is negative-tested | DX study's version-manager pillar at ~30 lines; reproducible emitted-Go | reverse: drop the guard only with a logged decision (never silently)
 - 2026-10-13 | Registry append +2: HYB-E0002 parse-error (the parser already emitted the code; it was registry-less), HYB-E9001 toolchain-mismatch | append-only discipline; 19 codes total | reverse: never (append-only)
+- 2026-10-13 | **G1 RATIFIED** (human directive: "review gates/G1.md and ratify (or redirect) the lowering decisions"). Every lowering decision re-checked against its normative SPEC rule + implementation before ratifying: two-pass assembly (Go import order), interpolation→Sprintf (T4 %v-shape, all-literal fast path), E6 wrapper (§6.2 byte-for-byte — closure so defers LIFO precede the stderr line), E3 hyErrN desugar, task→go (C1), move-marker drop, M4 foreign-only normalization, binding hints as MVP-0 type table, O8 slot-loan copy+store-back (O9 honesty), hyLoop labels, option/set/pop prelude + assoc-fn mangling + generic shapes. NO redirects. Fresh-sandbox re-verification: 157 tests, corpus 20/20, tripwire not fired, 6/6 examples byte-exact. Batch order confirmed: Phase-2 bridge (05/09/10) → example 06 type knowledge → differential loop → overhead bench (G2 evidence) | gates/G1.md header records ratification + provenance | reverse: a ratified decision changes only via logged amendment (same discipline as checker verdicts)
 
 ## Cut Log
 (empty)
