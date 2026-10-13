@@ -172,3 +172,26 @@ Work Log:
 Stage Summary:
 - THE PLAN IS COMPLETE: PLAN.md task queue zero open rows; 10/10 programs byte-exact; differential FULL AGREEMENT; G2 PASSED; G3 evidence assembled (PROVISIONAL pending human review); CI green
 - For the next session: human review of gates/G2.md + gates/G3.md; on approval the MVP may be called done; fleet dispatch (sanitizers/fuzzing) before any release
+
+---
+Task ID: 17 (session 8 — G2/G3 review + ratification)
+Agent: lead (Super Z)
+Task: review gates/G2.md + gates/G3.md per human delegation ("on approval the MVP may be called done then continue with rest of pending matters and through tests that you didnt cherry pick or device yourself just normal go and rust things")
+
+Work Log:
+- Fresh sandbox recovery: re-pinned go1.26.9 (foreground tar) + rust 1.99.0 (rustup minimal); core.filemode=false (the whole tree showed mode-flip noise, zero content)
+- G2 evidence REPRODUCED via the bench: fast path 3.44 ns ≤ 5 ns (69%; gate's 3.37 within variance), raw trampoline 2.63 ns ≈ spike's 2.82, deep path 19.34 ns, DeepPathCount frozen across the fast loop — verdict unchanged
+- G3 claims re-verified via STANDARD suites: cargo test --workspace 194/0 (11 suites), make examples 10/10, make differential 9/9+11/11, corpus 20/20 (tripwire quiet); go vet + go build clean on all five runtime packages assembled in the exact hyb workspace shape (module hybrid.program + staticlib at lib/)
+- FINDING 1: make bench claimed at Batch J never landed (b34d157 touched no Makefile) → target wired
+- FINDING 2 (material): Batch I's regeneration (dae5014) reintroduced space-indented recipes — EVERY make target broken ("missing separator") while CI stayed green because CI never invokes make → Makefile rewritten (tabs, deduped vars), make -n syntax guard in make check + CI Makefile-parse step
+- FINDING 3: 5/9 runtime Go files not gofmt-clean → gofmt -w; vet/build re-run clean; 10/10 acceptance re-run after (no behavior change); gofmt+vet+build added as a CI leg
+- FINDING 4: hyrt — unused Number import removed; documented crate-level allow for the 18 C-ABI pointer-deref lints (abi-types §5 protocol is the real contract); cargo fmt; clippy now clean
+- Logged-not-repaired: compiler-workspace clippy = 33 style-level findings, 0 correctness lints → Post-MVP queue row 1 (churn at gate exit rejected)
+- Post-MVP queue opened in PLAN.md (6 rows: style sweep, fleet sanitizers/fuzzing vs MVP SHA, worker-tier bench, per-callee budgets, package-level Go tests, make bench at fleet dispatch)
+- Final sweep make test-quick green; commit 5deeea2 pushed (13 files); gates/G2.md + G3.md headers, PLAN (status/gate row/Decision Log/post-MVP queue), STATUS, README updated
+- Sandbox lesson (repeat): shell env resets between Bash calls — export PATH inline every time
+
+Stage Summary:
+- GATE CHAIN COMPLETE: G0 passed / G1 ratified / G2 passed+ratified / G3 passed — THE MVP IS DONE, public claim unblocked
+- 4 defects the gates' own claims missed were caught BECAUSE the review ran normal tooling — the user's instinct was right
+- Next: post-MVP queue in order (row 1 style sweep is sandbox-local; rows 2–3 need the fleet)
