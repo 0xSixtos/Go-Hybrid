@@ -7,7 +7,7 @@ JOB ?= 001-spike0-kaggle-smoke
 SHARDS ?= 4
 MAXPAR ?= 4
 
-.PHONY: help env check test-quick ci corpus workspace spike0-kaggle spike0-kaggle-status spike0-kaggle-fetch \
+.PHONY: help env check test-quick ci corpus workspace examples spike0-kaggle spike0-kaggle-status spike0-kaggle-fetch \
 	spike0-actions-4 spike0-actions-20 spike-1 spike-2 spike-3 kaggle-job kaggle-status kaggle-fetch kaggle-wait \
 	actions-dispatch actions-watch actions-fetch clean
 
@@ -42,7 +42,14 @@ check:
 	@echo "check OK"
 
 test-quick: check
-	@echo "(no compiler tests yet — Phase 0; see PLAN.md)"
+	@cd compiler && CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) CARGO_BUILD_JOBS=2 $(CARGO) test --workspace --quiet
+	@$(PY) tools/corpus_harness.py --bin $(HYB_BIN)
+
+# MVP-0 walking-skeleton acceptance: parse → Tier-0 check → emit → go build
+# → run → diff against each example's expected.txt.
+examples:
+	@cd compiler && CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) CARGO_BUILD_JOBS=2 $(CARGO) build -p hyb --quiet
+	@bash tools/run_examples.sh
 
 CARGO := $(HOME)/.cargo/bin/cargo
 CARGO_TARGET_DIR ?= $(HOME)/go-hybrid-target

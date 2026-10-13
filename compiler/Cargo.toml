@@ -4,6 +4,7 @@ members = [
     "crates/hy-diag",
     "crates/hy-syntax",
     "crates/hy-check",
+    "crates/hy-emit",
     "crates/hyb",
 ]
 

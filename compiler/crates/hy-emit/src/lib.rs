@@ -1,0 +1,681 @@
+//! hy-emit — the MVP-0 Go emitter (the walking skeleton's last leg).
+//!
+//! Pipeline position: `hy-syntax` (AST) → `hy-check` (Tier-0 verdict) →
+//! **hy-emit** (Go source) → `go build` → executable.
+//!
+//! Scope (MVP-0): the surface exercised by examples/01-hello, 02-cli-cat,
+//! 03-worker-pool — plus the shared forms the corpus uses (for-forms, send/
+//! receive, task→go, move-marker drop, defer, interpolation→Sprintf).
+//! Anything outside that surface returns a CLEAN unsupported error — never
+//! a wrong emission (same discipline as the parser's AST contract).
+//!
+//! Design notes:
+//!   * TWO-PASS file assembly — decls render into a body buffer while used
+//!     packages collect into a BTreeSet; the header (package + imports) is
+//!     assembled LAST. A struct-first file therefore can never emit `type`
+//!     before `import` (Go rejects that; this was MVP-0 bug #1).
+//!   * `make(chan job, 16)` — make's first argument renders as a BARE TYPE,
+//!     never a value literal (the parser encodes type-as-value as an empty
+//!     `StructLit{ty: Some(t)}`; rendering it as `job{}` inside make() was
+//!     MVP-0 bug #2).
+//!   * `?` desugaring follows SPEC-LANGUAGE.md §6 (E3) — temp error var +
+//!     early return; and the main-level exit contract (E6): a wrapper runs
+//!     defers (LIFO), prints `"<prog>: {err}"` to stderr, exits 1.
+//!   * Foreign-name normalization (M4): Hybrid's snake_case members map to
+//!     Go's exported names at emission (`read_all` → `ReadAll`), with a
+//!     special-case table for the shapes Go spells differently
+//!     (`os.args()` → `os.Args`, `fmt.eprintln` → `fmt.Fprintln(os.Stderr, …)`).
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use hy_syntax::*;
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// A clean "surface not implemented by the MVP-0 emitter" error.
+/// Never a wrong emission — the caller prints it and stops.
+#[derive(Debug, Clone)]
+pub struct EmitError {
+    pub message: String,
+}
+
+impl EmitError {
+    fn unsupported(what: impl Into<String>) -> Self {
+        EmitError { message: format!("emitter (MVP-0): not yet supported: {}", what.into()) }
+    }
+}
+
+/// Emit one parsed Hybrid file as compilable Go source (`package main`).
+pub fn emit_go(file: &File) -> Result<String, EmitError> {
+    let mut em = Emitter::new();
+    em.emit_file(file)
+}
+
+// ---------------------------------------------------------------------------
+// Binding hints (the tiny type table the MVP-0 surface needs)
+// ---------------------------------------------------------------------------
+
+/// What the emitter knows about a local binding. This is deliberately NOT
+/// a type checker — just enough to (a) normalize foreign members, (b) route
+/// `fmt.print` on a byte buffer to `os.Stdout.Write` (byte dumps read as
+/// `[104 105]`, not bytes), and (c) leave our own struct fields alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingKind {
+    /// Bound from a foreign (package-qualified) call — members normalize
+    /// (`f := os.open(p)` → `f.Close()`).
+    Foreign,
+    /// Bound from `io.read_all` — a byte buffer: `fmt.print(b)` becomes
+    /// `os.Stdout.Write(b)`.
+    Bytes,
+    /// Our own struct / plain value — members emit verbatim.
+    Plain,
+}
+
+// ---------------------------------------------------------------------------
+// Go builtin types + member normalization (M4)
+// ---------------------------------------------------------------------------
+
+/// Go's predeclared type names — never CamelCase-normalized.
+#[allow(dead_code)]
+const GO_BUILTIN_TYPES: &[&str] = &[
+    "bool", "byte", "rune", "string", "error", "any",
+    "int", "int8", "int16", "int32", "int64",
+    "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
+    "float32", "float64", "complex64", "complex128",
+];
+
+/// snake_case → Go exported name (`read_all` → `ReadAll`, `args` → `Args`).
+pub(crate) fn to_go_name(name: &str) -> String {
+    name.split('_')
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            let mut cs = p.chars();
+            match cs.next() {
+                Some(c) => c.to_uppercase().collect::<String>() + cs.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+/// Is this ident a foreign package root we recognize? (Import collection is
+/// usage-driven: any dotted name's first segment gets an import line.)
+pub(crate) fn is_package_root(name: &str) -> bool {
+    // Everything the curated surface imports today. Unknown roots still work —
+    // they emit verbatim and get an import — this list only guards the
+    // special-case table below.
+    matches!(
+        name,
+        "fmt" | "os" | "io" | "time" | "sort" | "strings" | "strconv"
+            | "errors" | "sync" | "bufio" | "http" | "httptest" | "json"
+            | "atomic" | "filepath" | "path"
+    )
+}
+
+/// Members Go spells differently than the naive M4 mapping.
+/// Value: `None` = drop the call parens (it is a variable), `Some(text)` =
+/// emit this expression text instead of `pkg.member`.
+pub(crate) fn special_member(pkg: &str, name: &str) -> Option<MemberSpecial> {
+    match (pkg, name) {
+        ("os", "args") => Some(MemberSpecial::Var("os.Args")),
+        ("os", "stdout") => Some(MemberSpecial::Var("os.Stdout")),
+        ("os", "stderr") => Some(MemberSpecial::Var("os.Stderr")),
+        ("os", "stdin") => Some(MemberSpecial::Var("os.Stdin")),
+        // fmt's stderr family carries the writer as the first argument.
+        ("fmt", "eprintln") => Some(MemberSpecial::StderrCall("Fprintln")),
+        ("fmt", "eprint") => Some(MemberSpecial::StderrCall("Fprint")),
+        ("fmt", "eprintf") => Some(MemberSpecial::StderrCall("Fprintf")),
+        // Duration constructors — conversions, not funcs.
+        ("time", "milliseconds") => Some(MemberSpecial::Duration("Millisecond")),
+        ("time", "seconds") => Some(MemberSpecial::Duration("Second")),
+        ("time", "minutes") => Some(MemberSpecial::Duration("Minute")),
+        ("time", "hours") => Some(MemberSpecial::Duration("Hour")),
+        _ => None,
+    }
+}
+
+pub(crate) enum MemberSpecial {
+    /// A package-level VARIABLE — emit verbatim text, no call parens.
+    Var(&'static str),
+    /// `fmt.eprintln(args…)` → `fmt.Fprintln(os.Stderr, args…)`.
+    StderrCall(&'static str),
+    /// `time.milliseconds(n)` → `time.Duration(n) * time.Millisecond`.
+    Duration(&'static str),
+}
+
+// ---------------------------------------------------------------------------
+// The emitter
+// ---------------------------------------------------------------------------
+
+pub struct Emitter {
+    /// Function/decl body under assembly (header assembled last — bug #1).
+    body: String,
+    indent: usize,
+    /// Package roots used anywhere in the body → import lines (sorted).
+    imports: BTreeSet<String>,
+    /// Per-function binding hints. A flat map per function: MVP-0's hints
+    /// are bound at fn-body top level, and closure bodies share the frame.
+    bindings: BTreeMap<String, BindingKind>,
+    /// Uniqueness counter for desugar temps (`hyErr0`, `hyErr1`, …).
+    temp_n: usize,
+    /// Inside a main-wrapper closure? (bare `return` legality, `?` shape)
+    in_main_closure: bool,
+    /// Inside a function literal (closure) — `?` binds to ITS results.
+    fnlit_depth: usize,
+}
+
+impl Emitter {
+    pub fn new() -> Self {
+        Emitter {
+            body: String::new(),
+            indent: 0,
+            imports: BTreeSet::new(),
+            bindings: BTreeMap::new(),
+            temp_n: 0,
+            in_main_closure: false,
+            fnlit_depth: 0,
+        }
+    }
+
+    fn next_temp(&mut self, stem: &str) -> String {
+        self.temp_n += 1;
+        format!("{}{}", stem, self.temp_n - 1)
+    }
+
+    fn use_package(&mut self, root: &str) {
+        self.imports.insert(root.to_string());
+    }
+
+    fn push(&mut self, line: &str) {
+        for _ in 0..self.indent {
+            self.body.push('\t');
+        }
+        self.body.push_str(line);
+        self.body.push('\n');
+    }
+
+    fn push_raw(&mut self, text: &str) {
+        self.body.push_str(text);
+    }
+
+    // -----------------------------------------------------------------------
+    // File assembly (TWO-PASS — the bug-#1 fix lives here)
+    // -----------------------------------------------------------------------
+
+    fn emit_file(&mut self, file: &File) -> Result<String, EmitError> {
+        // Pass 1: render every declaration into the body buffer, collecting
+        // used packages as we go. Top-level decls separate with a blank line
+        // (gofmt style) — cheap here, before the header is assembled.
+        let mut first_decl = true;
+        for decl in &file.decls {
+            if first_decl {
+                first_decl = false;
+            } else if !self.body.ends_with("\n\n") {
+                self.body.push('\n');
+            }
+            match decl {
+                Decl::Import { path, .. } => {
+                    // Explicit imports are recorded; rust/ paths need the
+                    // Phase-2 bridge and get a clean error, never a wrong
+                    // emission.
+                    if let Some(crate_name) = path.strip_prefix("rust/") {
+                        return Err(EmitError::unsupported(format!(
+                            "rust crate import `{}` needs the boundary bridge (post-MVP-0)",
+                            crate_name
+                        )));
+                    }
+                    self.imports.insert(path.to_string());
+                }
+                Decl::Const(c) => self.emit_file_const(c)?,
+                Decl::Struct(s) => self.emit_struct(s)?,
+                Decl::Enum(e) => {
+                    return Err(EmitError::unsupported(format!(
+                        "enum `{}` (match/enum emission lands with the match surface)",
+                        e.name
+                    )));
+                }
+                Decl::Fn(f) => self.emit_fn(f)?,
+            }
+        }
+
+        // Pass 2: assemble package + imports + body. Imports always sit
+        // between `package` and the first declaration — Go's required order.
+        let mut out = String::from("package main\n");
+        if !self.imports.is_empty() {
+            out.push_str("\nimport (\n");
+            for p in &self.imports {
+                out.push_str(&format!("\t\"{}\"\n", p));
+            }
+            out.push_str(")\n");
+        }
+        out.push('\n');
+        out.push_str(&self.body);
+        Ok(out)
+    }
+
+    fn emit_file_const(&mut self, c: &ConstDecl) -> Result<(), EmitError> {
+        let value = self.emit_expr(&c.value, 0)?;
+        match &c.ty {
+            Some(t) => {
+                let ty = self.type_text(t);
+                self.push(&format!("const {} {} = {}", c.name, ty, value));
+            }
+            None => self.push(&format!("const {} = {}", c.name, value)),
+        }
+        Ok(())
+    }
+
+    fn emit_struct(&mut self, s: &StructDecl) -> Result<(), EmitError> {
+        if !s.type_params.is_empty() {
+            // Generic struct (example-07 surface) — batch B lands the full
+            // generics story; emit the common shape now, it is legal Go.
+            let params = s
+                .type_params
+                .iter()
+                .map(|p| match &p.constraint {
+                    Some(c) => format!("{} {}", p.name, self.constraint_text(c)),
+                    None => p.name.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.push(&format!("type {}[{}] struct {{", s.name, params));
+        } else {
+            self.push(&format!("type {} struct {{", s.name));
+        }
+        self.indent += 1;
+        for f in &s.fields {
+            // Our own struct fields stay snake_case (M4 normalizes FOREIGN
+            // names, never ours).
+            let ty = self.type_text(&f.ty);
+            self.push(&format!("{} {}", f.name, ty));
+        }
+        self.indent -= 1;
+        self.push("}");
+        Ok(())
+    }
+
+    fn constraint_text(&self, c: &str) -> String {
+        // `comparable` / `any` are Go's spellings already.
+        c.to_string()
+    }
+
+    // -----------------------------------------------------------------------
+    // Functions (incl. the main wrapper — the E6 exit contract)
+    // -----------------------------------------------------------------------
+
+    fn emit_fn(&mut self, f: &FnDecl) -> Result<(), EmitError> {
+        self.bindings.clear();
+        self.temp_n = 0;
+
+        let is_main = f.name == "main" && f.receiver.is_none();
+        // E4/E6: main's `?` sites trigger the exit contract. If main declares
+        // results OR contains top-level `?` sites, the body moves into a
+        // closure whose error result drives the wrapper.
+        let body_has_try = f.body.as_ref().map(|b| self.block_has_try(b)).unwrap_or(false);
+        let main_needs_wrapper = is_main && (!f.results.is_empty() || body_has_try);
+
+        // Hints from parameter types (dotted foreign types → Foreign).
+        if let Some(recv) = &f.receiver {
+            let recv_ty = self.type_text(&recv.ty);
+            let star = if recv.is_pointer { "*" } else { "" };
+            let name = f.name.clone();
+            self.push_raw(&format!("func ({} {}{}) {}(", recv.name, star, recv_ty, name));
+        } else {
+            let name = f.name.clone();
+            self.push_raw(&format!("func {}(", name));
+        }
+        self.emit_params(&f.params);
+        self.push_raw(")");
+
+        if main_needs_wrapper {
+            // func main() { <ret> := func(<results…>, hyErr error) { … }() … }
+            self.push_raw(" {\n");
+            self.indent += 1;
+            let ret_vars = self.main_ret_vars(f);
+            let closure_sig = self.main_closure_sig(f);
+            self.push(&format!("{} := func() {} {{", ret_vars, closure_sig));
+            self.indent += 1;
+            let saved = self.in_main_closure;
+            self.in_main_closure = true;
+            self.emit_hints_from_params(&f.params);
+            if let Some(body) = &f.body {
+                for s in &body.stmts {
+                    self.emit_stmt(s)?;
+                }
+            }
+            self.in_main_closure = saved;
+            self.indent -= 1;
+            self.push("}()");
+            self.push("if hyErr != nil {");
+            self.indent += 1;
+            // E6: defers already ran (closure return) — print + exit 1.
+            self.push("fmt.Fprintln(os.Stderr, filepath.Base(os.Args[0])+\":\", hyErr)");
+            self.push("os.Exit(1)");
+            self.indent -= 1;
+            self.push("}");
+            if !f.results.is_empty() {
+                // The declared non-error result IS the exit code on the
+                // explicit `return N` path (example 02's `return 1`). The
+                // receiver var mirrors the declared result's name.
+                let first_ret = ret_vars
+                    .split(", ")
+                    .next()
+                    .unwrap_or("hyR0")
+                    .to_string();
+                self.push(&format!("os.Exit({})", first_ret));
+            }
+            self.indent -= 1;
+            self.push("}");
+            self.use_package("fmt");
+            self.use_package("os");
+            self.use_package("path/filepath");
+            return Ok(());
+        }
+
+        // Plain signature rendering (non-main, or main with no results/`?`).
+        // The results clause carries its own leading space: `func f() (code int) {`.
+        match f.results.len() {
+            0 => self.push_raw(" {\n"),
+            1 => {
+                let r = &f.results[0];
+                let ty = self.type_text(&r.ty);
+                match &r.name {
+                    Some(n) => self.push_raw(&format!(" ({} {}) {{\n", n, ty)),
+                    None => self.push_raw(&format!("({}) {{\n", ty)),
+                }
+            }
+            2 => {
+                let mut parts: Vec<String> = Vec::new();
+                for r in &f.results {
+                    let ty = self.type_text(&r.ty);
+                    match &r.name {
+                        Some(n) => parts.push(format!("{} {}", n, ty)),
+                        None => parts.push(ty),
+                    }
+                }
+                self.push_raw(&format!(" ({}) {{\n", parts.join(", ")));
+            }
+            n => {
+                return Err(EmitError::unsupported(format!(
+                    "functions with {} results (max 2: value + error)",
+                    n
+                )));
+            }
+        }
+        self.indent += 1;
+        self.emit_hints_from_params(&f.params);
+        if let Some(body) = &f.body {
+            for s in &body.stmts {
+                self.emit_stmt(s)?;
+            }
+        }
+        self.indent -= 1;
+        self.push("}");
+        Ok(())
+    }
+
+    fn main_ret_vars(&self, f: &FnDecl) -> String {
+        if f.results.is_empty() {
+            "hyErr".to_string()
+        } else {
+            // `code` is example-02's named result; unnamed results get a
+            // generated receiver var.
+            let names: Vec<String> = f
+                .results
+                .iter()
+                .enumerate()
+                .map(|(i, r)| r.name.clone().unwrap_or_else(|| format!("hyR{}", i)))
+                .collect();
+            names.join(", ") + ", hyErr"
+        }
+    }
+
+    /// The wrapper closure's signature: the declared results (named) plus
+    /// the hidden `hyErr error` the `?` desugaring returns through.
+    fn main_closure_sig(&mut self, f: &FnDecl) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        for (i, r) in f.results.iter().enumerate() {
+            let n = r.name.clone().unwrap_or_else(|| format!("hyR{}", i));
+            let ty = self.type_text(&r.ty);
+            parts.push(format!("{} {}", n, ty));
+        }
+        parts.push("hyErr error".to_string());
+        format!("({})", parts.join(", "))
+    }
+
+    fn emit_params(&mut self, params: &[Param]) {
+        let mut rendered = String::new();
+        for (i, p) in params.iter().enumerate() {
+            if i > 0 {
+                rendered.push_str(", ");
+            }
+            let ty = self.type_text(&p.ty);
+            rendered.push_str(&format!("{} {}", p.name, ty));
+        }
+        self.push_raw(&rendered);
+    }
+
+    fn emit_hints_from_params(&mut self, params: &[Param]) {
+        for p in params {
+            if self.type_is_foreign(&p.ty) {
+                self.bindings.insert(p.name.clone(), BindingKind::Foreign);
+            }
+        }
+    }
+
+    fn type_is_foreign(&self, t: &TypeExpr) -> bool {
+        match t {
+            TypeExpr::Named { name, .. } => name.contains('.'),
+            TypeExpr::Pointer { to, .. } => self.type_is_foreign(to),
+            TypeExpr::Slice { elem, .. } => self.type_is_foreign(elem),
+            TypeExpr::Map { key, value, .. } => self.type_is_foreign(key) || self.type_is_foreign(value),
+            _ => false,
+        }
+    }
+
+    fn block_has_try(&self, b: &Block) -> bool {
+        b.stmts.iter().any(|s| self.stmt_has_try(s))
+    }
+
+    fn stmt_has_try(&self, s: &Stmt) -> bool {
+        match s {
+            Stmt::Local(l) => l.values.iter().any(|v| self.expr_has_try(v)),
+            Stmt::Assign { values, .. } => values.iter().any(|v| self.expr_has_try(v)),
+            Stmt::Expr { expr, .. } => self.expr_has_try(expr),
+            Stmt::Send { value, .. } => self.expr_has_try(value),
+            Stmt::If { init, cond, then, otherwise, .. } => {
+                let init_try = init
+                    .as_ref()
+                    .map(|i| self.stmt_has_try(i.as_ref()))
+                    .unwrap_or(false);
+                let else_try = otherwise
+                    .as_ref()
+                    .map(|o| self.stmt_has_try(o.as_ref()))
+                    .unwrap_or(false);
+                init_try
+                    || self.expr_has_try(cond)
+                    || self.block_has_try(then)
+                    || else_try
+            }
+            Stmt::For { kind, body, .. } => {
+                let kind_try = match kind {
+                    ForKind::While { cond } => self.expr_has_try(cond),
+                    ForKind::Range { lo, hi, .. } => self.expr_has_try(lo) || self.expr_has_try(hi),
+                    ForKind::Iterate { expr, .. } => self.expr_has_try(expr),
+                    ForKind::Infinite => false,
+                };
+                kind_try || self.block_has_try(body)
+            }
+            Stmt::Return { values, .. } => values.iter().any(|v| self.expr_has_try(v)),
+            Stmt::Defer { call, .. } => self.expr_has_try(call),
+            Stmt::Block { block, .. } => self.block_has_try(block),
+            Stmt::Managed { body, .. } => self.block_has_try(body),
+            Stmt::Task { args, .. } => args.iter().any(|a| self.expr_has_try(&a.value)),
+            Stmt::Match { subject, arms, .. } => {
+                self.expr_has_try(subject)
+                    || arms.iter().any(|a| {
+                        a.guard.as_ref().map(|g| self.expr_has_try(g)).unwrap_or(false)
+                            || self.block_has_try(&a.body)
+                    })
+            }
+            Stmt::Select { arms, .. } => arms.iter().any(|a| self.block_has_try(&a.body)),
+            Stmt::Break { .. } | Stmt::Continue { .. } => false,
+        }
+    }
+
+    fn expr_has_try(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Try { .. } => true,
+            Expr::Binary { lhs, rhs, .. } => self.expr_has_try(lhs) || self.expr_has_try(rhs),
+            Expr::Unary { operand, .. } | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. } => self.expr_has_try(operand),
+            Expr::Receive { chan, .. } => self.expr_has_try(chan),
+            Expr::Index { base, index, .. } => self.expr_has_try(base) || self.expr_has_try(index),
+            Expr::Slice { base, lo, hi, .. } => {
+                self.expr_has_try(base)
+                    || lo.as_ref().map(|x| self.expr_has_try(x)).unwrap_or(false)
+                    || hi.as_ref().map(|x| self.expr_has_try(x)).unwrap_or(false)
+            }
+            Expr::Field { base, .. } => self.expr_has_try(base),
+            Expr::Call { callee, args, .. } => {
+                self.expr_has_try(callee) || args.iter().any(|a| self.expr_has_try(&a.value))
+            }
+            Expr::StructLit { fields, .. } => fields.iter().any(|f| self.expr_has_try(&f.value)),
+            Expr::SliceLit { items, .. } => items.iter().any(|i| self.expr_has_try(i)),
+            Expr::MapLit { entries, .. } => {
+                entries.iter().any(|(k, v)| self.expr_has_try(k) || self.expr_has_try(v))
+            }
+            Expr::FnLit { body, .. } => self.block_has_try(body),
+            Expr::Paren { inner, .. } => self.expr_has_try(inner),
+            _ => false,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Types (Go spelling)
+    // -----------------------------------------------------------------------
+
+    pub fn type_text(&mut self, t: &TypeExpr) -> String {
+        match t {
+            TypeExpr::Named { name, .. } => self.go_type_name(name),
+            TypeExpr::Pointer { to, .. } => format!("*{}", self.type_text(to)),
+            TypeExpr::Slice { elem, .. } => format!("[]{}", self.type_text(elem)),
+            TypeExpr::Array { len, elem, .. } => match len {
+                Some(e) => {
+                    let n = self.expr_text_static(e);
+                    format!("[{}]{}", n, self.type_text(elem))
+                }
+                None => format!("[]{}", self.type_text(elem)), // [...]T → slice at emission
+            },
+            TypeExpr::Map { key, value, .. } => {
+                format!("map[{}]{}", self.type_text(key), self.type_text(value))
+            }
+            TypeExpr::Chan { dir, elem, .. } => {
+                let e = self.type_text(elem);
+                match dir {
+                    ChanDir::Both => format!("chan {}", e),
+                    ChanDir::Recv => format!("<-chan {}", e),
+                    ChanDir::Send => format!("chan<- {}", e),
+                }
+            }
+            TypeExpr::Option { elem, .. } => {
+                // option[T] — MVP-0 renders as *T (Go-idiomatic absence);
+                // the enum/match surface revisits this with 07.
+                format!("*{}", self.type_text(elem))
+            }
+            TypeExpr::Fn { params, results, .. } => {
+                let ps = params
+                    .iter()
+                    .map(|p| format!("{} {}", p.name, self.type_text(&p.ty)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let rs = results
+                    .iter()
+                    .map(|t| self.type_text(t))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if rs.is_empty() {
+                    format!("func({})", ps)
+                } else {
+                    format!("func({}) {}", ps, rs)
+                }
+            }
+        }
+    }
+
+    /// One type NAME in Go spelling. Dotted = foreign (`http.request` →
+    /// `http.Request`, import registered). Undotted = ours or a Go builtin —
+    /// verbatim (never CamelCased: `node_id` and `int` both stay).
+    fn go_type_name(&mut self, name: &str) -> String {
+        if let Some((root, rest)) = name.split_once('.') {
+            self.use_package(root);
+            let joined = rest
+                .split('.')
+                .map(to_go_name)
+                .collect::<Vec<_>>()
+                .join(".");
+            format!("{}.{}", root, joined)
+        } else {
+            name.to_string()
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Small helpers
+    // -----------------------------------------------------------------------
+
+    /// Zero-value expression for a Go type (the `?` desugar's explicit
+    /// returns). `*new(T)` is the universal fallback — a stack zero, no
+    /// allocation.
+    pub fn zero_value(&mut self, t: &TypeExpr) -> String {
+        match t {
+            TypeExpr::Named { name, .. } if !name.contains('.') => match name.as_str() {
+                "bool" => "false".into(),
+                "string" => "\"\"".into(),
+                "byte" | "rune" | "int" | "int8" | "int16" | "int32" | "int64" | "uint"
+                | "uint8" | "uint16" | "uint32" | "uint64" | "uintptr" | "float32"
+                | "float64" | "complex64" | "complex128" => "0".into(),
+                "error" | "any" => "nil".into(),
+                _ => format!("*new({})", name),
+            },
+            TypeExpr::Slice { .. } | TypeExpr::Map { .. } | TypeExpr::Chan { .. }
+            | TypeExpr::Pointer { .. } | TypeExpr::Option { .. } => "nil".into(),
+            _ => format!("*new({})", self.type_text(t)),
+        }
+    }
+}
+
+impl Default for Emitter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// String literals (cooked → Go quoting; raw → verbatim backticks)
+// ---------------------------------------------------------------------------
+
+pub(crate) fn go_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+pub mod expr;
+pub mod stmt;
+#[cfg(test)]
+mod tests;

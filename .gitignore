@@ -30,6 +30,9 @@ results/
 *.log
 .cache/
 # NOTE: Cargo.lock and go.sum ARE committed per SPEC.md Phase 5 (reproducible builds)
+/
+# hyb build outputs (MVP-0 walking-skeleton artifacts)
+/build/
 
 # Editor/OS noise
 .DS_Store

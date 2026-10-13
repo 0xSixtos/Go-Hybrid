@@ -19,3 +19,4 @@ path = "src/main.rs"
 hy-syntax = { path = "../hy-syntax" }
 hy-check = { path = "../hy-check" }
 hy-diag = { path = "../hy-diag" }
+hy-emit = { path = "../hy-emit" }

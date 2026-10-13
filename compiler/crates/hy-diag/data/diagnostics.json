@@ -27,6 +27,17 @@
       "rule": "LX"
     },
     {
+      "code": "HYB-E0002",
+      "name": "parse-error",
+      "category": "parse",
+      "severity": "error",
+      "title": "the program did not parse",
+      "summary": "Generic parse/lex error (the lexer's identifier-case violations keep HYB-E0001; everything else lands here). The diagnostic points at the failure site with the unexpected token named; recovery happens at the statement/declaration boundary.",
+      "fixits": ["read the pointed-to site — the unexpected token is named in the message", "check the line above: unterminated braces, strings, or missing separators surface on the following line"],
+      "example": "x := // reject: HYB-E0002 — expected expression, found end of line",
+      "rule": "P"
+    },
+    {
       "code": "HYB-E1001",
       "name": "unresolved-name",
       "category": "resolve",
@@ -251,6 +262,21 @@
       "example": "managed { task tally(counter) }   // warning: HYB-E8001 — unchecked share, counted",
       "rule": "O6",
       "tier0_rule_id": "MANAGED"
+    },
+    {
+      "code": "HYB-E9001",
+      "name": "toolchain-mismatch",
+      "category": "tooling",
+      "severity": "error",
+      "title": "toolchain does not match the pinned version",
+      "summary": "`hyb build` enforces the project's version pins (go1.26.9 / Rust 1.99.0 per tools/env.sh) so emitted Go and the compiler behave identically everywhere. The installed toolchain's version differs from the pin. Lints and checks stay available; builds stop.",
+      "fixits": [
+        "install the pinned toolchain version (see tools/env.sh for the exact pins)",
+        "source tools/env.sh so PATH picks up the pinned Go at /home/z/tools/go",
+        "change the pin deliberately: update tools/env.sh, PLAN.md's environment row, and this registry entry in the same commit"
+      ],
+      "example": "hyb build prog.hy -o out/   // reject: HYB-E9001 — go1.21 found, go1.26.9 pinned",
+      "rule": "TOOL"
     }
   ]
 }
