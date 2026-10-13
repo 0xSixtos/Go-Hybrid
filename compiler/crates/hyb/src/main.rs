@@ -21,6 +21,13 @@ const PINNED_RUST: &str = match option_env!("HYB_PINNED_RUST") {
     None => "1.99.0",
 };
 
+/// The Go binary: HYB_GO_BIN override, else PATH (tools/env.sh puts the
+/// pinned toolchain first; CI prepends /usr/local/go/bin). The version-pin
+/// check below still enforces go1.26.9, so PATH lookup cannot drift silently.
+fn go_bin() -> &'static str {
+    option_env!("HYB_GO_BIN").unwrap_or("go")
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -246,7 +253,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
     }
 
     // --- 5. go build ---
-    let go_bin = option_env!("HYB_GO_BIN").unwrap_or("/home/z/tools/go/bin/go");
+    let go_bin = go_bin();
     let build = Command::new(go_bin)
         .args(["build", "-o", &out_path, &go_path])
         .env("GOFLAGS", "-p=2")
@@ -273,7 +280,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
 fn check_toolchain_pins(file: &str) -> Option<Diagnostic> {
     let span = Span::point(Pos::new(1, 1));
 
-    let go_out = Command::new(option_env!("HYB_GO_BIN").unwrap_or("/home/z/tools/go/bin/go"))
+    let go_out = Command::new(go_bin())
         .arg("version")
         .output()
         .ok()
