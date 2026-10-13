@@ -83,10 +83,17 @@ impl Emitter {
             // verified it; Go receives the plain value.
             Expr::Move { operand, .. } => self.emit_expr_inner(operand),
 
-            Expr::Try { operand, .. } => Err(EmitError::unsupported(format!(
-                "`?` outside a binding position (on `{}`) — E3 desugars binding-position `?` only",
-                operand.render()
-            ))),
+            // E3: a hoisted try substitutes its temp (the expression-form
+            // desugar); a try the hoister never saw is a clean error.
+            Expr::Try { span, .. } => {
+                if let Some(t) = self.try_temps.get(&(span.start.line, span.start.col)) {
+                    return Ok(t.clone());
+                }
+                Err(EmitError::unsupported(format!(
+                    "`?` outside a binding position — E3 desugars binding-position and \
+                     hoisted-expression `?` only"
+                )))
+            }
 
             Expr::Receive { chan, .. } => {
                 let c = self.emit_expr(chan, ATOM)?;

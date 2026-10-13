@@ -964,6 +964,16 @@ f, hy_err := os.open(path)
 if hy_err != nil { return _, hy_err }   // other named results return their zero values
 ```
 
+**E3b — the expression form** (Batch G, pinned by example 05): `?` may also
+appear nested inside a larger expression (`append(names, u.string("k")?)`,
+`if u.int("k")? >= 3`, `for u in doc.array("a")?`). Each such site hoists to
+the binding form before the statement: `t, hy_err := u.string("k")` +
+propagation, then `t` substitutes at the use site. Unique temps keep nesting
+sound; hoists happen in evaluation order and never inside a closure literal
+(the closure hoists its own). Where the propagation cannot land (no error
+result, not main, not an E11 handler), it is a compile error — never a
+silent swallow.
+
 **E4 — Where `?` may appear.** In any function whose results end in `error`
 (and in `main`, where it triggers the exit contract E6). `?` on an
 expression that is not an error-returning call is a type error; `?` on

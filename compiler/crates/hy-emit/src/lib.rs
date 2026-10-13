@@ -189,7 +189,7 @@ pub(crate) fn is_package_root(name: &str) -> bool {
         name,
         "fmt" | "os" | "io" | "time" | "sort" | "strings" | "strconv"
             | "errors" | "sync" | "bufio" | "http" | "httptest" | "json"
-            | "atomic" | "filepath" | "path" | "hex" | "sha3"
+            | "atomic" | "filepath" | "path" | "hex" | "sha3" | "serde_json"
     )
 }
 
@@ -271,6 +271,9 @@ pub struct Emitter {
     /// conversion target (`fn logging(…) http.handler`) — `return fn(…)`
     /// wraps in the conversion (`return http.HandlerFunc(func…)`).
     cur_fn_conv_result: Option<&'static str>,
+    /// E3 expression-form hoists (Batch G): Try span start → the hoisted
+    /// temp. emit_expr's Try branch substitutes the temp; cleared per fn.
+    try_temps: BTreeMap<(u32, u32), String>,
 }
 
 impl Emitter {
@@ -289,6 +292,7 @@ impl Emitter {
             handler_writer: None,
             pending_fnlit_conv: None,
             cur_fn_conv_result: None,
+            try_temps: BTreeMap::new(),
         }
     }
 
@@ -467,6 +471,7 @@ impl Emitter {
     fn emit_fn(&mut self, f: &FnDecl) -> Result<(), EmitError> {
         self.bindings.clear();
         self.temp_n = 0;
+        self.try_temps.clear();
 
         // Associated functions (`lru_cache.new`) mangle to
         // `lru_cache_new` — Go has no dotted identifiers. Call sites mangle
@@ -846,6 +851,13 @@ impl Emitter {
     /// verbatim (never CamelCased: `node_id` and `int` both stay).
     fn go_type_name(&mut self, name: &str) -> String {
         if let Some((root, rest)) = name.split_once('.') {
+            // Rust-owned types map to their binding package's handle type
+            // (serde_json.value → jsonbinding.Value) — NOT the naive
+            // package spelling, which would import a nonexistent package.
+            if let Some((binding_root, go_ty)) = shapes::lookup_rust_type(name) {
+                self.use_package(binding_root);
+                return format!("{}.{}", binding_root, go_ty);
+            }
             self.use_package(root);
             let joined = rest
                 .split('.')

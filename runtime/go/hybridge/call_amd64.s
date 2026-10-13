@@ -166,3 +166,45 @@ TEXT ·callDeep3(SB), NOSPLIT, $0-48
         MOVQ    BX, SP
         MOVQ    AX, ret+40(FP)
         RET
+
+// func callFast4(fn unsafe.Pointer, a1, a2, a3, a4 uintptr) uint64
+TEXT ·callFast4(SB), NOSPLIT, $0-48
+        MOVQ    fn+0(FP), AX
+        MOVQ    a1+8(FP), DI
+        MOVQ    a2+16(FP), SI
+        MOVQ    a3+24(FP), DX
+        MOVQ    a4+32(FP), CX
+        get_tls(BX)
+        MOVQ    g(BX), BX
+        MOVQ    OFF_g_stackguard0(BX), R11
+        MOVQ    SP, R12
+        SUBQ    R11, R12
+        CMPQ    R12, $4096
+        JLT     needsdeep4
+        MOVQ    SP, BX
+        SUBQ    $8, SP
+        ANDQ    $-16, SP
+        CALL    AX
+        MOVQ    BX, SP
+        MOVQ    AX, ret+40(FP)
+        RET
+needsdeep4:
+        MOVQ    $-2, AX
+        MOVQ    AX, ret+40(FP)
+        RET
+
+// func callDeep4(fn unsafe.Pointer, a1, a2, a3, a4 uintptr, stack uintptr) uint64
+TEXT ·callDeep4(SB), NOSPLIT, $0-56
+        MOVQ    fn+0(FP), AX
+        MOVQ    a1+8(FP), DI
+        MOVQ    a2+16(FP), SI
+        MOVQ    a3+24(FP), DX
+        MOVQ    a4+32(FP), CX
+        MOVQ    stack+40(FP), R11
+        MOVQ    SP, BX
+        MOVQ    R11, SP
+        ANDQ    $-16, SP
+        CALL    AX
+        MOVQ    BX, SP
+        MOVQ    AX, ret+48(FP)
+        RET

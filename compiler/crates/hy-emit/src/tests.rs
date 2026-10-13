@@ -423,12 +423,12 @@ fn main_with_try_but_no_results_gets_wrapper() {
 
 #[test]
 fn rust_crate_import_errors_cleanly() {
-    let msg = emit_err("import \"rust/serde_json\" fn main() { }");
-    // serde_json joins the pinned set with the Batch G binding; an UNKNOWN
-    // crate must still name the binding set, never silently emit.
+    let msg = emit_err("import \"rust/notacrate\" fn main() { }");
+    // serde_json + sha3 are pinned (Batches F/G); an UNKNOWN crate must
+    // name the binding set, never silently emit.
     assert!(
-        msg.contains("not in the pinned binding set") || msg.contains("bridge"),
-        "points at the bridge discipline: {}",
+        msg.contains("not in the pinned binding set"),
+        "points at the binding discipline: {}",
         msg
     );
 }
@@ -488,8 +488,11 @@ fn type_elided_struct_lit_errors_cleanly() {
 
 #[test]
 fn try_outside_binding_position_errors_cleanly() {
-    let msg = emit_err("fn main() { fmt.println(f()?) }");
-    assert!(msg.contains("`?`"), "{}", msg);
+    // The E3 expression form hoists inside main / handler closures; outside
+    // both, propagation has nowhere to land — a clean error, never a wrong
+    // emission (the hoister's propagate_error names the surface).
+    let msg = emit_err("fn f() { fmt.println(g()?) }");
+    assert!(msg.contains("`?` outside main"), "{}", msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -803,4 +806,46 @@ fn duration_members_resolve_property_style() {
 fn rust_crate_import_decl_registers_nothing_unknown_errors() {
     let msg = emit_err("import \"rust/notpinned\"\n\nfn f() { }\n");
     assert!(msg.contains("not in the pinned binding set"), ":\n{}", msg);
+}
+
+#[test]
+fn rust_json_handle_types_map_to_binding_package() {
+    // serde_json.value → jsonbinding.Value (a fn's result type).
+    let go = emit(
+        "import \"rust/serde_json\"\n\nfn users_json(names []string) serde_json.value {\n    v := serde_json.new_object()\n    let arr := serde_json.new_array()\n    v.set(\"active\", arr)\n    return v\n}\n",
+    );
+    assert!(
+        go.contains("func users_json(names []string) jsonbinding.Value {"),
+        "handle type spelling:\n{}",
+        go
+    );
+    assert!(go.contains("v := jsonbinding.NewObject()"), ":\n{}", go);
+    assert!(go.contains("arr := jsonbinding.NewArray()"), ":\n{}", go);
+    assert!(go.contains("v.Set(\"active\", arr)"), ":\n{}", go);
+    assert!(!go.contains("serde_json."), "rust crate spelling leaked:\n{}", go);
+}
+
+#[test]
+fn e3_expression_form_hoists_in_conditions_and_args() {
+    // `if u.int("logins")? >= 3` + `append(names, u.string("name")?)` —
+    // the E3 desugar applied expression-wise (example 05's exact shapes).
+    let go = emit(
+        "import \"rust/serde_json\"\n\nfn main() {\n    doc := serde_json.parse(\"[]\")?\n    var names []string\n    for u in doc.array(\"users\")? {\n        if u.int(\"logins\")? >= 3 {\n            names = append(names, u.string(\"name\")?)\n        }\n    }\n}\n",
+    );
+    assert!(go.contains("u.Int(\"logins\")"), ":\n{}", go);
+    assert!(go.contains("u.String(\"name\")"), ":\n{}", go);
+    assert!(go.contains("names = append(names,"), ":\n{}", go);
+    assert!(go.contains("if hyT3 >= 3"), "cond hoisted to a temp:\n{}", go);
+}
+
+#[test]
+fn e3_for_iterate_over_array_try_hoists_before_loop() {
+    let go = emit(
+        "import \"rust/serde_json\"\n\nfn main() {\n    doc := serde_json.parse(\"[]\")?\n    for u in doc.array(\"users\")? {\n        fmt.println(u)\n    }\n}\n",
+    );
+    // The hoist precedes the for; the loop ranges the temp; the loop var
+    // binds the handle type (u.Int would resolve — no verbatim leak).
+    let hoist = go.find("hyT1, hyErr").unwrap();
+    let loop_at = go.find("for _, u := range hyT1").unwrap();
+    assert!(hoist < loop_at, "hoist must precede the loop:\n{}", go);
 }

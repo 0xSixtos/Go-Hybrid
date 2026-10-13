@@ -73,3 +73,20 @@ Work Log:
 Stage Summary:
 - Session 5 COMPLETE. 9 commits pushed; every batch committed immediately (no data-loss window)
 - State for the next session: G1 awaits human review (gates/G1.md); Phase 2 (Rust bridge: programs 05/09/10) is the next phase per PLAN.md
+
+---
+Task ID: 11 (session 6 — G1 ratification + Batches E/F/G)
+Agent: lead (Super Z)
+Task: review + ratify G1, then finish all pending phases (06, bridge 05/10, then 09/differential/bench)
+
+Work Log:
+- Fresh sandbox recovery: re-clone + re-pin Go 1.26.9 / Rust 1.99.0 (foreground installs); verified 157 tests, corpus 20/20, 6/6 examples
+- G1 REVIEWED + RATIFIED per human directive: every lowering decision checked against T4/E3/E6/C1–C4/M4/O8–O9 + implementation; gates/G1.md header records provenance; commit 603e3e2
+- Batch E (20e63a6): example 06 end-to-end — shapes.rs foreign shape table (field-vs-method per descriptor type), HandlerFunc conversion with target-typed closure params (ParamDesc interface-vs-pointer), E11 handler `?` contract (SPEC §6 new rule), httptest.get composite lowering (recorder dance), net/http import mapping, E6 wrapper terminal return, fprintf interp splice; 7/7 examples
+- Batch F (3239154 + 783dc03 gitignore fix): Phase-2 bridge LIVE — runtime/rust/hyrt (sha3 0.10.8 + serde_json 1.0.140 extern C wrappers, panic=abort, handle table w/ generations, sentinel errors, two-leg buffer protocol), runtime/go/hybridge (spike-3 trampolines verbatim + Cross4), sha3binding (cgo address broker, pinned-borrow protocol, ABI handshake word), hyb build workspace assembly (module hybrid.program, cargo build hyrt w/ mtime freshness, CGO_ENABLED=1); CallArg.name AST contract ext (named args); example 10 end-to-end — digests verified vs Python hashlib, checksum deterministic; 8/8 examples
+- Batch G (this commit): jsonbinding (handle Values + AddCleanup release + materialized Array slices), RUST_TYPES type mapping, E3b `?` expression form (SPEC §6 rule; hoist-to-binding w/ evaluation-order temps, fn-lit bodies excluded), iterate-var handle typing; example 05 end-to-end byte-exact; 9/9 examples, 181 tests, corpus 20/20
+- Sandbox lessons: shell cwd resets between Bash calls (runner scripts in /home/z/my-project/scripts/), background installs die silently, gitignore caught a leaked target/ dir
+
+Stage Summary:
+- 9 of 10 target programs byte-exact; the plan's remaining work: program 09 (multi-package), differential loop, overhead bench, G2 doc
+- Commits this session: 603e3e2 → 20e63a6 → 3239154 → 783dc03 → (G)

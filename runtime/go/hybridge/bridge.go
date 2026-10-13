@@ -94,3 +94,19 @@ func CrossDeep1(fn unsafe.Pointer, a1 uintptr) uint64 {
 
 // SPHeadroomForTest exposes the stackguard headroom for the offsets canary.
 func SPHeadroomForTest() uintptr { return spHeadroom() }
+
+//go:noescape
+func callFast4(fn unsafe.Pointer, a1, a2, a3, a4 uintptr) uint64
+
+//go:noescape
+func callDeep4(fn unsafe.Pointer, a1, a2, a3, a4 uintptr, stack uintptr) uint64
+
+func Cross4(fn unsafe.Pointer, a1, a2, a3, a4 uintptr) uint64 {
+	v := callFast4(fn, a1, a2, a3, a4)
+	if v == needsDeep {
+		i := acquireDeep()
+		v = callDeep4(fn, a1, a2, a3, a4, deepTops[i])
+		releaseDeep(i)
+	}
+	return v
+}

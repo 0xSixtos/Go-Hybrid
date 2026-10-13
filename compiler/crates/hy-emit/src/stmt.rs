@@ -13,6 +13,8 @@ impl Emitter {
             Stmt::Local(l) => self.emit_local(l),
             Stmt::Assign { targets, op, values, .. } => self.emit_assign(targets, *op, values),
             Stmt::Expr { expr, .. } => {
+                // E3 expression form: hoist nested `?` first (Batch G).
+                self.hoist_tries_expr(expr)?;
                 let text = self.emit_expr(expr, 0)?;
                 self.push(&text);
                 Ok(())
@@ -193,6 +195,12 @@ impl Emitter {
             }
         }
 
+        // E3 expression form (Batch G): `?` nested anywhere else in the
+        // values hoists to temp bindings + propagation, then substitutes.
+        for v in &l.values {
+            self.hoist_tries_expr(v)?;
+        }
+
         let values = l
             .values
             .iter()
@@ -226,6 +234,128 @@ impl Emitter {
     ///     return
     /// }
     /// ```
+    /// E3's EXPRESSION form (example 05): `append(names, u.string("name")?)`
+    /// or `if u.int("logins")? >= 3` — a `?` nested inside a larger
+    /// expression hoists to a temp binding + propagation, then the temp
+    /// substitutes at the use site (the E3 desugar, applied
+    /// expression-wise; unique temps keep nesting sound).
+    fn hoist_tries_expr(&mut self, e: &Expr) -> Result<(), EmitError> {
+        match e {
+            Expr::Try { operand, span } => {
+                // Inner tries hoist first (their temps land in the map),
+                // then this try's call text resolves them.
+                self.hoist_tries_expr(operand)?;
+                self.hoist_one_try(operand, (span.start.line, span.start.col))?;
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.hoist_tries_expr(lhs)?;
+                self.hoist_tries_expr(rhs)?;
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Paren { inner: operand, .. } => self.hoist_tries_expr(operand)?,
+            Expr::Interp { parts, .. } => {
+                for p in parts {
+                    if let InterpPart::Expr(x) = p {
+                        self.hoist_tries_expr(x)?;
+                    }
+                }
+            }
+            Expr::Call { callee, args, .. } => {
+                self.hoist_tries_expr(callee)?;
+                for a in args {
+                    self.hoist_tries_expr(&a.value)?;
+                }
+            }
+            Expr::Field { base, .. } => self.hoist_tries_expr(base)?,
+            Expr::Index { base, index, .. } => {
+                self.hoist_tries_expr(base)?;
+                self.hoist_tries_expr(index)?;
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                self.hoist_tries_expr(base)?;
+                if let Some(l) = lo {
+                    self.hoist_tries_expr(l)?;
+                }
+                if let Some(h) = hi {
+                    self.hoist_tries_expr(h)?;
+                }
+            }
+            Expr::Receive { chan, .. } => self.hoist_tries_expr(chan)?,
+            Expr::StructLit { fields, .. } => {
+                for f in fields {
+                    self.hoist_tries_expr(&f.value)?;
+                }
+            }
+            Expr::SliceLit { items, .. } => {
+                for i in items {
+                    self.hoist_tries_expr(i)?;
+                }
+            }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    self.hoist_tries_expr(k)?;
+                    self.hoist_tries_expr(v)?;
+                }
+            }
+            // A closure body hoists its OWN tries (its emission runs its
+            // statement loop); descending here would hoist into the wrong
+            // scope.
+            Expr::FnLit { .. } | Expr::Lit { .. } | Expr::Ident { .. } => {}
+        }
+        Ok(())
+    }
+
+    /// One hoisted `t, hyErrN := <call>` + propagation; the temp registers
+    /// under the Try's span start so emit_expr's Try branch substitutes it.
+    fn hoist_one_try(&mut self, operand: &Expr, key: (u32, u32)) -> Result<(), EmitError> {
+        let call_text = self.emit_expr(operand, 0)?;
+        let temp = self.next_temp("hyT");
+        let errt = self.next_temp("hyErr");
+        self.push(&format!("{}, {} := {}", temp, errt, call_text));
+        self.push(&format!("if {} != nil {{", errt));
+        self.indent += 1;
+        self.propagate_error(&errt)?;
+        self.indent -= 1;
+        self.push("}");
+        // A serde_json Array() call yields []jsonbinding.Value — the value
+        // (a for-loop var over this temp) binds the ELEMENT handle type.
+        if let Expr::Call { callee, .. } = operand {
+            if let Expr::Field { base, name, .. } = callee.as_ref() {
+                if name == "array" && self.type_of_expr(base) == Some("serde_json.value") {
+                    self.bindings
+                        .insert(temp.clone(), BindingKind::ForeignTy("serde_json.value"));
+                }
+            }
+        }
+        self.try_temps.insert(key, temp);
+        Ok(())
+    }
+
+    /// The `?` propagation tail, shared by every E3 shape (binding-position,
+    /// expression-form hoists, the httptest composite): the E11 handler
+    /// contract, the E6 main-closure return, or a clean error.
+    fn propagate_error(&mut self, err_temp: &str) -> Result<(), EmitError> {
+        if let Some(w) = self.handler_writer.clone() {
+            self.use_package("http");
+            self.push(&format!(
+                "http.Error({}, {}.Error(), http.StatusBadRequest)",
+                w, err_temp
+            ));
+            self.push("return");
+            return Ok(());
+        }
+        if self.in_main_closure {
+            self.push(&format!("hyErr = {}", err_temp));
+            self.push("return");
+            return Ok(());
+        }
+        Err(EmitError::unsupported(
+            "`?` outside main (functions-with-error-results land after the walking skeleton)",
+        ))
+    }
+
     fn emit_try_define(&mut self, l: &LocalDecl, call: &Expr) -> Result<(), EmitError> {
         // --- the httptest composite (Batch E): `code, body :=
         //     httptest.get(mux, path)?` expands to the in-process recorder
@@ -326,20 +456,7 @@ impl Emitter {
         ));
         self.push(&format!("if {} != nil {{", err0));
         self.indent += 1;
-        if let Some(w) = self.handler_writer.clone() {
-            self.push(&format!(
-                "http.Error({}, {}.Error(), http.StatusBadRequest)",
-                w, err0
-            ));
-            self.push("return");
-        } else if self.in_main_closure {
-            self.push(&format!("hyErr = {}", err0));
-            self.push("return");
-        } else {
-            return Err(EmitError::unsupported(
-                "`?` outside main (functions-with-error-results land after the walking skeleton)",
-            ));
-        }
+        self.propagate_error(&err0)?;
         self.indent -= 1;
         self.push("}");
         self.push(&format!("{} := httptest.NewRecorder()", rec));
@@ -385,6 +502,12 @@ impl Emitter {
                 if is_package_root(pkg) {
                     if pkg == "io" && name == "read_all" {
                         return BindingKind::Bytes;
+                    }
+                    // Rust-handle constructors: a serde_json value handle.
+                    if pkg == "serde_json"
+                        && matches!(name.as_str(), "parse" | "new_object" | "new_array")
+                    {
+                        return BindingKind::ForeignTy("serde_json.value");
                     }
                     // time.since/now return a KNOWN type — duration members
                     // resolve property-style through the shape table (10:
@@ -436,6 +559,10 @@ impl Emitter {
                 return Ok(());
             }
         };
+        // E3 expression form: hoist nested `?` before emitting (Batch G).
+        for v in values {
+            self.hoist_tries_expr(v)?;
+        }
         let ts = targets
             .iter()
             .map(|t| self.emit_place(t))
@@ -513,6 +640,10 @@ impl Emitter {
         then: &Block,
         otherwise: Option<&Stmt>,
     ) -> Result<(), EmitError> {
+        // E3 expression form: a `?` in the condition hoists BEFORE the if
+        // (Batch G). Only on the line-start path — an else-if cond with a
+        // `?` would hoist mid-line; that shape errors cleanly below.
+        self.hoist_tries_expr(cond)?;
         self.emit_if_at(init, cond, then, otherwise, true)
     }
 
@@ -631,6 +762,9 @@ impl Emitter {
                 )
             }
             ForKind::Iterate { vars, expr } => {
+                // E3 expression form: `for u in v.array(k)? { … }` hoists
+                // the try before the loop (Batch G).
+                self.hoist_tries_expr(expr)?;
                 let e = self.emit_expr(expr, 0)?;
                 let core = match vars.len() {
                     1 => {
@@ -646,6 +780,22 @@ impl Emitter {
                         if over_chan {
                             format!("for {} := range {} {{", vars[0], e)
                         } else {
+                            // A rust-handle slice (ForeignTy binding) ranges
+                            // value-elements of that handle type (05: u is
+                            // a serde_json.value). The range may be a named
+                            // slice OR a hoisted try temp (e IS the temp).
+                            let range_name = match expr {
+                                Expr::Ident { name, .. } => Some(name.clone()),
+                                Expr::Try { .. } => Some(e.clone()),
+                                _ => None,
+                            };
+                            if let Some(n) = range_name {
+                                if let Some(BindingKind::ForeignTy(t)) = self.bindings.get(&n) {
+                                    let t = *t;
+                                    self.bindings
+                                        .insert(vars[0].clone(), BindingKind::ForeignTy(t));
+                                }
+                            }
                             format!("for _, {} := range {} {{", vars[0], e)
                         }
                     }

@@ -162,6 +162,20 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
         "time.time",
         TypeShape { members: &[] },
     ),
+    (
+        // 05: methods on a serde_json handle value (all Methods — Go's
+        // binding spells them as value-receiver calls).
+        "serde_json.value",
+        TypeShape {
+            members: &[
+                ("array", method("Array", None)),
+                ("int", method("Int", None)),
+                ("string", method("String", None)),
+                ("set", method("Set", None)),
+                ("push_string", method("PushString", None)),
+            ],
+        },
+    ),
 ];
 
 /// Member lookup: (descriptor type, hy member name) → Member.
@@ -270,7 +284,52 @@ pub static RUST_CRATES: &[RustCrateDesc] = &[
             },
         ],
     },
+    // Pinned by example 05; the binding lives in runtime/go/jsonbinding.
+    RustCrateDesc {
+        hy: "serde_json",
+        binding_root: "jsonbinding",
+        fns: &[
+            RustFnDesc {
+                hy: "parse",
+                go: "Parse",
+                params: &["data"],
+                bytes_coerce: true,
+            },
+            RustFnDesc {
+                hy: "new_object",
+                go: "NewObject",
+                params: &[],
+                bytes_coerce: false,
+            },
+            RustFnDesc {
+                hy: "new_array",
+                go: "NewArray",
+                params: &[],
+                bytes_coerce: false,
+            },
+            RustFnDesc {
+                hy: "to_string_pretty",
+                go: "ToStringPretty",
+                params: &["v"],
+                bytes_coerce: false,
+            },
+        ],
+    },
 ];
+
+/// Rust-owned types cross as binding-package handles: `serde_json.value`
+/// spells `jsonbinding.Value` in Go. Keyed by the hy type name.
+pub static RUST_TYPES: &[(&str, &str, &str)] = &[
+    // (hy type, binding root, Go type)
+    ("serde_json.value", "jsonbinding", "Value"),
+];
+
+pub fn lookup_rust_type(hy_ty: &str) -> Option<(&'static str, &'static str)> {
+    RUST_TYPES
+        .iter()
+        .find(|(k, _, _)| *k == hy_ty)
+        .map(|(_, root, ty)| (*root, *ty))
+}
 
 pub fn lookup_rust_crate(root: &str) -> Option<&'static RustCrateDesc> {
     RUST_CRATES.iter().find(|c| c.hy == root)
@@ -294,6 +353,7 @@ pub fn import_path_of(root: &str) -> String {
         "httptest" => "net/http/httptest".to_string(),
         "hex" => "encoding/hex".to_string(),
         "sha3binding" => "hybrid.program/sha3binding".to_string(),
+        "jsonbinding" => "hybrid.program/jsonbinding".to_string(),
         other => other.to_string(),
     }
 }
