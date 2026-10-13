@@ -242,6 +242,12 @@ impl Parser {
     }
 
     fn sync_decl(&mut self) {
+        // Force-progress invariant (same as sync_stmt): the decl loop retries
+        // parse_decl after this returns — returning without consuming can
+        // spin it forever (found 2026-10-14: a brace mis-nest left a `}` the
+        // decl loop saw forever). When we are still ON the token we entered
+        // with, consume it before returning: recovery always advances.
+        let start = self.pos;
         let mut depth = 0usize;
         loop {
             match self.cur() {
@@ -252,12 +258,20 @@ impl Parser {
                 }
                 Tok::Punct("}") => {
                     if depth == 0 {
+                        if self.pos == start {
+                            self.bump(); // progress guarantee (see above)
+                        }
                         return;
                     }
                     depth -= 1;
                     self.bump();
                 }
-                _ if depth == 0 && self.is_decl_starter() => return,
+                _ if depth == 0 && self.is_decl_starter() => {
+                    if self.pos == start {
+                        self.bump(); // progress guarantee (see above)
+                    }
+                    return;
+                }
                 _ => {
                     self.bump();
                 }
@@ -801,6 +815,20 @@ impl Parser {
     }
 
     fn sync_stmt(&mut self) {
+        // Force-progress invariant: the caller retries parse_stmt after this
+        // returns, so returning WITHOUT consuming can spin it (found by the
+        // O4.9 test battery 2026-10-14: a select arm starting `case x:`
+        // hung the arm loop — `case` is a stmt-starter, so sync returned
+        // without progress every time). On the stmt-starter arm, consuming
+        // the token we entered with guarantees progress.
+        //
+        // The `}` arm deliberately does NOT consume: a depth-0 `}` belongs
+        // to the enclosing block, whose loop terminates on it — every
+        // parse_stmt caller (block, select arm, unbraced select body) ends
+        // its loop at `}`, so leaving it is safe AND keeps single-diagnostic
+        // recovery for the common `x := }` typo shape (the brace survives to
+        // close the block instead of being eaten and reported missing).
+        let start = self.pos;
         let mut depth = 0usize;
         loop {
             match self.cur() {
@@ -815,12 +843,17 @@ impl Parser {
                 }
                 Tok::Punct("}") => {
                     if depth == 0 {
-                        return; // belongs to the enclosing block
+                        return; // belongs to the enclosing block (see above)
                     }
                     depth -= 1;
                     self.bump();
                 }
-                _ if depth == 0 && self.is_stmt_starter() => return,
+                _ if depth == 0 && self.is_stmt_starter() => {
+                    if self.pos == start {
+                        self.bump(); // progress guarantee (see above)
+                    }
+                    return;
+                }
                 _ => {
                     self.bump();
                 }
@@ -3337,6 +3370,28 @@ mod tests {
         }
         assert_eq!(d[0].span.start.line, 2);
         assert_eq!(d[1].span.start.line, 3);
+    }
+
+    #[test]
+    fn malformed_select_arm_is_clean_error_not_hang() {
+        // 2026-10-14: a select arm starting `case x:` spun the arm loop
+        // forever (parse_stmt succeeded consuming one ident, the arm match
+        // rejected it, sync_stmt returned without progress). sync_stmt now
+        // guarantees progress — this must be a clean E0002, never a hang.
+        // (A regression here shows up as the test runner timing out.)
+        let r = parse_file("t.hy", "fn main() {\n  select {\n  case x: {}\n  }\n}\n");
+        assert!(r.is_err(), "malformed select arm must be a parse error");
+        assert!(r.unwrap_err().iter().all(|d| d.code == "HYB-E0002"));
+    }
+
+    #[test]
+    fn brace_misnest_is_clean_error_not_hang() {
+        // 2026-10-14: the same mis-nest left a stray `}` that sync_decl saw
+        // forever at the top level (zero-progress return). sync_decl now
+        // guarantees progress — clean E0002, never a hang.
+        let r = parse_file("t.hy", "fn main() {\n  select {\n  case x: {}\n  }\n}\n}\n");
+        assert!(r.is_err(), "stray brace must be a parse error");
+        assert!(r.unwrap_err().iter().all(|d| d.code == "HYB-E0002"));
     }
 
     #[test]

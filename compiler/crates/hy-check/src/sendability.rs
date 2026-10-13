@@ -1,5 +1,7 @@
-//! sendability.rs — rule A1c (O4 classes) at spawn/send check-sites, plus the
-//! O6 `managed` suppression and lint (HYB-E8001).
+//! sendability.rs — rule A1c (O4 classes) at spawn/send check-sites, plus
+//! the O6 `managed` suppression and lint (HYB-E8001), the O4.9 FAIL-CLOSED
+//! boundary (HYB-E3005, rule FC — human directive 2026-10-13), the O5.4
+//! move-form check (HYB-E3004), and the spawn-callee proof (HYB-E3005).
 //!
 //! Outcome per value (task brief, VERDICTS.md sketches):
 //!   * OK classes: primitives; string/const/immutable; chan-typed values;
@@ -8,6 +10,11 @@
 //!     managed-tainted values (class 6).
 //!   * REJECT: a named mutable GC binding (map/slice/struct/pointer-to-
 //!     mutable), `&mutable_struct_binding`, borrow-handles, closures.
+//!   * UNPROVEN (fail-closed, O4.9): a value whose type shape did not
+//!     resolve, or a name that did not resolve — silently passing was the
+//!     Tier-0 default until the human owner ruled it must not. The escape
+//!     hatch is explicit and auditable: `managed` (HYB-E8001, counted by
+//!     --report-managed).
 
 use crate::model::{
     as_addr_of, move_operand_ident, Binding, Checker, FnState, MoveKind, TypeShape,
@@ -26,8 +33,21 @@ pub(crate) enum Outcome {
     /// surface an auditor needs named (O6.3: the lint carries WHAT is
     /// shared and WHY it is believed safe).
     Managed { desc: String, risky: bool },
-    /// Not sendable (A1c).
+    /// Not sendable (A1c) — the checker SAW the type and it is mutable GC
+    /// state (or a handle / closure).
     Rejected(RejectInfo),
+    /// FAIL-CLOSED (O4.9): the checker could NOT resolve the type or the
+    /// name, so it cannot prove the value safe. Never silently passes;
+    /// escapes only through an explicit `managed` block (HYB-E3005 / FC).
+    Unproven(UnprovenInfo),
+}
+
+pub(crate) struct UnprovenInfo {
+    /// The value, as written ("blob", "&cfg", "results <- mystery()").
+    pub value: String,
+    /// Why the checker could not prove it ("its type did not resolve to a
+    /// sendability class" / "the name did not resolve in this scope").
+    pub reason: String,
 }
 
 pub(crate) struct RejectInfo {
@@ -113,8 +133,13 @@ impl<'a> Checker<'a> {
 
     fn classify_ident(&self, st: &FnState, name: &str) -> Outcome {
         let Some(b) = self.lookup_binding(st, name) else {
-            // Unknown name (perimeter/global) — permissive, documented.
-            return Outcome::Ok;
+            // FAIL-CLOSED (O4.9): a name that does not resolve cannot be
+            // proven safe — it used to pass silently; now it is HYB-E3005
+            // unless the site is `managed`.
+            return Outcome::Unproven(UnprovenInfo {
+                value: name.to_string(),
+                reason: "the name did not resolve in this scope".to_string(),
+            });
         };
         if b.moved.is_some() {
             // already reported at the use site — do not double-report A1c
@@ -129,8 +154,16 @@ impl<'a> Checker<'a> {
         if b.immutable {
             return Outcome::Ok; // class 4 (let/const/const-decl)
         }
+        if matches!(b.shape, TypeShape::Unknown) {
+            // FAIL-CLOSED (O4.9): a binding whose type the checker could
+            // not resolve cannot silently cross a boundary.
+            return Outcome::Unproven(UnprovenInfo {
+                value: name.to_string(),
+                reason: "its type did not resolve to a sendability class (no ascription and the initializer's type was unresolvable)".to_string(),
+            });
+        }
         if b.shape.is_sendable_by_type() {
-            return Outcome::Ok; // classes 1/2 (+ permissive Unknown)
+            return Outcome::Ok; // classes 1/2
         }
         let ty = self.binding_ty_str(b);
         if b.shape.is_handle() {
@@ -166,7 +199,12 @@ impl<'a> Checker<'a> {
             return self.outcome_for_shape(&shape, &expr.render());
         };
         let Some(b) = self.lookup_binding(st, root) else {
-            return Outcome::Ok;
+            // FAIL-CLOSED (O4.9): lending through a name that does not
+            // resolve — cannot prove what is behind the `&`.
+            return Outcome::Unproven(UnprovenInfo {
+                value: expr.render(),
+                reason: format!("the name `{root}` did not resolve in this scope"),
+            });
         };
         if b.moved.is_some() {
             return Outcome::Ok;
@@ -180,12 +218,18 @@ impl<'a> Checker<'a> {
         if b.immutable {
             return Outcome::Ok;
         }
+        if matches!(b.shape, TypeShape::Unknown) {
+            // FAIL-CLOSED (O4.9): a borrow of an unproven value.
+            return Outcome::Unproven(UnprovenInfo {
+                value: expr.render(),
+                reason: format!("the pointee `{root}` has an unresolvable type"),
+            });
+        }
         match &b.shape {
             // `&hits` where hits is atomic-typed — the mediated route (OQ6)
             TypeShape::Atomic => Outcome::Ok,
             // `&ch` — channels are share-safe by type
             TypeShape::Chan(_) => Outcome::Ok,
-            TypeShape::Unknown => Outcome::Ok,
             TypeShape::Struct(Some(sname)) => {
                 let contested = self.struct_has_mutex_field(sname);
                 let mut notes = vec![format!(
@@ -246,6 +290,17 @@ impl<'a> Checker<'a> {
                     ));
                     return Outcome::Rejected(info);
                 }
+                Outcome::Unproven(mut info) => {
+                    // fail-closed composites: an unproven part makes the
+                    // whole literal unproven (O4.6 + O4.9)
+                    info.reason = format!(
+                        "the literal `{}` carries this unproven part (O4.6 deep sendability): {}",
+                        expr.render(),
+                        info.reason
+                    );
+                    info.value = expr.render();
+                    return Outcome::Unproven(info);
+                }
             }
         }
         match managed {
@@ -257,6 +312,16 @@ impl<'a> Checker<'a> {
     }
 
     fn outcome_for_shape(&self, shape: &TypeShape, value: &str) -> Outcome {
+        if matches!(shape, TypeShape::Unknown) {
+            // FAIL-CLOSED (O4.9): an expression whose result type did not
+            // resolve (a foreign call not in the descriptor stubs, an index
+            // into an unresolvable container, ...) cannot silently cross.
+            return Outcome::Unproven(UnprovenInfo {
+                value: value.to_string(),
+                reason: "the expression's result type did not resolve to a sendability class"
+                    .to_string(),
+            });
+        }
         if shape.is_sendable_by_type() {
             return Outcome::Ok;
         }
@@ -311,6 +376,7 @@ impl<'a> Checker<'a> {
         self.total_sites += 1;
 
         let mut rejects: Vec<RejectInfo> = Vec::new();
+        let mut unprovens: Vec<UnprovenInfo> = Vec::new();
         let mut managed_descs: Vec<String> = Vec::new();
         let mut moves: Vec<(String, Span)> = Vec::new();
 
@@ -339,17 +405,26 @@ impl<'a> Checker<'a> {
                     }
                 }
                 Outcome::Rejected(info) => rejects.push(info),
+                Outcome::Unproven(info) => unprovens.push(info),
             }
         }
 
-        if !rejects.is_empty() {
+        if !rejects.is_empty() || !unprovens.is_empty() {
             if managed {
-                // O6.1: sites inside a managed block are permitted + linted
+                // O6.1: sites inside a managed block are permitted + linted —
+                // this is the explicit, auditable escape hatch that covers
+                // both rejected shapes and (O4.9) unproven ones: what the
+                // hatch cannot do is make the checker CALL it safe.
                 self.sites_via_managed += 1;
-                let shared: Vec<String> = rejects
+                let mut shared: Vec<String> = rejects
                     .iter()
                     .map(|r| format!("`{}` ({})", r.value, r.ty))
                     .collect();
+                shared.extend(
+                    unprovens
+                        .iter()
+                        .map(|u| format!("`{}` (unproven — {})", u.value, u.reason)),
+                );
                 let msg = format!(
                     "spawn/send site inside a `managed` block: {} shared across tasks (unchecked)",
                     shared.join(", ")
@@ -373,6 +448,26 @@ impl<'a> Checker<'a> {
                     let msg = format!("`{}` ({}) is not sendable {}", r.value, r.ty, site_word);
                     self.diags.push(
                         Diagnostic::error(code, self.path.clone(), span, msg).with_notes(r.notes),
+                    );
+                }
+                // O4.9 fail-closed (rule FC): unproven values never silently
+                // pass. Outside a managed block the site does not build until
+                // the value's type is visible to the checker — or the hatch
+                // is taken deliberately. The diagnostic teaches the fix (O17).
+                for u in unprovens {
+                    let msg = format!(
+                        "`{}` cannot be proven safe {} — its type did not resolve, so the checker cannot verify the share",
+                        u.value, site_word
+                    );
+                    let notes = vec![
+                        format!("why: {}", u.reason),
+                        "the checker is fail-closed at boundaries: what it cannot prove, it will not call safe (O4.9) — a wrong silent pass here would void the Tier-0 guarantee for the whole program".to_string(),
+                        "fix: ascribe the type at the declaration (`var x map[string]int = ...`) or route the value through a channel of a known sendable element type".to_string(),
+                        "if the share is genuinely guarded, wrap this site in `managed { ... }` — the explicit, auditable hatch (HYB-E8001, counted by --report-managed)".to_string(),
+                    ];
+                    self.diags.push(
+                        Diagnostic::error("HYB-E3005", self.path.clone(), span, msg)
+                            .with_notes(notes),
                     );
                 }
             }

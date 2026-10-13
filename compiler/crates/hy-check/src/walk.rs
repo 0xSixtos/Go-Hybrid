@@ -11,9 +11,12 @@
 //!
 //! `own_uses` / `own_calls` collect the uses/calls of ONE statement only —
 //! never recursing into child statements, which are separate flat entries
-//! with their own indices. Closure (FnLit) bodies are skipped entirely: the
-//! A5 perimeter — closure captures are outside the checked subset in Tier 0
-//! (corpus 10's http.handler shape MUST not be analyzed).
+//! with their own indices. Closure (FnLit) bodies are skipped here — uses,
+//! calls, loans and freeze stay outside (the A5 perimeter; closure captures
+//! cannot be given Tier-0 loan windows). The closure BOUNDARY statements
+//! (task/send/select-send) ARE checked — by the closures.rs pass, fail-closed
+//! (O4.9); corpus 10's http.handler shape has no such statements and stays
+//! ACCEPT under the scoped claim (Q1).
 
 use crate::model::as_addr_of;
 use hy_diag::Span;
@@ -290,7 +293,9 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
                 expr_uses(v, out);
             }
         }
-        // A5 perimeter: closure bodies are never analyzed in Tier 0.
+        // A5 perimeter: closure bodies are not analyzed HERE (uses/calls/
+        // loans stay outside); their boundary statements are checked by the
+        // closures.rs pass (O4.9).
         Expr::FnLit { .. } => {}
         Expr::Paren { inner, .. } => expr_uses(inner, out),
     }
@@ -443,7 +448,7 @@ pub(crate) fn expr_calls<'e>(expr: &'e Expr, out: &mut Vec<CallRef<'e>>) {
                 expr_calls(v, out);
             }
         }
-        Expr::FnLit { .. } => {}
+        Expr::FnLit { .. } => {} // A5: see expr_uses / closures.rs
         Expr::Paren { inner, .. } => expr_calls(inner, out),
     }
 }

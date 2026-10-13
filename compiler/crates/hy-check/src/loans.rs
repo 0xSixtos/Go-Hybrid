@@ -304,8 +304,19 @@ impl<'a> Checker<'a> {
             }
         } else {
             for (name, value) in l.names.iter().zip(l.values.iter()) {
-                let shape = self.shape_of_expr(st, value);
-                let ty = self.ty_of_expr(st, value);
+                // Ascription fills the gaps (O4.9 escape: "make the type
+                // visible to the checker"): when the initializer's shape
+                // does not resolve, the declared type decides. When inference
+                // DOES resolve it keeps priority — it is more precise than
+                // the ascription for boundary handles (`var v serde_json.view
+                // = doc.array()` must stay a BorrowHandle for the loan
+                // windows); a lying ascription is caught downstream by the
+                // emitted Go build (the emitter carries the declared type).
+                let inferred = self.shape_of_expr(st, value);
+                let (shape, ty) = match (&l.ty, inferred) {
+                    (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
+                    (_, inferred) => (inferred, self.ty_of_expr(st, value)),
+                };
                 // `x := move y` — y is moved; x takes ownership (no alias)
                 if move_operand_ident(value).is_some() {
                     self.mark_move_in_value(

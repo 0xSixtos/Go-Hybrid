@@ -14,10 +14,13 @@ use std::collections::{HashMap, HashSet};
 // Type shapes
 // ---------------------------------------------------------------------------
 
-/// A coarse classification of a binding's type. `Unknown` is the permissive
-/// default: Tier 0 never rejects on shapes it cannot see (the corpus only
-/// exercises the classified forms; unknown shapes are foreign-perimeter or
-/// parser-variance territory — see the TECH DEBT note in foreign.rs).
+/// A coarse classification of a binding's type. `Unknown` is FAIL-CLOSED at
+/// spawn/send boundaries (O4.9, human directive 2026-10-13): a value the
+/// checker cannot prove safe may not silently cross a concurrency boundary —
+/// it is rejected (HYB-E3005, rule FC) unless the site sits in an explicit,
+/// auditable `managed` block. UNKNOWN LOCALS remain legal inside a function
+/// (Tier 0 has no whole-program type system; unknown locals simply mean
+/// "no sendability opinion unless a boundary is involved").
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum TypeShape {
     /// `int`, `bool`, `float64`, ... — value copies (class 1).
@@ -46,22 +49,22 @@ pub(crate) enum TypeShape {
     /// a Go-side opaque foreign type (`sync.mutex`, `http.*`, ...) — the A5
     /// perimeter; no loan discipline, not sendable at spawn/send.
     ForeignOpaque(String),
-    /// unresolved / not understood — permissive.
+    /// a closure / fn-typed value (captures its environment — never
+    /// sendable at spawn/send in Tier 0; A5 perimeter).
+    Closure,
+    /// unresolved / not understood — fail-closed at boundaries (O4.9).
     Unknown,
 }
 
 impl TypeShape {
-    /// Class 1/2/4-by-type: primitives, strings, atomics, channels (a channel
-    /// is safe to share BY TYPE regardless of its element type — the value
-    /// crossing the site is the channel itself), borrows of atomics, and the
-    /// permissive `Unknown`.
+    /// Class 1/2/4-by-type: primitives, strings, atomics, and channels (a
+    /// channel is safe to share BY TYPE regardless of its element type — the
+    /// value crossing the site is the channel itself). `Unknown` is
+    /// deliberately ABSENT: an unproven shape must not pass as safe (the
+    /// O4.9 fail-closed boundary — HYB-E3005).
     pub(crate) fn is_sendable_by_type(&self) -> bool {
         match self {
-            TypeShape::Primitive
-            | TypeShape::Str
-            | TypeShape::Atomic
-            | TypeShape::Chan(_)
-            | TypeShape::Unknown => true,
+            TypeShape::Primitive | TypeShape::Str | TypeShape::Atomic | TypeShape::Chan(_) => true,
             // `&atomic_binding` is the mediated share route (OQ6); a pointer
             // to anything else is a mutable pointee — strict reject.
             TypeShape::Pointer(inner) => matches!(**inner, TypeShape::Atomic),
@@ -99,6 +102,7 @@ impl TypeShape {
             TypeShape::Primitive => "primitive value",
             TypeShape::OwnHandle(_) | TypeShape::BorrowHandle(_) => "boundary handle",
             TypeShape::ForeignOpaque(_) => "foreign value",
+            TypeShape::Closure => "closure",
             TypeShape::Unknown => "value",
         }
     }
@@ -120,7 +124,8 @@ impl TypeShape {
             TypeShape::OwnHandle(t) | TypeShape::BorrowHandle(t) | TypeShape::ForeignOpaque(t) => {
                 t.clone()
             }
-            TypeShape::Unknown => "unknown value".to_string(),
+            TypeShape::Closure => "fn".to_string(),
+            TypeShape::Unknown => "value of unresolvable type".to_string(),
         }
     }
 }

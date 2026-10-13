@@ -4,8 +4,11 @@
 //! ascriptions) or from an initializer expression (defines, loop variables),
 //! consulting the file-level struct/fn/const tables and the builtin foreign
 //! tables in foreign.rs. Everything unresolvable degrades to `Unknown`,
-//! which is permissive at check-sites — the checker never rejects on shapes
-//! it cannot see.
+//! which is FAIL-CLOSED at spawn/send boundaries (O4.9): an unproven shape
+//! may not silently cross (HYB-E3005) — but remains legal inside a function,
+//! where no boundary is involved. Fewer unknowns is still the goal: the
+//! inference below deliberately widens coverage (closures, option, chan
+//! elements) so honest programs classify without ceremony.
 
 use crate::foreign;
 use crate::model::{Checker, FnState, TypeShape};
@@ -27,9 +30,13 @@ impl<'a> Checker<'a> {
                 Box::new(self.shape_of_type(value)),
             ),
             TypeExpr::Chan { elem, .. } => TypeShape::Chan(Box::new(self.shape_of_type(elem))),
-            // option[T] of sendable classes is class 4 — modeled permissively
-            // as Unknown (the corpus never sends one).
-            TypeExpr::Option { .. } | TypeExpr::Fn { .. } => TypeShape::Unknown,
+            // option[T] carries T by value in a struct { v T; ok bool } — its
+            // sendability IS the payload's sendability (option[int] crosses,
+            // option[map] does not — the aliased map inside decides).
+            TypeExpr::Option { elem, .. } => self.shape_of_type(elem),
+            // fn-typed values are closures: captures make them unsendable at
+            // boundaries (Tier 0 — the A5 perimeter).
+            TypeExpr::Fn { .. } => TypeShape::Closure,
         }
     }
 
@@ -144,8 +151,10 @@ impl<'a> Checker<'a> {
                     .map(|i| self.shape_of_expr(st, i))
                     .unwrap_or(TypeShape::Unknown),
             })),
-            // A5 perimeter: closures are opaque values in Tier 0
-            Expr::FnLit { .. } => TypeShape::Unknown,
+            // closures are unsendable values in Tier 0 (the A5 perimeter);
+            // classify_value rejects FnLit literals before shape lookup —
+            // this arm covers fn-typed bindings and fn-typed fields
+            Expr::FnLit { .. } => TypeShape::Closure,
         }
     }
 
@@ -167,8 +176,8 @@ impl<'a> Checker<'a> {
         match callee {
             Expr::Ident { name, .. } => match name.as_str() {
                 // `make(chan T, n)` — defensive against parser spellings of
-                // the type argument; defaults Unknown (permissive). See the
-                // TECH DEBT note in foreign.rs.
+                // the type argument; defaults Unknown (fail-closed at
+                // boundaries, O4.9). See the TECH DEBT note in foreign.rs.
                 "make" => self.make_shape(args),
                 "append" => args
                     .first()
@@ -306,6 +315,15 @@ impl<'a> Checker<'a> {
                 if let TypeShape::Map(_, v) = self.shape_of_expr(st, base) {
                     return vec![*v, TypeShape::Primitive]; // v, ok := m[k]
                 }
+            }
+            // `v, ok := <-ch` — the value is the channel's element; `ok` is
+            // the receive-ok flag (a bool)
+            if let Expr::Receive { chan, .. } = value {
+                let elem = match self.shape_of_expr(st, chan) {
+                    TypeShape::Chan(e) => *e,
+                    _ => TypeShape::Unknown,
+                };
+                return vec![elem, TypeShape::Primitive];
             }
             // `a, b := f()` and other multi-value forms: permissive
         }

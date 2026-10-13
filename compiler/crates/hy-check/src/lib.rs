@@ -10,7 +10,13 @@
 //!     list with indices; records loop/managed extents (the
 //!     non-lexical windows) and per-binding last-use indices;
 //!     collects per-statement uses and calls (closures are
-//!     skipped — the A5 perimeter).
+//!     skipped there — the A5 perimeter; closure BOUNDARY
+//!     statements are checked by closures.rs).
+//!   * `closures.rs` — the closure-boundary pass: task/send/select-send
+//!     statements inside closure bodies are still concurrency
+//!     boundaries in the emitted Go — checked fail-closed (O4.9),
+//!     while captures/loans/freeze stay outside the checked
+//!     subset (A5, documented).
 //!   * `shape.rs`   — lightweight shape inference from declared types and
 //!     initializer expressions (NOT a type system).
 //!   * `foreign.rs`— the builtin foreign-type + method-mode descriptor
@@ -22,10 +28,15 @@
 //!   * `loans.rs`   — A2/A3/A6/LOAN-ESCAPE + the environment updates.
 //!   * this file    — Pass B: the per-statement driver and the verdict.
 //!
-//! Tier-0 discipline: never reject on shapes the checker cannot see
-//! (`Unknown` is permissive); every rejection teaches (O17 — fix-its come
-//! from the hy-diag registry); diagnostics are returned in source order.
+//! Tier-0 discipline (O4.9, rule FC — human directive 2026-10-13): the
+//! checker is FAIL-CLOSED at spawn/send boundaries — a value whose type it
+//! cannot resolve is UNPROVEN, never silently safe (HYB-E3005); the escape
+//! is the explicit, auditable `managed` hatch (HYB-E8001). Inside a
+//! function, unknown locals remain legal (no whole-program type system);
+//! every rejection teaches (O17 — fix-its come from the hy-diag registry);
+//! diagnostics are returned in source order.
 
+mod closures;
 mod foreign;
 mod freeze;
 mod loans;
@@ -35,6 +46,7 @@ mod shape;
 mod walk;
 
 use hy_diag::{Diagnostic, ManagedReport, Severity};
+
 use hy_syntax::{Decl, Expr, File, FnDecl, ForKind, SelectArmKind, Stmt};
 use model::{Binding, Checker, FnState, TypeShape};
 
@@ -289,7 +301,8 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             },
 
             // select arms: `ch <- v` is a send check-site; `v, ok := <-ch`
-            // defines its names (permissive Unknown shapes).
+            // defines its names (Unknown — fail-closed if they later cross
+            // a boundary, O4.9: ascribe or route through a known chan).
             Stmt::Select { arms, .. } => {
                 for arm in arms {
                     match &arm.kind {
@@ -303,16 +316,24 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                             let vals: Vec<&Expr> = vec![value];
                             ck.check_site(&mut st, span, "HYB-E3002", &vals, managed, &desc, false);
                         }
-                        SelectArmKind::Recv { names, .. } => {
-                            for n in names {
-                                ck.define_binding(
-                                    &mut st,
-                                    n,
-                                    TypeShape::Unknown,
-                                    None,
-                                    false,
-                                    managed,
-                                );
+                        SelectArmKind::Recv { names, chan } => {
+                            // `v[, ok] := <-ch` — the value's shape is the
+                            // channel's ELEMENT when the channel resolves
+                            // (fewer unknowns); `ok` is the receive flag
+                            // (a bool). An unresolvable element stays
+                            // Unknown — fail-closed if v later crosses a
+                            // boundary (O4.9).
+                            let elem = match ck.shape_of_expr(&st, chan) {
+                                TypeShape::Chan(e) => *e,
+                                _ => TypeShape::Unknown,
+                            };
+                            for (i, n) in names.iter().enumerate() {
+                                let shape = if i == 0 {
+                                    elem.clone()
+                                } else {
+                                    TypeShape::Primitive
+                                };
+                                ck.define_binding(&mut st, n, shape, None, false, managed);
                             }
                         }
                         SelectArmKind::Default => {}
@@ -326,6 +347,12 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             _ => {}
         }
     }
+
+    // Closure-boundary pass (closures.rs): task/send/select-send STATEMENTS
+    // inside closure bodies are concurrency boundaries in the emitted Go —
+    // checked here, fail-closed (O4.9), with the completed function env as
+    // the capture view. Captures/loans/freeze stay outside (A5, documented).
+    closures::check_closure_boundaries(ck, &st, body);
 }
 
 // ---------------------------------------------------------------------------
@@ -752,6 +779,196 @@ mod tests {
              }",
         );
         assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    // -------------------------------------------------------------------
+    // O4.9 fail-closed boundary (rule FC, HYB-E3005) — human directive
+    // 2026-10-13: what the checker cannot prove, it does not call safe.
+    // The escape is the explicit, auditable `managed` hatch (HYB-E8001).
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn fc_unknown_initializer_at_boundary_rejects() {
+        // the initializer's type does not resolve (unstubbed foreign call) →
+        // the binding is Unknown → crossing is E3005, not a silent pass
+        let r = check(
+            "fn handle(x string) { fmt.println(x) }\n\
+             fn main() {\n\
+               blob := strings.repeat(\"a\", 3)\n\
+               task handle(blob)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "HYB-E3005")
+            .expect("E3005 must fire for the unproven value");
+        assert_eq!(d.tier0_rule.as_deref(), Some("FC"));
+        assert!(d.message.contains("blob"), "{}", d.message);
+        assert!(
+            !d.fixits.is_empty(),
+            "O17: the diagnostic must teach the fix"
+        );
+    }
+
+    #[test]
+    fn fc_unresolved_name_at_boundary_rejects() {
+        // a name that does not resolve cannot be proven safe — it used to
+        // pass silently (Finding 1, sendability.rs)
+        let r = check(
+            "fn handle(x int) { fmt.println(x) }\n\
+             fn main() {\n\
+               task handle(nosuch)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E3005"));
+    }
+
+    #[test]
+    fn fc_unproven_name_via_managed_escapes() {
+        // the SAME unproven value inside a managed block escapes through the
+        // explicit hatch: warning only, counted — never a silent pass
+        let r = check(
+            "fn handle(x int) { fmt.println(x) }\n\
+             fn main() {\n\
+               managed {\n\
+                 task handle(nosuch)\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+        assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E8001"));
+        assert!(r.diagnostics.iter().all(|d| d.severity != Severity::Error));
+        assert_eq!(r.managed.managed_blocks, 1);
+        assert_eq!(r.managed.sites_via_managed, 1);
+    }
+
+    #[test]
+    fn fc_ascription_makes_the_share_provable() {
+        // the fix-it from the E3005 diagnostic: ascribe the type at the
+        // declaration — the checker can now classify (string = class 4)
+        let r = check(
+            "fn handle(x string) { fmt.println(x) }\n\
+             fn main() {\n\
+               var blob string = strings.repeat(\"a\", 3)\n\
+               task handle(blob)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+        assert!(r.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn fc_select_recv_known_element_classifies() {
+        // `v, ok := <-ch` — the value's shape is the channel's ELEMENT when
+        // the channel resolves (no manufactured unknown)
+        let r = check(
+            "fn take(x int) { fmt.println(x) }\n\
+             fn main() {\n\
+               ch := make(chan int, 1)\n\
+               select {\n\
+               v, ok := <-ch: { task take(v) }\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn fc_select_recv_unknown_element_rejects_at_boundary() {
+        // the channel's element did not resolve → v is Unknown → v crossing
+        // is E3005 (this surface used to define a permissive Unknown)
+        let r = check(
+            "fn take(x int) { fmt.println(x) }\n\
+             fn main() {\n\
+               ch := make(chan mystery, 1)\n\
+               select {\n\
+               v, ok := <-ch: { task take(v) }\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E3005"));
+    }
+
+    #[test]
+    fn fc_closure_boundary_send_of_shared_map_rejects() {
+        // Finding 2: a send INSIDE a closure body is a real boundary in the
+        // emitted Go — the closures.rs pass owns it now
+        let r = check(
+            "fn main() {\n\
+               counts := map[string]int{}\n\
+               ch := make(chan int, 1)\n\
+               mux := http.new_serve_mux()\n\
+               mux.handle(\"/x\", http.handler(fn(w http.response_writer) {\n\
+                 ch <- counts\n\
+               }))\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "HYB-E3002")
+            .expect("the closure-body send must be checked");
+        assert!(d.message.contains("counts"), "{}", d.message);
+    }
+
+    #[test]
+    fn fc_closure_boundary_unproven_capture_rejects() {
+        // fail-closed inside closures too: an unresolved capture at a
+        // closure-body boundary is E3005, not a silent pass
+        let r = check(
+            "fn main() {\n\
+               ch := make(chan int, 1)\n\
+               mux := http.new_serve_mux()\n\
+               mux.handle(\"/x\", http.handler(fn(w http.response_writer) {\n\
+                 ch <- ghost\n\
+               }))\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E3005"));
+    }
+
+    #[test]
+    fn fc_closure_boundary_send_inside_managed_escapes() {
+        // the hatch works inside closures (managed_blocks parity: the
+        // closure pass counts its managed blocks for --report-managed)
+        let r = check(
+            "fn main() {\n\
+               counts := map[string]int{}\n\
+               ch := make(chan int, 1)\n\
+               mux := http.new_serve_mux()\n\
+               mux.handle(\"/x\", http.handler(fn(w http.response_writer) {\n\
+                 managed { ch <- counts }\n\
+               }))\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+        assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E8001"));
+        assert_eq!(r.managed.managed_blocks, 1);
+        assert_eq!(r.managed.sites_via_managed, 1);
+    }
+
+    #[test]
+    fn fc_closure_without_boundary_stays_outside_perimeter() {
+        // corpus 10 shape unchanged: a capture used INSIDE a closure without
+        // any task/send statement is still the A5 perimeter (Q1, OQ1) — the
+        // closure pass owns boundary statements, nothing more
+        let r = check(
+            "fn main() {\n\
+               hits := 0\n\
+               mux := http.new_serve_mux()\n\
+               mux.handle(\"/ping\", http.handler(fn(w http.response_writer) {\n\
+                 hits++\n\
+               }))\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
     }
 
     #[test]

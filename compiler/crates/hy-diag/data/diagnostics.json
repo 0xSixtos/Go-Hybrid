@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated": "2026-10-13",
+  "updated": "2026-10-14",
   "format": "HYB-Exxxx registry (SPEC-LANGUAGE.md §9.6; append-only, never renumbered, never reused)",
   "categories": {
     "E0": "parse / lexical",
@@ -22,7 +22,9 @@
       "severity": "error",
       "title": "Hybrid identifiers are snake_case",
       "summary": "UpperCamelCase identifiers are rejected at binding time; foreign Go/Rust names are normalized when imported (SPEC M4).",
-      "fixits": ["rename the identifier to snake_case, e.g. `worker_id` instead of `WorkerID`"],
+      "fixits": [
+        "rename the identifier to snake_case, e.g. `worker_id` instead of `WorkerID`"
+      ],
       "example": "WorkerID := 3   // reject: HYB-E0001 — write `worker_id`",
       "rule": "LX"
     },
@@ -33,7 +35,10 @@
       "severity": "error",
       "title": "the program did not parse",
       "summary": "Generic parse/lex error (the lexer's identifier-case violations keep HYB-E0001; everything else lands here). The diagnostic points at the failure site with the unexpected token named; recovery happens at the statement/declaration boundary.",
-      "fixits": ["read the pointed-to site — the unexpected token is named in the message", "check the line above: unterminated braces, strings, or missing separators surface on the following line"],
+      "fixits": [
+        "read the pointed-to site — the unexpected token is named in the message",
+        "check the line above: unterminated braces, strings, or missing separators surface on the following line"
+      ],
       "example": "x := // reject: HYB-E0002 — expected expression, found end of line",
       "rule": "P"
     },
@@ -44,7 +49,10 @@
       "severity": "error",
       "title": "name is not available in this scope",
       "summary": "The name is not declared, not imported, or not visible here. Some builtin names (e.g. `error`) require their package to be imported first.",
-      "fixits": ["import the package that declares it", "check the spelling (foreign names are normalized to snake_case at binding time)"],
+      "fixits": [
+        "import the package that declares it",
+        "check the spelling (foreign names are normalized to snake_case at binding time)"
+      ],
       "example": "fn f() error { return nil }  // reject: HYB-E1001 until `errors` is imported",
       "rule": "M"
     },
@@ -55,7 +63,9 @@
       "severity": "error",
       "title": "defer requires a call expression",
       "summary": "`defer` of a non-call expression is a compile error.",
-      "fixits": ["defer the call itself: `defer f.close()?` instead of `defer f.close`"],
+      "fixits": [
+        "defer the call itself: `defer f.close()?` instead of `defer f.close`"
+      ],
       "example": "defer f.close   // reject: HYB-E2001 — defer of a non-call",
       "rule": "P"
     },
@@ -66,7 +76,9 @@
       "severity": "error",
       "title": "a multi-value return is not a tuple",
       "summary": "Hybrid has no tuples (T23). A function returning two values can only appear in a define (`a, b := f()`), a return, or an if-init — never as a single value.",
-      "fixits": ["bind both values: `lo, hi := minmax(3, 9)`"],
+      "fixits": [
+        "bind both values: `lo, hi := minmax(3, 9)`"
+      ],
       "example": "p := minmax(3, 9)   // reject: HYB-E2002 — multi-value is not a tuple",
       "rule": "T23"
     },
@@ -126,10 +138,29 @@
       "severity": "error",
       "title": "move applies to whole bindings and own-handle fields, not GC fields",
       "summary": "`move x.field` where the field is a slice/map/struct is rejected: the parent binding still aliases the storage, so the freeze cannot be sound (O5.4).",
-      "fixits": ["copy the field out and send the copy", "move the whole value instead"],
+      "fixits": [
+        "copy the field out and send the copy",
+        "move the whole value instead"
+      ],
       "example": "jobs <- move s.data   // reject: HYB-E3004 — move the whole `s` or copy `s.data`",
       "rule": "O5.4",
       "tier0_rule_id": "A1b"
+    },
+    {
+      "code": "HYB-E3005",
+      "name": "unproven-at-boundary",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "value at a spawn/send boundary the checker could not prove safe (fail-closed)",
+      "summary": "The fail-closed boundary (O4.9, rule FC): a value whose type the checker could not resolve — an unresolvable name, an untyped unknown, an unsupported operation affecting ownership or cross-task sharing — used to pass silently; it no longer does. What the checker cannot prove is not called safe. Crossing the boundary requires making the type visible to the checker, or an explicit, auditable `managed` block (HYB-E8001, counted by --report-managed). This is what makes the Tier-0 guarantee a precise contract: everything the checker accepts is proven; everything else is named.",
+      "fixits": [
+        "ascribe the type at the declaration (`var x map[string]int = ...`) so the checker can classify it",
+        "route the value through a channel of a known sendable element type instead of sharing it",
+        "if the share is genuinely guarded, wrap the site in `managed { ... }` — the explicit, auditable hatch (counted by --report-managed)"
+      ],
+      "example": "task handle(blob)          // reject: HYB-E3005 — blob's type did not resolve; the checker cannot prove it safe",
+      "rule": "O4.9",
+      "tier0_rule_id": "FC"
     },
     {
       "code": "HYB-E3101",
@@ -199,7 +230,10 @@
       "severity": "error",
       "title": "this type has no nil",
       "summary": "nil exists only for `error` and the foreign-Go perimeter. Maps and slices have zero values, not nil (N-rules).",
-      "fixits": ["use the zero value `map[string]int{}` or `[]int{}`", "use `option[[]int]` if absence is the meaning"],
+      "fixits": [
+        "use the zero value `map[string]int{}` or `[]int{}`",
+        "use `option[[]int]` if absence is the meaning"
+      ],
       "example": "var s []int = nil   // reject: HYB-E4001 — use []int{} or option[[]int]",
       "rule": "N"
     },
@@ -210,7 +244,10 @@
       "severity": "error",
       "title": "this enum has no zero value",
       "summary": "An enum's zero value is its first variant only if that variant is payload-free; otherwise `var e E` is a compile error.",
-      "fixits": ["initialize explicitly: `e := some(3)`", "reorder variants so the first is the payload-free default"],
+      "fixits": [
+        "initialize explicitly: `e := some(3)`",
+        "reorder variants so the first is the payload-free default"
+      ],
       "example": "var e option[int]   // reject: HYB-E4002 — option[T] has no zero value",
       "rule": "N"
     },
@@ -221,7 +258,10 @@
       "severity": "error",
       "title": "match is not exhaustive",
       "summary": "Every enum match must cover all variants (a `_` arm may be last). The missing variant names are listed in the error.",
-      "fixits": ["add the missing arm(s)", "add a final `_` arm if the remaining cases are truly impossible"],
+      "fixits": [
+        "add the missing arm(s)",
+        "add a final `_` arm if the remaining cases are truly impossible"
+      ],
       "example": "match s { shape::circle => ... }   // reject: HYB-E5001 — missing square/triangle",
       "rule": "T"
     },
@@ -232,7 +272,9 @@
       "severity": "error",
       "title": "pointer fields in by-value boundary structs are forbidden",
       "summary": "Types crossing the boundary follow the repr(C)-equivalent layout rules (B-rules); pointer fields inside a by-value struct are forbidden — route them as fields per the ABI.",
-      "fixits": ["route the value as an id/handle field instead of a pointer"],
+      "fixits": [
+        "route the value as an id/handle field instead of a pointer"
+      ],
       "example": "struct crossing { next *node }   // reject: HYB-E7001 for by-value crossing",
       "rule": "B"
     },
@@ -243,7 +285,9 @@
       "severity": "error",
       "title": "boundary calls need concrete types",
       "summary": "A generic (un-instantiated) type cannot cross the boundary; instantiate first.",
-      "fixits": ["instantiate the generic type at the call site first, then cross"],
+      "fixits": [
+        "instantiate the generic type at the call site first, then cross"
+      ],
       "example": "rust_call(generic_map)   // reject: HYB-E7002 — instantiate first",
       "rule": "B"
     },

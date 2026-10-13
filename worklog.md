@@ -212,3 +212,23 @@ Work Log:
 Stage Summary:
 - Post-MVP queue: rows 1+5 DONE; rows 2/3 fleet-blocked (job-spec composition next); row 4 (per-callee budgets) needs its own design batch; row 6 rides the fleet
 - Session state: MVP DONE + ratified; every standard suite green (cargo 194/0, clippy 0, go vet/test 20/20, gofmt clean, 10/10 examples, differential 9/9+11/11, corpus 20/20, bench 3.44 ns)
+
+---
+Task ID: 19 (Batch M)
+Agent: Super Z (main)
+Task: Land the customer-feedback fail-closed directive — checker fail-closed at critical boundaries (Finding 1), closure-body boundary checking (Finding 2), plus the parser crashes the new tests exposed; then Discussions/release/marketing rows into the queue.
+
+Work Log:
+- Sandbox rebuilt after crash: reinstalled pinned go1.26.9 (/home/z/tools/go) + rust 1.99.0 (rustup); Kaggle token saved to ~/.kaggle/access_token (chmod 600)
+- Continued the in-flight fail-closed work: model.rs (Unknown out of is_sendable_by_type, Closure shape) + shape.rs closure-aware inference survived the crash; finished sendability.rs check_site (Outcome::Unproven → HYB-E3005 outside managed / E8001 escape inside, counted by --report-managed)
+- Registered HYB-E3005 (unproven-at-boundary, rule FC) in hy-diag/data/diagnostics.json — 21 codes, fixits: ascribe (`var x T = ...`) / route through a known channel / managed hatch knowingly
+- New closures.rs pass: task/send/select-send statements INSIDE fn() bodies are checked fail-closed with the closure's ascribed params + enclosing env as capture view; captures/loans/freeze stay outside (A5 documented) — corpus 10 stays pre-registered ACCEPT; managed blocks inside closures counted for O6.3 parity
+- lib.rs/loans.rs: select-recv defines now use the channel's ELEMENT shape (ok = bool) instead of manufacturing Unknowns; local ascriptions fill inference gaps only (resolved inference keeps priority so boundary-handle loan windows stay precise)
+- New tests (10 checker + 2 parser): unknown-initializer/unresolved-name/unproven-select-recv → E3005; managed escapes (function + closure) → E8001 + counts; ascription makes the share provable; closure send of shared map → E3002; closure unproven capture → E3005; corpus-10 shape unchanged; malformed select arm + brace mis-nest → clean E0002 (no-hang regression pins)
+- CRASH-CLASS BUGS fixed: two parser infinite loops (a select arm starting `case x:` spun the arm loop via sync_stmt's zero-progress stmt-starter return; a brace mis-nest spun parse_file_body's decl loop via sync_decl's zero-progress `}` return) — force-progress invariant in both syncs; sync_stmt keeps `}` no-consume so `x := }` still recovers with ONE diagnostic
+- Diagnostics verified end-to-end by hand (hyb check on repro files); all instrumentation removed; docs: SPEC-LANGUAGE §9.3 O4.9 + O4.10 written, §9.6 seed-set count 21; PLAN.md queue rows 7–10 (fail-closed DONE, release, Discussions, marketing) + Decision Log 2026-10-14 entry + Test Results baseline; STATUS.md rewritten
+
+Stage Summary:
+- cargo test --workspace 206/0 (was 194) · corpus 20/20 tripwire quiet · differential 9/9+11/11 FULL AGREEMENT · examples 10/10 · go vet+build+test clean · clippy 0 · fmt clean
+- The Tier-0 contract is now sharp: everything accepted was proven; everything else is named, with the fix in the message
+- Parser hangs: any malformed program now terminates with clean E0002s — a compiler that hangs was fail-open in the worst way

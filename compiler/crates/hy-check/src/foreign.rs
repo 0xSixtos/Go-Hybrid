@@ -7,8 +7,12 @@
 //! generated descriptor tables (`own` / `borrow` / `mutate` / `consume`
 //! flags per API, exactly as `finish` is flagged `consume` today). Until
 //! then: unknown receivers degrade to `CallMode::Unknown` = "no loan
-//! implications" (permissive — never a false reject), and unknown foreign
-//! TYPES degrade to `TypeShape::Unknown` (permissive at check-sites).
+//! implications" (permissive — never a false reject; LOAN rules only, this
+//! is not a safety pass), and unknown foreign TYPES degrade to
+//! `TypeShape::Unknown` — which since O4.9 (rule FC, 2026-10-13) is
+//! FAIL-CLOSED at spawn/send boundaries: a foreign result the stubs don't
+//! describe cannot silently cross (HYB-E3005). Describing more of the real
+//! boundary is exactly what the generated descriptor tables will widen.
 //! ──────────────────────────────────────────────────────────────────────────
 
 use crate::model::TypeShape;

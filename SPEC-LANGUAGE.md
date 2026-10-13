@@ -1475,6 +1475,54 @@ jobs <- job{input: v, data: shared_map}            // reject: HYB-E3002 — `sha
                                                    // referenced by the literal
 ```
 
+**O4.9 — The fail-closed boundary (rule FC; human directive 2026-10-13,
+resolves Finding 1 of the customer-feedback review).** A value whose type
+the checker **cannot resolve** — an unresolvable name, a binding whose
+initializer's shape did not resolve and which carries no ascription, an
+expression whose result shape is unknown (including a foreign call the
+boundary descriptors do not describe) — is **UNPROVEN** at a check-site:
+it is rejected with `HYB-E3005` (rule FC) and **never silently passes as
+safe**. What the checker cannot prove, it does not call safe — that is the
+whole product premise (§9.2), and a permissive unknown would void it for
+the whole program. This deliberately trades rejection rate for guarantee
+precision: the human directive accepts more rejected code as the price of
+a precise contract ("what exactly does this compiler guarantee about my
+code?" now has a sharp answer: *everything accepted was proven; everything
+else is named*). The two legitimate escapes, both explicit and auditable:
+
+1. **Make the type visible** — ascribe it at the declaration
+   (`var x map[string]int = ...`); the emitter carries the ascribed type,
+   so a lying ascription fails Go's own build. Ascription *fills gaps*:
+   where the checker's own inference resolves (boundary handles, handles'
+   loan windows), inference keeps priority.
+2. **Take the hatch** — wrap the site in `managed` (§9.5); the escape is
+   linted (`HYB-E8001`) and counted by `--report-managed` exactly like any
+   other managed share.
+
+Diagnostics teach the fix (§9.6/O17): the E3005 fix-it menu is ascribe /
+route through a known channel / take the managed hatch knowingly.
+
+**O4.10 — Closure bodies: boundary statements are checked; captures are
+not (resolves Finding 2).** A `task`/`send`/select-send **statement inside
+a closure body is a concurrency boundary in the emitted Go** (a goroutine
+spawn, a channel operation) and is checked exactly as in the flat walk —
+fail-closed, `managed`-escapable, with the closure's ascribed params and
+the enclosing function's bindings as the capture view. Everything ELSE in
+a closure body — assignments, calls, captures of mutable state with no
+boundary statement — remains outside the checked subset: that is the A5
+perimeter of the scoped-claim ruling (QUESTIONS.md Q1; corpus 10's
+`http.handler` capture shape stays ACCEPT, CONTESTED under OQ1). The
+boundary is documented, not silent; the fourth check-site class that would
+own API escapes is still the open question OQ1, unchanged by this rule.
+
+```hy
+mux.handle("/x", http.handler(fn(w http.response_writer) {
+    ch <- counts        // reject: HYB-E3002 — a send inside a closure is a
+                        // real boundary; `counts` is a live mutable map
+    managed { ch <- other }   // ok: hatch taken knowingly (E8001, counted)
+}))
+```
+
 **O5 — `move` and freeze (resolves A1's (b) half).**
 
 - **O5.1 — `move x`** declares an ownership transfer of the binding `x` at
@@ -1652,7 +1700,8 @@ renumbered and never reused; a retired code leaves a permanent hole (GALA's
 retired-but-never-renumbered `E0016` is the precedent). Every code ships
 one embedded reference page (cause → examples → fix-it menu), reachable
 offline via `hybrid explain HYB-E3001` (aliases: `E3001`, `3001`). The
-initial 17 codes of this draft are the registry's seed set. `E3nnn`
+registry's seed set has grown append-only to 21 codes as of the O4.9
+revision (rule FC added `HYB-E3005`). `E3nnn`
 rejections MUST carry fix-it suggestions (O17); a JSON diagnostic envelope
 (`{"diagnostics":[…]}` — an object, not an array, so it can grow fields)
 lands at MVP-0 for tooling consumption.

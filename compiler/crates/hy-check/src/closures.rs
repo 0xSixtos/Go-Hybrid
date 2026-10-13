@@ -1,0 +1,391 @@
+//! closures.rs — the closure-boundary pass (Finding 2, human directive
+//! 2026-10-13).
+//!
+//! Tier 0's flat walk (walk.rs) does not descend into closure (FnLit)
+//! bodies: captures, loan windows, freeze and alias tracking stay outside
+//! (the A5 perimeter — a closure handed to foreign Go code can run at any
+//! time, and binding-level analysis cannot see Go's dispatch). That boundary
+//! remains, and it is documented, NOT silent.
+//!
+//! What changed: a `task`/`send`/select-send STATEMENT inside a closure body
+//! is still a concurrency boundary in the emitted Go (a goroutine spawn, a
+//! channel operation) — the checker owns those sites wherever they appear.
+//! This pass finds every closure body under a function's statements and
+//! checks exactly those boundary statements, fail-closed (O4.9):
+//!
+//!   * the closure's params are ascribed (the fn-type syntax requires it),
+//!     so they classify normally;
+//!   * captures resolve against the enclosing function's environment —
+//!     Tier-0 binding-level analysis shares the env (a documented
+//!     over-approximation: a capture's SHAPE decides, not lexical order);
+//!   * a capture whose shape is `Unknown` is UNPROVEN at the boundary —
+//!     HYB-E3005 unless the site sits in a `managed` block, exactly like
+//!     the flat walk;
+//!   * everything else inside the closure (assignments, calls, captures of
+//!     mutable state without a boundary statement) stays outside the checked
+//!     subset — corpus 10's `hits++` handler shape is the standing example
+//!     (A5, QUESTIONS.md Q1/OQ1: pre-registered ACCEPT, contested openly).
+
+use crate::model::{Binding, Checker, FnState, TypeShape};
+use hy_syntax::ForKind::*;
+use hy_syntax::{Block, Expr, LocalKind, SelectArmKind, Stmt};
+
+/// Check the boundary statements of every closure body reachable from
+/// `body` (one env per closure, captures included). Called once per
+/// function, after the flat Pass B loop — the enclosing env is complete.
+pub(crate) fn check_closure_boundaries(ck: &mut Checker<'_>, st: &FnState, body: &Block) {
+    for (params, body) in collect_fnlits(body) {
+        check_one_closure(ck, st, params, body);
+    }
+}
+
+fn check_one_closure(
+    ck: &mut Checker<'_>,
+    st: &FnState,
+    params: &[hy_syntax::Param],
+    body: &Block,
+) {
+    // env: captures (the enclosing bindings) + the closure's ascribed params.
+    let mut cst = FnState {
+        env: st.env.clone(),
+        ..FnState::default()
+    };
+    for p in params {
+        let shape = ck.shape_of_type(&p.ty);
+        cst.env.insert(
+            p.name.clone(),
+            Binding {
+                shape,
+                ty: Some(p.ty.clone()),
+                immutable: false,
+                managed_taint: false,
+                moved: None,
+            },
+        );
+    }
+    check_body_boundaries(ck, &mut cst, body, false);
+}
+
+/// Walk one closure body recursively, checking boundary statements only.
+/// Locals/select-recvs define bindings so a later boundary classifies them;
+/// moves inside the closure mark the closure-local view (a closure can run
+/// more than once — the enclosing function's env is untouched).
+fn check_body_boundaries(ck: &mut Checker<'_>, st: &mut FnState, block: &Block, managed: bool) {
+    for stmt in &block.stmts {
+        check_stmt_boundaries(ck, st, stmt, managed);
+    }
+}
+
+fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, managed: bool) {
+    match stmt {
+        Stmt::Local(l) => {
+            let immutable = l.kind == LocalKind::Let || l.kind == LocalKind::Const;
+            if let Some(t) = &l.ty {
+                // ascribed: the declared type decides
+                let shape = ck.shape_of_type(t);
+                for name in &l.names {
+                    ck.define_binding(st, name, shape.clone(), Some(t.clone()), immutable, managed);
+                }
+            } else if l.names.len() == l.values.len() {
+                for (name, value) in l.names.iter().zip(l.values.iter()) {
+                    // ascription fills gaps (O4.9); inference keeps priority
+                    // when it resolves (boundary handles stay precise)
+                    let inferred = ck.shape_of_expr(st, value);
+                    let (shape, ty) = match (&l.ty, inferred) {
+                        (Some(t), TypeShape::Unknown) => (ck.shape_of_type(t), Some(t.clone())),
+                        (_, inferred) => (inferred, ck.ty_of_expr(st, value)),
+                    };
+                    ck.define_binding(st, name, shape, ty, immutable, managed);
+                }
+            } else {
+                // multi-name define from one value (`v, ok := m[k]`)
+                let shapes = match l.values.first() {
+                    Some(v) => ck.multi_value_shapes(st, v, l.names.len()),
+                    None => vec![TypeShape::Unknown; l.names.len()],
+                };
+                for (name, shape) in l.names.iter().zip(shapes) {
+                    ck.define_binding(st, name, shape, None, immutable, managed);
+                }
+            }
+        }
+        Stmt::Task { callee, args, span } => {
+            let desc = format!("the spawn `task {}(...)`", callee.render());
+            let vals: Vec<&Expr> = args.iter().map(|a| &a.value).collect();
+            ck.check_site(st, *span, "HYB-E3001", &vals, managed, &desc, false);
+        }
+        Stmt::Send {
+            chan,
+            value,
+            is_move,
+            span,
+        } => {
+            let desc = if *is_move {
+                format!(
+                    "the move-send `{} <- move {}`",
+                    chan.render(),
+                    value.render()
+                )
+            } else {
+                format!("the send `{} <- {}`", chan.render(), value.render())
+            };
+            let vals: Vec<&Expr> = vec![value];
+            ck.check_site(st, *span, "HYB-E3002", &vals, managed, &desc, *is_move);
+        }
+        Stmt::Select { arms, .. } => {
+            for arm in arms {
+                match &arm.kind {
+                    SelectArmKind::Send { chan, value } => {
+                        let desc =
+                            format!("the select-send `{} <- {}`", chan.render(), value.render());
+                        let span = chan.span().to(value.span());
+                        let vals: Vec<&Expr> = vec![value];
+                        ck.check_site(st, span, "HYB-E3002", &vals, managed, &desc, false);
+                    }
+                    SelectArmKind::Recv { names, chan } => {
+                        // element shape when the channel resolves; `ok` is a
+                        // bool; unresolvable stays Unknown (fail-closed, O4.9)
+                        let elem = match ck.shape_of_expr(st, chan) {
+                            TypeShape::Chan(e) => *e,
+                            _ => TypeShape::Unknown,
+                        };
+                        for (i, n) in names.iter().enumerate() {
+                            let shape = if i == 0 {
+                                elem.clone()
+                            } else {
+                                TypeShape::Primitive
+                            };
+                            ck.define_binding(st, n, shape, None, false, managed);
+                        }
+                    }
+                    SelectArmKind::Default => {}
+                }
+            }
+        }
+        Stmt::Managed { body, .. } => {
+            ck.managed_blocks += 1; // O6.3 parity with the flat walk
+            check_body_boundaries(ck, st, body, true);
+        }
+        Stmt::If {
+            init,
+            then,
+            otherwise,
+            ..
+        } => {
+            if let Some(i) = init {
+                check_stmt_boundaries(ck, st, i, managed);
+            }
+            check_body_boundaries(ck, st, then, managed);
+            if let Some(o) = otherwise {
+                check_stmt_boundaries(ck, st, o, managed);
+            }
+        }
+        Stmt::For { kind, body, .. } => {
+            match kind {
+                Iterate { vars, expr } => {
+                    let shapes = ck.iterate_var_shapes(st, expr, vars.len());
+                    for (name, shape) in vars.iter().zip(shapes) {
+                        ck.define_binding(st, name, shape, None, false, managed);
+                    }
+                }
+                Range { var, .. } => {
+                    ck.define_binding(st, var, TypeShape::Primitive, None, false, managed);
+                }
+                While { .. } | Infinite => {}
+            }
+            check_body_boundaries(ck, st, body, managed);
+        }
+        Stmt::Match { arms, .. } => {
+            for arm in arms {
+                check_body_boundaries(ck, st, &arm.body, managed);
+            }
+        }
+        Stmt::Block { block, .. } => check_body_boundaries(ck, st, block, managed),
+        _ => {}
+    }
+}
+
+/// Every FnLit reachable from `block`, outermost-first, including closures
+/// nested inside other closures' bodies. walk.rs's use/call collectors skip
+/// FnLit deliberately (A5); this walker exists precisely to see them.
+fn collect_fnlits(block: &Block) -> Vec<(&[hy_syntax::Param], &Block)> {
+    let mut out = Vec::new();
+    for s in &block.stmts {
+        collect_stmt(s, &mut out);
+    }
+    out
+}
+
+fn collect_stmt<'a>(stmt: &'a Stmt, out: &mut Vec<(&'a [hy_syntax::Param], &'a Block)>) {
+    match stmt {
+        Stmt::Local(l) => {
+            for v in &l.values {
+                collect_expr(v, out);
+            }
+        }
+        Stmt::Assign {
+            targets, values, ..
+        } => {
+            for t in targets {
+                collect_place(t, out);
+            }
+            for v in values {
+                collect_expr(v, out);
+            }
+        }
+        Stmt::Expr { expr, .. } => collect_expr(expr, out),
+        Stmt::Send { chan, value, .. } => {
+            collect_expr(chan, out);
+            collect_expr(value, out);
+        }
+        Stmt::If {
+            init,
+            cond,
+            then,
+            otherwise,
+            ..
+        } => {
+            if let Some(i) = init {
+                collect_stmt(i, out);
+            }
+            collect_expr(cond, out);
+            collect_block(then, out);
+            if let Some(o) = otherwise {
+                collect_stmt(o, out);
+            }
+        }
+        Stmt::For { kind, body, .. } => {
+            match kind {
+                While { cond } => collect_expr(cond, out),
+                Range { lo, hi, .. } => {
+                    collect_expr(lo, out);
+                    collect_expr(hi, out);
+                }
+                Iterate { expr, .. } => collect_expr(expr, out),
+                Infinite => {}
+            }
+            collect_block(body, out);
+        }
+        Stmt::Return { values, .. } => {
+            for v in values {
+                collect_expr(v, out);
+            }
+        }
+        Stmt::Task { callee, args, .. } => {
+            collect_expr(callee, out);
+            for a in args {
+                collect_expr(&a.value, out);
+            }
+        }
+        Stmt::Managed { body, .. } => collect_block(body, out),
+        Stmt::Match { subject, arms, .. } => {
+            collect_expr(subject, out);
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    collect_expr(g, out);
+                }
+                collect_block(&arm.body, out);
+            }
+        }
+        Stmt::Defer { call, .. } => collect_expr(call, out),
+        Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::Block { block, .. } => collect_block(block, out),
+        Stmt::Select { arms, .. } => {
+            for arm in arms {
+                match &arm.kind {
+                    SelectArmKind::Send { chan, value } => {
+                        collect_expr(chan, out);
+                        collect_expr(value, out);
+                    }
+                    SelectArmKind::Recv { chan, .. } => collect_expr(chan, out),
+                    SelectArmKind::Default => {}
+                }
+            }
+        }
+    }
+}
+
+fn collect_place<'a>(
+    place: &'a hy_syntax::Place,
+    out: &mut Vec<(&'a [hy_syntax::Param], &'a Block)>,
+) {
+    match &place.kind {
+        hy_syntax::PlaceKind::Ident(_) => {}
+        hy_syntax::PlaceKind::Index { base, index } => {
+            collect_place(base, out);
+            collect_expr(index, out);
+        }
+        hy_syntax::PlaceKind::Field { base, .. } => collect_place(base, out),
+        hy_syntax::PlaceKind::AddrOf { base } => collect_place(base, out),
+    }
+}
+
+fn collect_block<'a>(block: &'a Block, out: &mut Vec<(&'a [hy_syntax::Param], &'a Block)>) {
+    for s in &block.stmts {
+        collect_stmt(s, out);
+    }
+}
+
+fn collect_expr<'a>(expr: &'a Expr, out: &mut Vec<(&'a [hy_syntax::Param], &'a Block)>) {
+    match expr {
+        Expr::Ident { .. } => {}
+        Expr::FnLit { params, body, .. } => {
+            out.push((params, body));
+            // nested closures inside this closure's body
+            for s in &body.stmts {
+                collect_stmt(s, out);
+            }
+        }
+        Expr::Lit { .. } => {}
+        Expr::Interp { parts, .. } => {
+            for p in parts {
+                if let hy_syntax::InterpPart::Expr(e) = p {
+                    collect_expr(e, out);
+                }
+            }
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_expr(lhs, out);
+            collect_expr(rhs, out);
+        }
+        Expr::Unary { operand, .. } | Expr::AddrOf { operand, .. } => collect_expr(operand, out),
+        Expr::Move { operand, .. } | Expr::Try { operand, .. } => collect_expr(operand, out),
+        Expr::Receive { chan, .. } => collect_expr(chan, out),
+        Expr::Index { base, index, .. } => {
+            collect_expr(base, out);
+            collect_expr(index, out);
+        }
+        Expr::Slice { base, lo, hi, .. } => {
+            collect_expr(base, out);
+            if let Some(lo) = lo {
+                collect_expr(lo, out);
+            }
+            if let Some(hi) = hi {
+                collect_expr(hi, out);
+            }
+        }
+        Expr::Field { base, .. } => collect_expr(base, out),
+        Expr::Call { callee, args, .. } => {
+            collect_expr(callee, out);
+            for a in args {
+                collect_expr(&a.value, out);
+            }
+        }
+        Expr::StructLit { fields, .. } => {
+            for f in fields {
+                collect_expr(&f.value, out);
+            }
+        }
+        Expr::SliceLit { items, .. } => {
+            for i in items {
+                collect_expr(i, out);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                collect_expr(k, out);
+                collect_expr(v, out);
+            }
+        }
+        Expr::Paren { inner, .. } => collect_expr(inner, out),
+    }
+}
