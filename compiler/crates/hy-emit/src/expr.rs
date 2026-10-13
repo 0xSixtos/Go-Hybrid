@@ -47,7 +47,14 @@ impl Emitter {
 
     fn emit_expr_inner(&mut self, e: &Expr) -> Result<String, EmitError> {
         match e {
-            Expr::Ident { name, .. } => Ok(name.clone()),
+            Expr::Ident { name, .. } => {
+                if name == "none" {
+                    return Err(EmitError::unsupported(
+                        "`none` outside a return (MVP-0 lowers `return none` against the declared option result)",
+                    ));
+                }
+                Ok(name.clone())
+            }
 
             Expr::Lit { kind, .. } => Ok(self.lit_text(kind)),
 
@@ -317,6 +324,43 @@ impl Emitter {
             }
         }
 
+        // --- slice `.pop()` → prelude helper (example 08's stack shape) ---
+        if let Expr::Field { base, name, .. } = callee {
+            if name == "pop" {
+                if let Expr::Ident { .. } = base.as_ref() {
+                    let b = self.emit_expr(base, ATOM)?;
+                    return Ok(format!("hy_pop(&{})", b));
+                }
+                return Err(EmitError::unsupported(
+                    "`.pop()` on a non-local base (MVP-0 supports plain slice locals)",
+                ));
+            }
+        }
+
+        // --- associated-fn calls: `lru_cache.new[string, int](2)` →
+        //     `lru_cache_new[string, int](2)` (Go has no dotted idents) ---
+        if let Expr::Field { base, name, .. } = callee {
+            if let Expr::Ident { name: root, .. } = base.as_ref() {
+                if !is_package_root(root) && !self.bindings.contains_key(root) {
+                    let (head, type_args) = split_type_args(name);
+                    let full = format!("{}.{}", root, head);
+                    if self.assoc_fns.contains(&full) {
+                        let mut parts = Vec::new();
+                        for a in args {
+                            parts.push(self.emit_call_arg(a)?);
+                        }
+                        return Ok(format!(
+                            "{}_{}{}({})",
+                            root,
+                            head,
+                            type_args.unwrap_or_default(),
+                            parts.join(", ")
+                        ));
+                    }
+                }
+            }
+        }
+
         // --- everything else: callee(args...) ---
         let c = self.emit_expr(callee, ATOM)?;
         let mut parts = Vec::new();
@@ -334,7 +378,6 @@ impl Emitter {
             Ok(t)
         }
     }
-
     /// `make(chan job, 16)` / `make([]byte, 64*1024)` / `make(map[string]int)`.
     /// The parser encodes the type argument as an EMPTY composite literal of
     /// that type — rendering it as a value (`job{}`) was MVP-0 bug #2.
@@ -423,6 +466,14 @@ impl Emitter {
             parts.push(self.emit_call_arg(a)?);
         }
         Ok(format!("{}.{}({})", pkg, to_go_name(name), parts.join(", ")))
+    }
+}
+
+/// `new[string, int]` → ("new", Some("[string, int]")).
+fn split_type_args(name: &str) -> (&str, Option<&str>) {
+    match name.find('[') {
+        Some(i) => (&name[..i], Some(&name[i..])),
+        None => (name, None),
     }
 }
 

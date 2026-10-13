@@ -485,3 +485,103 @@ fn try_outside_binding_position_errors_cleanly() {
     let msg = emit_err("fn main() { fmt.println(f()?) }");
     assert!(msg.contains("`?`"), "{}", msg);
 }
+
+// ---------------------------------------------------------------------------
+// Batch D — option/match, generics, type aliases, slot loans, set/pop
+// ---------------------------------------------------------------------------
+
+#[test]
+fn type_alias_emits_go_alias() {
+    let go = emit("type node_id = int\n\nfn main() {\n    x := node_id(3)\n}\n");
+    assert!(go.contains("type node_id = int"), ":\n{}", go);
+}
+
+#[test]
+fn generic_fn_and_struct_type_params() {
+    let go = emit(
+        "struct box[t any] {\n    v t\n}\n\nfn box.new[t any](v t) box[t] {\n    return box[t]{v: v}\n}\n",
+    );
+    assert!(go.contains("type box[t any] struct {"), ":\n{}", go);
+    assert!(
+        go.contains("func box_new[t any](v t) box[t] {"),
+        "generic assoc fn with mangled name:\n{}",
+        go
+    );
+}
+
+#[test]
+fn assoc_fn_call_mangles_dotted_name() {
+    let go = emit(
+        "struct box[t any] {\n    v t\n}\n\nfn box.new[t any](v t) box[t] {\n    return box[t]{v: v}\n}\n\nfn main() {\n    b := box.new[int](3)\n}\n",
+    );
+    assert!(go.contains("box_new[int](3)"), ":\n{}", go);
+}
+
+#[test]
+fn option_match_lowes_to_ok_branch() {
+    let go = emit(
+        "fn get() option[int] {\n    return some(3)\n}\n\nfn main() {\n    match get() {\n        some(v): fmt.println(\"v={v}\")\n        none:     fmt.println(\"none\")\n    }\n}\n",
+    );
+    assert!(go.contains("type option[v any] struct {"), "option prelude:\n{}", go);
+    assert!(go.contains("func some[v any](val v) option[v] {"), ":\n{}", go);
+    assert!(go.contains("func get() option[int] {"), "option result bare:\n{}", go);
+    assert!(go.contains("return some(3)"), ":\n{}", go);
+    let m = go.find("hyMatch0 := get()").expect("match temp");
+    let body = &go[m..];
+    assert!(body.contains("if hyMatch0.ok {"), ":\n{}", go);
+    assert!(body.contains("v := hyMatch0.val"), ":\n{}", go);
+    assert!(body.contains("} else {"), ":\n{}", go);
+    assert!(body.contains("fmt.Println(fmt.Sprintf(\"v=%v\", v))"), ":\n{}", go);
+}
+
+#[test]
+fn return_none_lowers_to_option_zero() {
+    let go = emit("fn get() option[int] {\n    return none\n}\n");
+    assert!(go.contains("return option[int]{}"), "none → zero option:\n{}", go);
+}
+
+#[test]
+fn slot_loan_copies_and_stores_back() {
+    // O8's map-slot loan: Go cannot &m[k]; copy-read now + store-back at
+    // the declaring block's end.
+    let go = emit(
+        "struct node {\n    edges []int\n}\n\nstruct graph {\n    nodes map[int]node\n}\n\nfn (g *graph) connect(from int, to int) {\n    n := &g.nodes[from]\n    n.edges = append(n.edges, to)\n}\n",
+    );
+    assert!(go.contains("n := g.nodes[from]"), "copy read (no &):\n{}", go);
+    assert!(go.contains("n.edges = append(n.edges, to)"), ":\n{}", go);
+    assert!(go.contains("g.nodes[from] = n"), "store-back at block end:\n{}", go);
+}
+
+#[test]
+fn single_var_iterate_value_semantics() {
+    // Slices: `for w in shard` binds the VALUE (Go's range binds the index).
+    let go = emit("fn f(shard []int) {\n    for w in shard {\n        _ = w\n    }\n}\n");
+    assert!(go.contains("for _, w := range shard {"), ":\n{}", go);
+}
+
+#[test]
+fn single_var_iterate_over_chan_binds_value() {
+    let go = emit(
+        "fn worker(jobs <-chan int) {\n    for j in jobs {\n        _ = j\n    }\n}\n",
+    );
+    assert!(go.contains("for j := range jobs {"), "chan keeps direct range:\n{}", go);
+}
+
+#[test]
+fn set_insert_uses_prelude() {
+    let go = emit(
+        "type node_id = int\n\nfn f() bool {\n    seen := set[node_id]{}\n    return seen.insert(3)\n}\n",
+    );
+    assert!(go.contains("type set[t comparable] struct {"), "set prelude:\n{}", go);
+    assert!(go.contains("seen := set[node_id]{}"), ":\n{}", go);
+    assert!(go.contains("return seen.insert(3)"), ":\n{}", go);
+}
+
+#[test]
+fn slice_pop_uses_prelude_helper() {
+    let go = emit(
+        "type node_id = int\n\nfn f(stack []node_id) node_id {\n    return stack.pop()\n}\n",
+    );
+    assert!(go.contains("func hy_pop[t any](s *[]t) t {"), "pop prelude:\n{}", go);
+    assert!(go.contains("return hy_pop(&stack)"), ":\n{}", go);
+}

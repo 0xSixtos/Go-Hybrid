@@ -140,6 +140,7 @@ fn build_tables(ck: &mut Checker<'_>) {
                 ck.fns.insert(f.name.clone(), f);
             }
             Decl::Enum(_) => {}
+            Decl::TypeAlias(_) => {}
         }
     }
 }

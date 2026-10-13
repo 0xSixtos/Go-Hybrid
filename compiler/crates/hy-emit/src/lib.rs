@@ -31,6 +31,63 @@ use std::collections::{BTreeMap, BTreeSet};
 use hy_syntax::*;
 
 // ---------------------------------------------------------------------------
+// Hybrid prelude (auto-generated Go, emitted only when the program uses it)
+// ---------------------------------------------------------------------------
+
+/// `option[T]` — a payload + ok-flag struct; `none` is the zero value.
+/// `option`, `set`, and `hy_pop` are RESERVED stdlib names (Decision Log).
+const OPTION_PRELUDE: &str = concat!(
+    "// ---- Hybrid prelude: option (auto-generated; do not edit) ----\n",
+    "type option[v any] struct {\n",
+    "\tval v\n",
+    "\tok  bool\n",
+    "}\n",
+    "\n",
+    "func some[v any](val v) option[v] {\n",
+    "\treturn option[v]{val: val, ok: true}\n",
+    "}\n",
+);
+
+const SET_PRELUDE: &str = concat!(
+    "// ---- Hybrid prelude: set (auto-generated; do not edit) ----\n",
+    "type set[t comparable] struct {\n",
+    "\tm map[t]struct{}\n",
+    "}\n",
+    "\n",
+    "func (s *set[t]) insert(v t) bool {\n",
+    "\tif s.m == nil {\n",
+    "\t\ts.m = make(map[t]struct{})\n",
+    "\t}\n",
+    "\t_, existed := s.m[v]\n",
+    "\ts.m[v] = struct{}{}\n",
+    "\treturn !existed\n",
+    "}\n",
+    "\n",
+    "func (s *set[t]) contains(v t) bool {\n",
+    "\t_, ok := s.m[v]\n",
+    "\treturn ok\n",
+    "}\n",
+    "\n",
+    "func (s *set[t]) remove(v t) {\n",
+    "\tdelete(s.m, v)\n",
+    "}\n",
+    "\n",
+    "func (s *set[t]) len() int {\n",
+    "\treturn len(s.m)\n",
+    "}\n",
+);
+
+const POP_PRELUDE: &str = concat!(
+    "// ---- Hybrid prelude: slice pop (auto-generated; do not edit) ----\n",
+    "func hy_pop[t any](s *[]t) t {\n",
+    "\tn := len(*s)\n",
+    "\tv := (*s)[n-1]\n",
+    "\t*s = (*s)[:n-1]\n",
+    "\treturn v\n",
+    "}\n",
+);
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -69,6 +126,9 @@ pub enum BindingKind {
     /// Bound from `io.read_all` — a byte buffer: `fmt.print(b)` becomes
     /// `os.Stdout.Write(b)`.
     Bytes,
+    /// Bound to a channel (param type or `make(chan …)`) — single-var
+    /// `for v in ch` ranges the VALUE directly; slices/maps need `_, v`.
+    Chan,
     /// Our own struct / plain value — members emit verbatim.
     Plain,
 }
@@ -164,6 +224,17 @@ pub struct Emitter {
     in_main_closure: bool,
     /// Inside a function literal (closure) — `?` binds to ITS results.
     fnlit_depth: usize,
+    /// Dotted associated-fn names declared in this file
+    /// (`lru_cache.new`) — call sites mangle to `lru_cache_new[...]`.
+    assoc_fns: BTreeSet<String>,
+    /// The enclosing fn's single result type IF it is an option (`option[v]`)
+    /// — `return none` lowers to that type's zero value.
+    cur_option_result: Option<String>,
+    /// Map-slot loans (O8): `x := &m[k]` cannot be a Go map-index address,
+    /// so it lowers to a COPY read now + store-back at the loan's block end
+    /// (O9's honesty: Go-heap reads are copies). Frames are block-scoped:
+    /// a loan flushes at the end of the block that declared it.
+    loan_frames: Vec<Vec<(String, String)>>,
 }
 
 impl Emitter {
@@ -176,6 +247,9 @@ impl Emitter {
             temp_n: 0,
             in_main_closure: false,
             fnlit_depth: 0,
+            assoc_fns: BTreeSet::new(),
+            cur_option_result: None,
+            loan_frames: Vec::new(),
         }
     }
 
@@ -205,6 +279,14 @@ impl Emitter {
     // -----------------------------------------------------------------------
 
     fn emit_file(&mut self, file: &File) -> Result<String, EmitError> {
+        // Associated-fn registry (call sites mangle `pkg.name[...]` to
+        // `pkg_name[...]` — Go has no dotted identifiers).
+        self.assoc_fns = file
+            .fns()
+            .filter(|f| f.name.contains('.'))
+            .map(|f| f.name.clone())
+            .collect();
+
         // Pass 1: render every declaration into the body buffer, collecting
         // used packages as we go. Top-level decls separate with a blank line
         // (gofmt style) — cheap here, before the header is assembled.
@@ -236,12 +318,18 @@ impl Emitter {
                         e.name
                     )));
                 }
+                Decl::TypeAlias(t) => {
+                    let ty = self.type_text(&t.ty);
+                    self.push(&format!("type {} = {}", t.name, ty));
+                }
                 Decl::Fn(f) => self.emit_fn(f)?,
             }
         }
 
-        // Pass 2: assemble package + imports + body. Imports always sit
-        // between `package` and the first declaration — Go's required order.
+        // Pass 2: assemble package + imports + prelude + body. Imports always
+        // sit between `package` and the first declaration — Go's required
+        // order. The prelude (option/set/hy_pop) lands between imports and
+        // the first user decl, only when the emitted body uses it.
         let mut out = String::from("package main\n");
         if !self.imports.is_empty() {
             out.push_str("\nimport (\n");
@@ -249,6 +337,25 @@ impl Emitter {
                 out.push_str(&format!("\t\"{}\"\n", p));
             }
             out.push_str(")\n");
+        }
+        let body = &self.body;
+        let needs_option = body.contains("option[") || body.contains("some(");
+        let needs_set = body.contains("set[");
+        let needs_pop = body.contains("hy_pop(");
+        if needs_option || needs_set || needs_pop {
+            out.push('\n');
+            if needs_option {
+                out.push_str(OPTION_PRELUDE);
+                out.push('\n');
+            }
+            if needs_set {
+                out.push_str(SET_PRELUDE);
+                out.push('\n');
+            }
+            if needs_pop {
+                out.push_str(POP_PRELUDE);
+                out.push('\n');
+            }
         }
         out.push('\n');
         out.push_str(&self.body);
@@ -309,6 +416,10 @@ impl Emitter {
         self.bindings.clear();
         self.temp_n = 0;
 
+        // Associated functions (`lru_cache.new`) mangle to
+        // `lru_cache_new` — Go has no dotted identifiers. Call sites mangle
+        // identically (see emit_call).
+        let go_name = f.name.replace('.', "_");
         let is_main = f.name == "main" && f.receiver.is_none();
         // E4/E6: main's `?` sites trigger the exit contract. If main declares
         // results OR contains top-level `?` sites, the body moves into a
@@ -316,15 +427,36 @@ impl Emitter {
         let body_has_try = f.body.as_ref().map(|b| self.block_has_try(b)).unwrap_or(false);
         let main_needs_wrapper = is_main && (!f.results.is_empty() || body_has_try);
 
+        // `return none` lowers to the declared option result's zero value.
+        self.cur_option_result = None;
+        if f.results.len() == 1 && f.results[0].name.is_none() {
+            let rt = self.type_text(&f.results[0].ty);
+            if rt.starts_with("option[") {
+                self.cur_option_result = Some(rt);
+            }
+        }
+
         // Hints from parameter types (dotted foreign types → Foreign).
         if let Some(recv) = &f.receiver {
             let recv_ty = self.type_text(&recv.ty);
             let star = if recv.is_pointer { "*" } else { "" };
-            let name = f.name.clone();
-            self.push_raw(&format!("func ({} {}{}) {}(", recv.name, star, recv_ty, name));
+            self.push_raw(&format!("func ({} {}{}) {}(", recv.name, star, recv_ty, go_name));
         } else {
-            let name = f.name.clone();
-            self.push_raw(&format!("func {}(", name));
+            // Generic fn: `func lru_cache_new[k comparable, v any](...)`.
+            if f.type_params.is_empty() {
+                self.push_raw(&format!("func {}(", go_name));
+            } else {
+                let params = f
+                    .type_params
+                    .iter()
+                    .map(|p| match &p.constraint {
+                        Some(c) => format!("{} {}", p.name, c),
+                        None => p.name.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.push_raw(&format!("func {}[{}]({}", go_name, params, ""));
+            }
         }
         self.emit_params(&f.params);
         self.push_raw(")");
@@ -341,9 +473,7 @@ impl Emitter {
             self.in_main_closure = true;
             self.emit_hints_from_params(&f.params);
             if let Some(body) = &f.body {
-                for s in &body.stmts {
-                    self.emit_stmt(s)?;
-                }
+                self.emit_block_body(&body.stmts)?;
             }
             self.in_main_closure = saved;
             self.indent -= 1;
@@ -375,7 +505,8 @@ impl Emitter {
         }
 
         // Plain signature rendering (non-main, or main with no results/`?`).
-        // The results clause carries its own leading space: `func f() (code int) {`.
+        // One UNNAMED result renders bare (`func f() int {`); named or
+        // multiple results parenthesize (`(code int)`, `(a int, b string)`).
         match f.results.len() {
             0 => self.push_raw(" {\n"),
             1 => {
@@ -383,7 +514,7 @@ impl Emitter {
                 let ty = self.type_text(&r.ty);
                 match &r.name {
                     Some(n) => self.push_raw(&format!(" ({} {}) {{\n", n, ty)),
-                    None => self.push_raw(&format!("({}) {{\n", ty)),
+                    None => self.push_raw(&format!(" {} {{\n", ty)),
                 }
             }
             2 => {
@@ -407,9 +538,7 @@ impl Emitter {
         self.indent += 1;
         self.emit_hints_from_params(&f.params);
         if let Some(body) = &f.body {
-            for s in &body.stmts {
-                self.emit_stmt(s)?;
-            }
+            self.emit_block_body(&body.stmts)?;
         }
         self.indent -= 1;
         self.push("}");
@@ -461,6 +590,8 @@ impl Emitter {
         for p in params {
             if self.type_is_foreign(&p.ty) {
                 self.bindings.insert(p.name.clone(), BindingKind::Foreign);
+            } else if matches!(p.ty, TypeExpr::Chan { .. }) {
+                self.bindings.insert(p.name.clone(), BindingKind::Chan);
             }
         }
     }
@@ -581,9 +712,9 @@ impl Emitter {
                 }
             }
             TypeExpr::Option { elem, .. } => {
-                // option[T] — MVP-0 renders as *T (Go-idiomatic absence);
-                // the enum/match surface revisits this with 07.
-                format!("*{}", self.type_text(elem))
+                // option[T] — the prelude struct (val + ok); `none` is the
+                // zero value, `some(v)` the constructor (see OPTION_PRELUDE).
+                format!("option[{}]", self.type_text(elem))
             }
             TypeExpr::Fn { params, results, .. } => {
                 let ps = params
@@ -641,7 +772,8 @@ impl Emitter {
                 _ => format!("*new({})", name),
             },
             TypeExpr::Slice { .. } | TypeExpr::Map { .. } | TypeExpr::Chan { .. }
-            | TypeExpr::Pointer { .. } | TypeExpr::Option { .. } => "nil".into(),
+            | TypeExpr::Pointer { .. } => "nil".into(),
+            TypeExpr::Option { .. } => format!("{}{{}}", self.type_text(t)),
             _ => format!("*new({})", self.type_text(t)),
         }
     }

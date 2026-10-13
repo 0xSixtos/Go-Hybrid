@@ -51,6 +51,8 @@ pub enum Decl {
     Const(ConstDecl),
     Struct(StructDecl),
     Enum(EnumDecl),
+    /// `type node_id = int` (example 08's arena-id discipline).
+    TypeAlias(TypeAliasDecl),
     Fn(FnDecl),
 }
 
@@ -83,6 +85,14 @@ pub struct FieldDecl {
 pub struct EnumDecl {
     pub name: String,
     pub variants: Vec<EnumVariant>,
+    pub span: Span,
+}
+
+/// `type node_id = int` — a transparent alias (Go `type X = Y`).
+#[derive(Debug, Clone)]
+pub struct TypeAliasDecl {
+    pub name: String,
+    pub ty: TypeExpr,
     pub span: Span,
 }
 

@@ -392,20 +392,19 @@ impl Parser {
         Ok(EnumDecl { name, variants, span: self.span_from(start) })
     }
 
-    /// `type X = T` — a type ALIAS. The AST has no Decl variant for it
-    /// (contract gap; see module docs): parsed as a zero-field struct so the
-    /// name still resolves as a type for the checker. The aliased type is
-    /// dropped. MUST-PARSE: spike-6 08 and examples 08 use `type node_id = int`.
+    /// `type X = T` — a transparent alias (Go `type X = Y`), representable
+    /// since the emitter batch (example 08's arena-id discipline needs the
+    /// aliased type: `node_id(len(...))` is an int conversion, not a
+    /// struct conversion). MUST-PARSE: spike-6 08 and examples 08.
     fn parse_type_alias(&mut self) -> PResult<Decl> {
         let start = self.pos;
         self.bump(); // type
         let name = self.expect_ident()?;
         self.expect_punct("=")?;
-        let _aliased = self.parse_type()?; // validated, then dropped (contract gap)
-        Ok(Decl::Struct(StructDecl {
+        let ty = self.parse_type()?;
+        Ok(Decl::TypeAlias(TypeAliasDecl {
             name,
-            type_params: Vec::new(),
-            fields: Vec::new(),
+            ty,
             span: self.span_from(start),
         }))
     }
@@ -1676,12 +1675,21 @@ impl Parser {
     /// top-level comma and followed by `(` or `{`. Single-argument
     /// instantiation (`foo[int](x)`) is deliberately NOT recognized — it
     /// would collide with indexing; nothing in the corpus spells it.
+    /// Type-args lookahead: `[` ... `]` followed by `(` or `{` is generic
+    /// args when (a) it has a comma (`lru_cache[k, v]{…}`) or (b) the single
+    /// bracket-group element is TYPE-SHAPED (idents + dots only — a literal
+    /// or operator means an index expression like `thresholds[3]`).
+    /// Ambiguity note: `m[k](x)` (index-then-call on a func-valued map) is
+    /// not in the curated surface; generics win when the content is a bare
+    /// type-shaped ident. `box[t]{v: 1}` (example 07's twin shapes) needs (b).
     fn peek_generic_args(&self) -> bool {
         if !self.at_punct("[") {
             return false;
         }
         let mut depth = 0usize;
         let mut has_comma = false;
+        let mut type_shaped = false;
+        let mut index_shaped = false;
         let mut k = self.pos;
         while k < self.toks.len() {
             match &self.toks[k].tok {
@@ -1689,14 +1697,26 @@ impl Parser {
                 Tok::Punct("]") => {
                     if depth == 1 {
                         let after = self.toks.get(k + 1).map(|t| &t.tok);
-                        return has_comma
-                            && matches!(after, Some(Tok::Punct("(")) | Some(Tok::Punct("{")));
+                        if !matches!(after, Some(Tok::Punct("(")) | Some(Tok::Punct("{"))) {
+                            return false;
+                        }
+                        return has_comma || (type_shaped && !index_shaped);
                     }
                     depth -= 1;
                 }
                 Tok::Punct(",") if depth == 1 => has_comma = true,
+                Tok::Ident(_) if depth >= 1 => type_shaped = true,
+                Tok::Punct(".") if depth >= 1 => {}
                 Tok::Eof => return false,
-                _ => {}
+                other => {
+                    // Operators, literals, keywords inside the brackets: an
+                    // index expression's shape — unless nested (type args can
+                    // nest `map[k]v` inside `[…]`).
+                    if depth == 1 {
+                        index_shaped = true;
+                        let _ = other;
+                    }
+                }
             }
             k += 1;
         }
@@ -2283,16 +2303,18 @@ mod tests {
     }
 
     #[test]
-    fn type_alias_approximation() {
-        // spike-6 08: type node_id = int — zero-field StructDecl (contract gap)
+    fn type_alias_representable() {
+        // spike-6 08: type node_id = int — a REAL alias since the emitter
+        // batch (the zero-field-struct approximation is closed; example 08
+        // needs `node_id(len(...))` to be an int conversion).
         let f = parse_src("type node_id = int\nfn main() { }");
         assert_eq!(f.decls.len(), 2);
         match &f.decls[0] {
-            Decl::Struct(StructDecl { name, fields, .. }) => {
+            Decl::TypeAlias(TypeAliasDecl { name, ty, .. }) => {
                 assert_eq!(name, "node_id");
-                assert!(fields.is_empty());
+                assert!(matches!(ty, TypeExpr::Named { name, .. } if name == "int"));
             }
-            d => panic!("type alias approx, got {:?}", d),
+            d => panic!("type alias, got {:?}", d),
         }
     }
 

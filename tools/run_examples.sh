@@ -38,7 +38,7 @@ run_example() {
     fi
 
     case "$name" in
-    01-hello|03-worker-pool|04-pipeline-backpressure)
+    01-hello|03-worker-pool|04-pipeline-backpressure|07-lru-generics|08-graph-ownership)
         if "$bin" >"$WORK/$name.out" 2>&1 && diff -u "$dir/expected.txt" "$WORK/$name.out" >"$WORK/$name.diff"; then
             note "PASS $name (stdout == expected.txt)"
             PASS="$PASS $name"
@@ -88,7 +88,7 @@ run_example() {
 }
 
 if [ $# -eq 0 ]; then
-    set -- 01-hello 02-cli-cat 03-worker-pool 04-pipeline-backpressure
+    set -- 01-hello 02-cli-cat 03-worker-pool 04-pipeline-backpressure 07-lru-generics 08-graph-ownership
 fi
 
 for name in "$@"; do

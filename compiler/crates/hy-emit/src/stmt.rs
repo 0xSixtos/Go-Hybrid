@@ -42,11 +42,7 @@ impl Emitter {
                 // The escape hatch emits a bare block. The audit marker stays
                 // greppable in the generated source.
                 self.push("{ // managed (unchecked share — audited via hyb check --report-managed)");
-                self.indent += 1;
-                for st in &body.stmts {
-                    self.emit_stmt(st)?;
-                }
-                self.indent -= 1;
+                self.emit_block_body(&body.stmts)?;
                 self.push("}");
                 Ok(())
             }
@@ -74,18 +70,11 @@ impl Emitter {
             }
             Stmt::Block { block, .. } => {
                 self.push("{");
-                self.indent += 1;
-                for st in &block.stmts {
-                    self.emit_stmt(st)?;
-                }
-                self.indent -= 1;
+                self.emit_block_body(&block.stmts)?;
                 self.push("}");
                 Ok(())
             }
-            Stmt::Match { subject, .. } => Err(EmitError::unsupported(format!(
-                "match (over `{}`) — the enum/match surface lands with the generics batch",
-                subject.render()
-            ))),
+            Stmt::Match { subject, arms, .. } => self.emit_match(subject, arms),
             Stmt::Select { arms, .. } => {
                 // Go select, 1:1 — Hybrid's arm spelling
                 // (`v, ok := <-sq:` / `<-deadline:` / `ch <- v:`) lowers to
@@ -116,11 +105,7 @@ impl Emitter {
                         }
                         SelectArmKind::Default => self.push("default:"),
                     }
-                    self.indent += 1;
-                    for st in &arm.body.stmts {
-                        self.emit_stmt(st)?;
-                    }
-                    self.indent -= 1;
+                    self.emit_block_body(&arm.body.stmts)?;
                 }
                 self.indent -= 1;
                 self.push("}");
@@ -174,6 +159,28 @@ impl Emitter {
             // immutability is a checker-level contract (D14 folded
             // `let x := e` into this shape).
             LocalKind::Define | LocalKind::Let => {}
+        }
+
+        // `x := &m[k]` / `x := &s.field` — the O8 map-slot loan. Go cannot
+        // take a map-index address; the ownership model's answer (O9: Go-heap
+        // reads are copies) lowers to copy-read now + store-back at the
+        // declaring block's end. A plain `&x` (local var address) is legal
+        // Go and stays verbatim.
+        if l.values.len() == 1 {
+            if let Expr::AddrOf { operand, .. } = &l.values[0] {
+                if matches!(operand.as_ref(), Expr::Index { .. } | Expr::Field { .. }) {
+                    let place = self.emit_expr(operand, 0)?;
+                    let names = l.names.join(", ");
+                    self.push(&format!("{} := {}", names, place));
+                    if l.names.len() == 1 {
+                        if let Some(frame) = self.loan_frames.last_mut() {
+                            frame.push((l.names[0].clone(), place));
+                        }
+                        self.bindings.insert(l.names[0].clone(), BindingKind::Plain);
+                    }
+                    return Ok(());
+                }
+            }
         }
 
         // `x := f()?` — the try desugar. Values.len() == 1, a Try node.
@@ -268,6 +275,12 @@ impl Emitter {
                     return BindingKind::Foreign;
                 }
             }
+        }
+        // make(chan …) → Chan (single-var range emits the value directly).
+        if matches!(call, Expr::Ident { name, .. } if name == "make") {
+            // args[0] is the type-as-value encoding; peek at its shape.
+            // (Verified against the parser's make encoding.)
+            return BindingKind::Chan;
         }
         BindingKind::Plain
     }
@@ -402,11 +415,7 @@ impl Emitter {
         head.push_str(" {");
         self.push_raw(&head);
         self.push_raw("\n");
-        self.indent += 1;
-        for st in &then.stmts {
-            self.emit_stmt(st)?;
-        }
-        self.indent -= 1;
+        self.emit_block_body(&then.stmts)?;
         match otherwise {
             None => self.push("}"),
             Some(Stmt::If { init, cond, then, otherwise, .. }) => {
@@ -417,18 +426,12 @@ impl Emitter {
                 // `else { … }` — emit the block's statements directly (a
                 // bare-block emit here would double the braces).
                 self.push("} else {");
-                self.indent += 1;
-                for st in &block.stmts {
-                    self.emit_stmt(st)?;
-                }
-                self.indent -= 1;
+                self.emit_block_body(&block.stmts)?;
                 self.push("}");
             }
             Some(other) => {
                 self.push("} else {");
-                self.indent += 1;
-                self.emit_stmt(other)?;
-                self.indent -= 1;
+                self.emit_block_body(std::slice::from_ref(other))?;
                 self.push("}");
             }
         }
@@ -459,6 +462,25 @@ impl Emitter {
         }
     }
 
+    /// Every block body goes through this: a loan frame is pushed, the
+    /// statements render, and the frame's store-backs flush at the block's
+    /// end (before the closing brace). This is what makes the O8 slot-loan
+    /// desugar sound: mutations through the loaned copy persist exactly for
+    /// the loan's lexical window.
+    pub fn emit_block_body(&mut self, stmts: &[Stmt]) -> Result<(), EmitError> {
+        self.loan_frames.push(Vec::new());
+        self.indent += 1;
+        for st in stmts {
+            self.emit_stmt(st)?;
+        }
+        let frame = self.loan_frames.pop().unwrap_or_default();
+        for (name, place) in frame {
+            self.push(&format!("{} = {}", place, name));
+        }
+        self.indent -= 1;
+        Ok(())
+    }
+
     fn emit_for(&mut self, kind: &ForKind, body: &Block) -> Result<(), EmitError> {
         // A labeled `break loop` / `continue loop` inside this loop (NOT
         // inside a nested loop — that one labels itself) makes this loop the
@@ -480,7 +502,22 @@ impl Emitter {
             ForKind::Iterate { vars, expr } => {
                 let e = self.emit_expr(expr, 0)?;
                 let core = match vars.len() {
-                    1 => format!("for {} := range {} {{", vars[0], e),
+                    1 => {
+                        // Hybrid's single-var iterate binds the VALUE. Go's
+                        // single-var range binds the index (slices/maps) or
+                        // the value (channels) — hence the Chan hint check.
+                        let over_chan = match expr {
+                            Expr::Ident { name, .. } => {
+                                matches!(self.bindings.get(name), Some(BindingKind::Chan))
+                            }
+                            _ => false,
+                        };
+                        if over_chan {
+                            format!("for {} := range {} {{", vars[0], e)
+                        } else {
+                            format!("for _, {} := range {} {{", vars[0], e)
+                        }
+                    }
                     2 => format!("for {}, {} := range {} {{", vars[0], vars[1], e),
                     n => {
                         return Err(EmitError::unsupported(format!(
@@ -493,11 +530,7 @@ impl Emitter {
             }
         };
         self.push(&head);
-        self.indent += 1;
-        for st in &body.stmts {
-            self.emit_stmt(st)?;
-        }
-        self.indent -= 1;
+        self.emit_block_body(&body.stmts)?;
         self.push("}");
         Ok(())
     }
@@ -555,11 +588,142 @@ impl Emitter {
             self.push(&format!("return {}, nil", vs.join(", ")));
             return Ok(());
         }
-        let vs = values
-            .iter()
-            .map(|v| self.emit_expr(v, 0))
-            .collect::<Result<Vec<_>, _>>()?;
+        // `return none` — lower against the declared option result (the
+        // prelude's zero value IS none).
+        let mut vs = Vec::new();
+        for v in values {
+            if matches!(v, Expr::Ident { name, .. } if name == "none") {
+                match &self.cur_option_result {
+                    Some(opt) => vs.push(format!("{}{{}}", opt)),
+                    None => {
+                        return Err(EmitError::unsupported(
+                            "`return none` in a function whose result is not option[T]",
+                        ));
+                    }
+                }
+            } else {
+                vs.push(self.emit_expr(v, 0)?);
+            }
+        }
         self.push(&format!("return {}", vs.join(", ")));
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Match — option-subject lowering (some(v) / none / _)
+    // -----------------------------------------------------------------------
+
+    /// `match c.get(k) { some(v): A, none: B }` lowers to
+    ///
+    /// ```go
+    /// hyMatchN := c.get(k)
+    /// if hyMatchN.ok {
+    ///     v := hyMatchN.val
+    ///     A
+    /// } else {
+    ///     B
+    /// }
+    /// ```
+    ///
+    /// General enum subjects land with the enum Go-representation decision
+    /// (SPEC D-note); this surface is exactly what example 07 needs.
+    fn emit_match(&mut self, subject: &Expr, arms: &[MatchArm]) -> Result<(), EmitError> {
+        enum ArmKind {
+            Some(String),
+            NoneArm,
+            Wildcard,
+        }
+        let mut classified: Vec<(ArmKind, &MatchArm)> = Vec::new();
+        for a in arms {
+            let kind = match &a.pattern {
+                MatchPattern::Path { segments, binding } if segments == &["some"] => {
+                    match binding {
+                        Some(v) => ArmKind::Some(v.clone()),
+                        None => {
+                            return Err(EmitError::unsupported(
+                                "`some` pattern without a binding — write `some(v):`",
+                            ));
+                        }
+                    }
+                }
+                MatchPattern::Path { segments, binding: _ } if segments == &["none"] => {
+                    ArmKind::NoneArm
+                }
+                MatchPattern::Wildcard => ArmKind::Wildcard,
+                other => {
+                    return Err(EmitError::unsupported(format!(
+                        "match pattern `{:?}` — option-subject matches (some(v)/none/_) only; \
+                         general enum matches land with the enum representation decision",
+                        other
+                    )));
+                }
+            };
+            classified.push((kind, a));
+        }
+        if let Some((ArmKind::Wildcard, _)) = classified.first() {
+            return Err(EmitError::unsupported(
+                "`_` as the FIRST match arm (MVP-0 lowers some→if, none/_→else)",
+            ));
+        }
+
+        let temp = self.next_temp("hyMatch");
+        let s = self.emit_expr(subject, 0)?;
+        self.push(&format!("{} := {}", temp, s));
+
+        let mut some_arm: Option<(&ArmKind, &MatchArm)> = None;
+        let mut else_arm: Option<&MatchArm> = None;
+        for (kind, arm) in &classified {
+            match kind {
+                ArmKind::Some(_) => some_arm = Some((kind, arm)),
+                ArmKind::NoneArm | ArmKind::Wildcard => else_arm = Some(arm),
+            }
+        }
+
+        match some_arm {
+            Some((ArmKind::Some(binding), arm)) => {
+                let head = match &arm.guard {
+                    Some(g) => {
+                        // The binding is not yet in scope for the guard —
+                        // lower the guard INSIDE the ok-branch.
+                        let _ = g;
+                        format!("if {}.ok {{", temp)
+                    }
+                    None => format!("if {}.ok {{", temp),
+                };
+                self.push(&head);
+                self.indent += 1;
+                self.push(&format!("{} := {}.val", binding, temp));
+                if let Some(g) = &arm.guard {
+                    let gt = self.emit_expr(g, 0)?;
+                    self.push(&format!("if {} {{", gt));
+                    self.indent += 1;
+                    for st in &arm.body.stmts {
+                        self.emit_stmt(st)?;
+                    }
+                    self.indent -= 1;
+                    self.push("}");
+                } else {
+                    for st in &arm.body.stmts {
+                        self.emit_stmt(st)?;
+                    }
+                }
+                self.indent -= 1;
+            }
+            _ => {
+                // No some-arm: the checker's exhaustiveness (E5001) rejects
+                // this before emission; nothing to lower.
+            }
+        }
+        match else_arm {
+            Some(arm) => {
+                self.push("} else {");
+                self.emit_block_body(&arm.body.stmts)?;
+                self.push("}");
+            }
+            None => {
+                self.push("}");
+            }
+        }
         Ok(())
     }
 }
