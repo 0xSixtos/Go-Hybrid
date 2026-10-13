@@ -59,3 +59,17 @@ Stage Summary:
 - Phase-1 exit criteria MET (programs 1, 2, 7, 8 compile + match expected)
 - Commits this session: 9b2fe31 → 97285d3 → 8639e0b → 1f8ad9e → 2bebc0c → 4000d4b → cfee21f (CI fix) → final docs commit
 - Remaining plan work: Phase 2 (Rust bridge: programs 05/09/10 + call-overhead bench) — new phase, awaits G1 human review per the gate discipline
+
+---
+Task ID: 10 (session 5 — closeout)
+Agent: lead (Super Z)
+Task: CI green, final verification
+
+Work Log:
+- CI failure #2 diagnosed (examples step: hardcoded sandbox go path) → hyb build resolves go from PATH (HYB_GO_BIN override), HYB-E9001 still enforces the pin
+- CI GREEN on 5431fd0: quick + compiler jobs (pinned toolchains, version pins, cargo test workspace, corpus 20/20, 6 examples end-to-end)
+- Final local verification: 11/11 test suites ok, examples ALL PASS, working tree clean, all work pushed
+
+Stage Summary:
+- Session 5 COMPLETE. 9 commits pushed; every batch committed immediately (no data-loss window)
+- State for the next session: G1 awaits human review (gates/G1.md); Phase 2 (Rust bridge: programs 05/09/10) is the next phase per PLAN.md
