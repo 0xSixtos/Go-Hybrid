@@ -28,6 +28,21 @@ fn go_bin() -> &'static str {
     option_env!("HYB_GO_BIN").unwrap_or("go")
 }
 
+/// The cargo binary for the bridge's hyrt build: HYB_CARGO_BIN override,
+/// else PATH, else the rustup default location (~/.cargo/bin).
+fn cargo_bin() -> String {
+    if let Ok(c) = std::env::var("HYB_CARGO_BIN") {
+        return c;
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let p = std::path::PathBuf::from(home).join(".cargo/bin/cargo");
+        if p.is_file() {
+            return p.to_string_lossy().to_string();
+        }
+    }
+    "cargo".to_string()
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -239,6 +254,9 @@ fn cmd_build(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // Which rust bindings does the emitted Go call? (M6: known crates only;
+    // the emitter errors cleanly on unknown ones, so this scan is exact.)
+    let bindings = hy_emit::used_binding_roots(&go_src);
     let go_path = format!("{}.go", out_path);
     if let Some(parent) = std::path::Path::new(&go_path).parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -253,26 +271,247 @@ fn cmd_build(args: &[String]) -> ExitCode {
     }
 
     // --- 5. go build ---
+    // With rust bindings the program is a proper MODULE (cgo broker +
+    // copied runtime packages + the hyrt staticlib): assemble the workspace,
+    // cargo-build hyrt, then `go build ./...` inside it. Plain programs keep
+    // the single-file build.
     let go_bin = go_bin();
-    let build = Command::new(go_bin)
-        .args(["build", "-o", &out_path, &go_path])
-        .env("GOFLAGS", "-p=2")
-        .output();
-    match build {
-        Ok(out) if out.status.success() => {
-            println!("built {} (go {})", out_path, PINNED_GO);
-            ExitCode::SUCCESS
+    if bindings.is_empty() {
+        let build = Command::new(go_bin)
+            .args(["build", "-o", &out_path, &go_path])
+            .env("GOFLAGS", "-p=2")
+            .output();
+        match build {
+            Ok(out) if out.status.success() => {
+                println!("built {} (go {})", out_path, PINNED_GO);
+                ExitCode::SUCCESS
+            }
+            Ok(out) => {
+                eprintln!("go build failed:");
+                eprint!("{}", String::from_utf8_lossy(&out.stderr));
+                ExitCode::FAILURE
+            }
+            Err(e) => {
+                eprintln!("error running go build: {} (looked for {})", e, go_bin);
+                ExitCode::from(2)
+            }
         }
-        Ok(out) => {
-            eprintln!("go build failed:");
-            eprint!("{}", String::from_utf8_lossy(&out.stderr));
-            ExitCode::FAILURE
-        }
-        Err(e) => {
-            eprintln!("error running go build: {} (looked for {})", e, go_bin);
-            ExitCode::from(2)
+    } else {
+        match build_with_bridge(go_bin, &out_path, &go_src, &bindings) {
+            Ok(()) => {
+                println!(
+                    "built {} (go {}, bridge: hyrt)",
+                    out_path, PINNED_GO
+                );
+                ExitCode::SUCCESS
+            }
+            Err(BuildError::Tool(msg)) => {
+                eprintln!("{}", msg);
+                ExitCode::from(2)
+            }
+            Err(BuildError::Go(stderr)) => {
+                eprintln!("go build failed:");
+                eprint!("{}", stderr);
+                ExitCode::FAILURE
+            }
         }
     }
+}
+
+enum BuildError {
+    Tool(String),
+    Go(String),
+}
+
+/// The runtime directory: HYB_RUNTIME_DIR override, else the repo-relative
+/// default (the compiler crate sits at <repo>/compiler/crates/hyb).
+fn runtime_dir() -> Result<std::path::PathBuf, BuildError> {
+    if let Ok(d) = std::env::var("HYB_RUNTIME_DIR") {
+        let p = std::path::PathBuf::from(&d);
+        if p.is_dir() {
+            return Ok(p);
+        }
+        return Err(BuildError::Tool(format!(
+            "HYB_RUNTIME_DIR={} is not a directory",
+            d
+        )));
+    }
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    // <repo>/compiler/crates/hyb → <repo>/runtime (three ups).
+    let p = std::path::Path::new(manifest)
+        .join("../../../runtime")
+        .canonicalize()
+        .map_err(|_| BuildError::Tool(
+            "runtime/ not found — set HYB_RUNTIME_DIR to the repo's runtime directory".into(),
+        ))?;
+    Ok(p)
+}
+
+/// Assemble the build workspace and build with the bridge:
+///
+/// ```text
+/// <ws>/go.mod            module hybrid.program (go 1.26)
+/// <ws>/main.go           the emitted Go
+/// <ws>/hybridge/         runtime/go/hybridge (copied verbatim)
+/// <ws>/<binding>/        runtime/go/<binding> (copied verbatim)
+/// <ws>/lib/libhyrt.a     cargo-built staticlib
+/// ```
+/// The binding's #cgo LDFLAGS point at ../lib (workspace-relative), so the
+/// layout is part of the contract. gofmt-style tabs; CGO_ENABLED=1.
+fn build_with_bridge(
+    go_bin: &str,
+    out_path: &str,
+    go_src: &str,
+    bindings: &[&str],
+) -> Result<(), BuildError> {
+    let rt = runtime_dir()?;
+    // The workspace build runs with cwd = <ws>; a RELATIVE -o would land
+    // inside the workspace and vanish with it. Anchor to the caller's cwd.
+    let out_abs = if std::path::Path::new(out_path).is_absolute() {
+        std::path::PathBuf::from(out_path)
+    } else {
+        std::env::current_dir()
+            .map_err(|e| BuildError::Tool(format!("resolving cwd: {}", e)))?
+            .join(out_path)
+    };
+    let out_path = out_abs.to_string_lossy().to_string();
+    let ws = std::env::temp_dir().join(format!(
+        "hyb-ws-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(ws.join("lib")).map_err(|e| {
+        BuildError::Tool(format!("creating workspace {}: {}", ws.display(), e))
+    })?;
+
+    let run = |mut c: Command, what: &str| -> Result<String, BuildError> {
+        let out = c.output().map_err(|e| {
+            BuildError::Tool(format!("running {}: {}", what, e))
+        })?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).to_string())
+        } else {
+            Err(BuildError::Tool(format!(
+                "{} failed:\n{}{}",
+                what,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )))
+        }
+    };
+
+    // 1. The hyrt staticlib (skip when fresh — mtime of the newest source).
+    let lib = ws.join("lib/libhyrt.a");
+    let crate_dir = rt.join("rust/hyrt");
+    let lib_fresh = std::fs::metadata(&lib).is_ok() &&
+        newest_mtime(&crate_dir).map(|src_t| {
+            std::fs::metadata(&lib)
+                .and_then(|l| l.modified())
+                .ok()
+                .map(|lib_t| lib_t >= src_t)
+                .unwrap_or(false)
+        }).unwrap_or(false);
+    if !lib_fresh {
+        let mut cargo = Command::new(cargo_bin());
+        cargo
+            .args(["build", "--release", "-j2"])
+            .current_dir(&crate_dir)
+            .env("CARGO_BUILD_JOBS", "2");
+        if let Ok(t) = std::env::var("CARGO_TARGET_DIR") {
+            cargo.env("CARGO_TARGET_DIR", t);
+        }
+        run(cargo, "cargo build (hyrt)")?;
+        // Copy the staticlib out of the cargo target dir (respect the env
+        // override; default is the crate-local target/).
+        let src_lib = match std::env::var("CARGO_TARGET_DIR") {
+            Ok(t) => std::path::PathBuf::from(t).join("release/libhyrt.a"),
+            Err(_) => crate_dir.join("target/release/libhyrt.a"),
+        };
+        std::fs::copy(&src_lib, &lib).map_err(|e| {
+            BuildError::Tool(format!(
+                "copying {} → {}: {}",
+                src_lib.display(),
+                lib.display(),
+                e
+            ))
+        })?;
+    }
+
+    // 2. Workspace assembly.
+    std::fs::write(
+        ws.join("go.mod"),
+        "module hybrid.program\n\ngo 1.26\n",
+    )
+    .map_err(|e| BuildError::Tool(format!("writing go.mod: {}", e)))?;
+    std::fs::write(ws.join("main.go"), go_src)
+        .map_err(|e| BuildError::Tool(format!("writing main.go: {}", e)))?;
+    let copy_pkg = |name: &str| -> Result<(), BuildError> {
+        let src = rt.join("go").join(name);
+        let dst = ws.join(name);
+        std::fs::create_dir_all(&dst)
+            .map_err(|e| BuildError::Tool(format!("mkdir {}: {}", dst.display(), e)))?;
+        for entry in std::fs::read_dir(&src)
+            .map_err(|e| BuildError::Tool(format!("reading {}: {}", src.display(), e)))?
+        {
+            let entry = entry.map_err(|e| BuildError::Tool(format!("readdir: {}", e)))?;
+            let p = entry.path();
+            if p.is_file() {
+                std::fs::copy(&p, dst.join(entry.file_name())).map_err(|e| {
+                    BuildError::Tool(format!("copying {}: {}", p.display(), e))
+                })?;
+            }
+        }
+        Ok(())
+    };
+    copy_pkg("hybridge")?;
+    for b in bindings {
+        copy_pkg(b)?;
+    }
+
+    // 3. go build inside the module.
+    let mut gb = Command::new(go_bin);
+    gb.args(["build", "-o", &out_path, "."])
+        .current_dir(&ws)
+        .env("GOFLAGS", "-p=2")
+        .env("CGO_ENABLED", "1");
+    let out = gb.output().map_err(|e| {
+        BuildError::Tool(format!("running go build (workspace): {}", e))
+    })?;
+    if out.status.success() {
+        let _ = std::fs::remove_dir_all(&ws);
+        Ok(())
+    } else {
+        // Keep the workspace for diagnosis; say where.
+        eprintln!("(workspace kept at {} for diagnosis)", ws.display());
+        Err(BuildError::Go(String::from_utf8_lossy(&out.stderr).to_string()))
+    }
+}
+
+fn newest_mtime(dir: &std::path::Path) -> Option<std::time::SystemTime> {
+    let mut newest = None;
+    let stack = vec![dir.to_path_buf()];
+    let mut todo = stack;
+    while let Some(d) = todo.pop() {
+        for entry in std::fs::read_dir(&d).ok()? {
+            let p = entry.ok()?.path();
+            if p.is_dir() {
+                if p.file_name().map(|n| n == "target").unwrap_or(false) {
+                    continue; // build output, not source
+                }
+                todo.push(p);
+            } else {
+                if let Ok(m) = p.metadata().and_then(|m| m.modified()) {
+                    if newest.map(|n| m > n).unwrap_or(true) {
+                        newest = Some(m);
+                    }
+                }
+            }
+        }
+    }
+    newest
 }
 
 /// Compare installed toolchains against the pins. Returns the E9001

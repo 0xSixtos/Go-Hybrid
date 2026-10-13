@@ -141,6 +141,27 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
             ],
         },
     ),
+    (
+        // 10: dt.milliseconds — hy spells Duration's methods property-style;
+        // Go requires the call parens (MethodZero).
+        "time.duration",
+        TypeShape {
+            members: &[
+                ("milliseconds", method0("Milliseconds", None)),
+                ("microseconds", method0("Microseconds", None)),
+                ("nanoseconds", method0("Nanoseconds", None)),
+                ("seconds", method0("Seconds", None)),
+                ("minutes", method0("Minutes", None)),
+                ("hours", method0("Hours", None)),
+            ],
+        },
+    ),
+    (
+        // 10: t0 from time.now() — typed so since(t0) chains cleanly; no
+        // members the pinned surface uses yet.
+        "time.time",
+        TypeShape { members: &[] },
+    ),
 ];
 
 /// Member lookup: (descriptor type, hy member name) → Member.
@@ -175,6 +196,7 @@ pub struct Conversion {
 }
 
 pub struct ParamDesc {
+    #[allow(dead_code)] // documents the surface; the emitter keys on position
     pub name: &'static str,
     pub ty_key: &'static str,
     pub go: &'static str,
@@ -200,6 +222,61 @@ pub fn lookup_conversion(ty: &str) -> Option<&'static Conversion> {
 }
 
 // ---------------------------------------------------------------------------
+// Rust crate bindings (M6): `import "rust/X"` → a generated-shape Go binding
+// package, one descriptor per pinned crate. The emitter lowers
+// `X.f(args…)` to `bindingPkg.GoName(args…)` with named args placed by the
+// descriptor's param order (Go has no named args — example 10's `seed=7`).
+// ---------------------------------------------------------------------------
+
+pub struct RustFnDesc {
+    /// hy surface name (`sha3.digest256`'s `digest256`).
+    pub hy: &'static str,
+    /// Go name in the binding package.
+    pub go: &'static str,
+    /// Param names in order — named args land here; positional args fill
+    /// free slots left-to-right.
+    pub params: &'static [&'static str],
+    /// Coerce string args to []byte at the call (`[]byte(arg)` is legal Go
+    /// even when the arg is already a byte slice — a copy, which the
+    /// copy-small/pin-large protocol allows).
+    pub bytes_coerce: bool,
+}
+
+pub struct RustCrateDesc {
+    /// hy package root (`sha3` in `import "rust/sha3"`).
+    pub hy: &'static str,
+    /// The binding Go package's ROOT (import path via import_path_of).
+    pub binding_root: &'static str,
+    pub fns: &'static [RustFnDesc],
+}
+
+pub static RUST_CRATES: &[RustCrateDesc] = &[
+    // Pinned by example 10; the binding lives in runtime/go/sha3binding.
+    RustCrateDesc {
+        hy: "sha3",
+        binding_root: "sha3binding",
+        fns: &[
+            RustFnDesc {
+                hy: "digest256",
+                go: "Digest256",
+                params: &["data"],
+                bytes_coerce: true,
+            },
+            RustFnDesc {
+                hy: "stream_checksum",
+                go: "StreamChecksum",
+                params: &["iters", "seed"],
+                bytes_coerce: false,
+            },
+        ],
+    },
+];
+
+pub fn lookup_rust_crate(root: &str) -> Option<&'static RustCrateDesc> {
+    RUST_CRATES.iter().find(|c| c.hy == root)
+}
+
+// ---------------------------------------------------------------------------
 // Import-path mapping (SPEC M5's curated allowlist, mechanical part).
 // ---------------------------------------------------------------------------
 
@@ -207,10 +284,16 @@ pub fn lookup_conversion(ty: &str) -> Option<&'static Conversion> {
 /// The emitted CODE always refers to the root spelling (`http.HandlerFunc`)
 /// — Go's package name for `net/http` IS `http`, so the code is unchanged;
 /// only the import line's path differs.
+///
+/// `hyb build` assembles every program as module `hybrid.program` with the
+/// runtime packages copied inside — the binding imports are
+/// `hybrid.program/<binding_root>`.
 pub fn import_path_of(root: &str) -> String {
     match root {
         "http" => "net/http".to_string(),
         "httptest" => "net/http/httptest".to_string(),
+        "hex" => "encoding/hex".to_string(),
+        "sha3binding" => "hybrid.program/sha3binding".to_string(),
         other => other.to_string(),
     }
 }

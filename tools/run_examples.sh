@@ -48,6 +48,23 @@ run_example() {
             FAIL=1
         fi
         ;;
+    10-rust-crate-import)
+        # The bridge program: lines 1–3 are exact (digest prefixes verified
+        # against an independent sha3 implementation); line 4's TIMING is a
+        # budget, not a fixed number (example comment) — the runner masks
+        # the milliseconds field before diffing. The checksum IS exact
+        # (deterministic per pinned crate version + fold algorithm).
+        "$bin" >"$WORK/$name.out" 2>&1
+        sed -E 's/^1M hashes in [0-9]+ms,/1M hashes in 0ms,/' "$WORK/$name.out" >"$WORK/$name.masked"
+        if diff -u "$dir/expected.txt" "$WORK/$name.masked" >"$WORK/$name.diff"; then
+            note "PASS $name (digests exact; timing masked; checksum exact)"
+            PASS="$PASS $name"
+        else
+            note "FAIL $name (output diff)"
+            sed 's/^/    /' "$WORK/$name.diff"
+            FAIL=1
+        fi
+        ;;
     02-cli-cat)
         # E6 exit contract needs <prog> = basename(argv[0]) — build as `cat`.
         local catbin="$WORK/catbin/cat"
@@ -88,7 +105,7 @@ run_example() {
 }
 
 if [ $# -eq 0 ]; then
-    set -- 01-hello 02-cli-cat 03-worker-pool 04-pipeline-backpressure 06-http-server 07-lru-generics 08-graph-ownership
+    set -- 01-hello 02-cli-cat 03-worker-pool 04-pipeline-backpressure 06-http-server 07-lru-generics 08-graph-ownership 10-rust-crate-import
 fi
 
 for name in "$@"; do

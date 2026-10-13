@@ -386,6 +386,15 @@ impl Emitter {
                     if pkg == "io" && name == "read_all" {
                         return BindingKind::Bytes;
                     }
+                    // time.since/now return a KNOWN type — duration members
+                    // resolve property-style through the shape table (10:
+                    // `dt.milliseconds` → `dt.Milliseconds()`).
+                    if pkg == "time" && name == "since" {
+                        return BindingKind::ForeignTy("time.duration");
+                    }
+                    if pkg == "time" && name == "now" {
+                        return BindingKind::ForeignTy("time.time");
+                    }
                     return BindingKind::Foreign;
                 }
             }

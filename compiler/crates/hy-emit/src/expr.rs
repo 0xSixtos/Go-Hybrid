@@ -12,7 +12,7 @@ use hy_syntax::*;
 
 use super::{go_quote, is_package_root, special_member, to_go_name, BindingKind, Emitter, EmitError, MemberSpecial};
 
-use super::shapes::{lookup_conversion, lookup_member, MemberKind};
+use super::shapes::{lookup_conversion, lookup_member, lookup_rust_crate, RustCrateDesc, MemberKind};
 
 /// Operator precedence (Go tiers; higher binds tighter).
 fn bin_prec(op: BinOp) -> u8 {
@@ -549,12 +549,114 @@ impl Emitter {
         Ok(format!("make({})", parts.join(", ")))
     }
 
+    /// The rust-crate call lowering (M6): `sha3.digest256(w)` →
+    /// `sha3binding.Digest256([]byte(w))`; `sha3.stream_checksum(n, seed=7)`
+    /// → `sha3binding.StreamChecksum(n, 7)` (named args place by the
+    /// descriptor's param order — Go has no named args). Unknown fn or an
+    /// unknown arg name is a CLEAN error naming the descriptor surface.
+    fn emit_rust_call(
+        &mut self,
+        crate_desc: &'static RustCrateDesc,
+        name: &str,
+        args: &[CallArg],
+    ) -> Result<String, EmitError> {
+        let Some(f) = crate_desc.fns.iter().find(|f| f.hy == name) else {
+            return Err(EmitError::unsupported(format!(
+                "rust/{}: `{}` is not in the pinned binding surface (available: {})",
+                crate_desc.hy,
+                name,
+                crate_desc
+                    .fns
+                    .iter()
+                    .map(|f| f.hy)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        };
+        self.use_package(crate_desc.binding_root);
+        // Slot the arguments: named → by descriptor position; positional →
+        // first free slot left-to-right.
+        let mut slots: Vec<Option<String>> = vec![None; f.params.len()];
+        let mut next_free = 0usize;
+        for a in args {
+            let text = if f.bytes_coerce {
+                format!("[]byte({})", self.emit_expr(&a.value, 0)?)
+            } else {
+                self.emit_expr(&a.value, 0)?
+            };
+            match &a.name {
+                Some(n) => {
+                    let i = f
+                        .params
+                        .iter()
+                        .position(|p| *p == n.as_str())
+                        .ok_or_else(|| {
+                            EmitError::unsupported(format!(
+                                "rust/{}.{}: no parameter named `{}` (params: {})",
+                                crate_desc.hy,
+                                name,
+                                n,
+                                f.params.join(", ")
+                            ))
+                        })?;
+                    if slots[i].is_some() {
+                        return Err(EmitError::unsupported(format!(
+                            "rust/{}.{}: parameter `{}` bound twice",
+                            crate_desc.hy, name, n
+                        )));
+                    }
+                    slots[i] = Some(text);
+                }
+                None => {
+                    while next_free < slots.len() && slots[next_free].is_some() {
+                        next_free += 1;
+                    }
+                    if next_free >= slots.len() {
+                        return Err(EmitError::unsupported(format!(
+                            "rust/{}.{}: too many arguments (descriptor has {})",
+                            crate_desc.hy,
+                            name,
+                            f.params.len()
+                        )));
+                    }
+                    slots[next_free] = Some(text);
+                    next_free += 1;
+                }
+            }
+        }
+        if slots.iter().any(|s| s.is_none()) {
+            return Err(EmitError::unsupported(format!(
+                "rust/{}.{}: missing arguments (params: {})",
+                crate_desc.hy,
+                name,
+                f.params.join(", ")
+            )));
+        }
+        Ok(format!(
+            "{}.{}({})",
+            crate_desc.binding_root,
+            f.go,
+            slots
+                .into_iter()
+                .map(|s| s.unwrap())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    }
+
     fn emit_pkg_call(
         &mut self,
         pkg: &str,
         name: &str,
         args: &[CallArg],
     ) -> Result<String, EmitError> {
+        // --- rust crate bindings (M6, Phase 2): `sha3.digest256(w)` →
+        //     `sha3binding.Digest256([]byte(w))`. The binding descriptor
+        //     owns param order (named args place by name — Go has none). ---
+        if let Some(crate_desc) = lookup_rust_crate(pkg) {
+            return self.emit_rust_call(crate_desc, name, args);
+        }
+
         self.use_package(pkg);
 
         // --- conversion targets (Batch E): `http.handler(fn(w, r) { … })`
@@ -604,6 +706,13 @@ impl Emitter {
                             pkg, name
                         )))
                     }
+                }
+                MemberSpecial::Renamed(go_name) => {
+                    let mut parts = Vec::new();
+                    for a in args {
+                        parts.push(self.emit_call_arg(a)?);
+                    }
+                    Ok(format!("{}.{}({})", pkg, go_name, parts.join(", ")))
                 }
                 MemberSpecial::StderrCall(go_name) => {
                     self.use_package("os");

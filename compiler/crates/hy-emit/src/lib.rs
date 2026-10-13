@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use hy_syntax::*;
 
 mod shapes;
-use shapes::{import_path_of, lookup_conversion, lookup_member, Conversion, MemberKind};
+use shapes::{import_path_of, lookup_conversion, lookup_rust_crate, Conversion};
 
 // ---------------------------------------------------------------------------
 // Hybrid prelude (auto-generated Go, emitted only when the program uses it)
@@ -113,6 +113,18 @@ pub fn emit_go(file: &File) -> Result<String, EmitError> {
     em.emit_file(file)
 }
 
+/// Which rust-binding packages does the emitted Go call? (`hyb build`
+/// assembles those into the build workspace.) Scans for the binding roots'
+/// call prefix — the emitter only emits `<root>.` for KNOWN crates, so the
+/// scan is exact, never heuristic.
+pub fn used_binding_roots(go_src: &str) -> Vec<&'static str> {
+    shapes::RUST_CRATES
+        .iter()
+        .filter(|c| go_src.contains(&format!("{}.", c.binding_root)))
+        .map(|c| c.binding_root)
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Binding hints (the tiny type table the MVP-0 surface needs)
 // ---------------------------------------------------------------------------
@@ -177,7 +189,7 @@ pub(crate) fn is_package_root(name: &str) -> bool {
         name,
         "fmt" | "os" | "io" | "time" | "sort" | "strings" | "strconv"
             | "errors" | "sync" | "bufio" | "http" | "httptest" | "json"
-            | "atomic" | "filepath" | "path"
+            | "atomic" | "filepath" | "path" | "hex" | "sha3"
     )
 }
 
@@ -199,6 +211,8 @@ pub(crate) fn special_member(pkg: &str, name: &str) -> Option<MemberSpecial> {
         ("time", "seconds") => Some(MemberSpecial::Duration("Second")),
         ("time", "minutes") => Some(MemberSpecial::Duration("Minute")),
         ("time", "hours") => Some(MemberSpecial::Duration("Hour")),
+        // hex.encode → Go's EncodeToString (example 10; M5 allowlist growth).
+        ("hex", "encode") => Some(MemberSpecial::Renamed("EncodeToString")),
         _ => None,
     }
 }
@@ -210,6 +224,8 @@ pub(crate) enum MemberSpecial {
     StderrCall(&'static str),
     /// `time.milliseconds(n)` → `time.Duration(n) * time.Millisecond`.
     Duration(&'static str),
+    /// A member Go spells differently: `hex.encode(b)` → `hex.EncodeToString(b)`.
+    Renamed(&'static str),
 }
 
 // ---------------------------------------------------------------------------
@@ -326,10 +342,16 @@ impl Emitter {
                     // Phase-2 bridge and get a clean error, never a wrong
                     // emission.
                     if let Some(crate_name) = path.strip_prefix("rust/") {
-                        return Err(EmitError::unsupported(format!(
-                            "rust crate import `{}` needs the boundary bridge (post-MVP-0)",
-                            crate_name
-                        )));
+                        // Known pinned crates (M6): the binding packages are
+                        // assembled into the build workspace by `hyb build`;
+                        // imports register at call sites (use_package).
+                        if lookup_rust_crate(crate_name).is_none() {
+                            return Err(EmitError::unsupported(format!(
+                                "rust crate import `{}` is not in the pinned binding set",
+                                crate_name
+                            )));
+                        }
+                        continue;
                     }
                     // A dotted Go path maps to its ROOT for the usage-driven
                     // import set ("net/http" → root "http"; the body says

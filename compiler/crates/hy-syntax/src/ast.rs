@@ -474,6 +474,12 @@ impl UnOp {
 
 #[derive(Debug, Clone)]
 pub struct CallArg {
+    /// `seed=7` — a NAMED argument (example 10's surface). Go has no named
+    /// args: the emitter places named args by the binding descriptor's
+    /// param order (rust-call surface only; positional stays positional).
+    /// Contract extension (lead-owned, logged per interfaces/ discipline):
+    /// the parser previously DROPPED the name.
+    pub name: Option<String>,
     pub value: Expr,
     /// `words[a:b]...` — variadic spread.
     pub spread: bool,

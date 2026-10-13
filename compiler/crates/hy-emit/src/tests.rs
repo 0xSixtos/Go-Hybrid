@@ -424,7 +424,13 @@ fn main_with_try_but_no_results_gets_wrapper() {
 #[test]
 fn rust_crate_import_errors_cleanly() {
     let msg = emit_err("import \"rust/serde_json\" fn main() { }");
-    assert!(msg.contains("bridge"), "points at the Phase-2 bridge: {}", msg);
+    // serde_json joins the pinned set with the Batch G binding; an UNKNOWN
+    // crate must still name the binding set, never silently emit.
+    assert!(
+        msg.contains("not in the pinned binding set") || msg.contains("bridge"),
+        "points at the bridge discipline: {}",
+        msg
+    );
 }
 
 #[test]
@@ -725,4 +731,76 @@ fn shape_e6_wrapper_terminal_return_after_range_for() {
         "terminal return before the wrapper close:\n{}",
         go
     );
+}
+
+// ---------------------------------------------------------------------------
+// Batch F — the rust-crate bridge surface (example 10)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rust_call_lowers_to_binding_with_bytes_coerce() {
+    let go = emit(
+        "import \"rust/sha3\"\n\nfn main() {\n    digest := sha3.digest256(\"hybrid\")?\n    fmt.println(digest)\n}\n",
+    );
+    assert!(
+        go.contains("sha3binding.Digest256([]byte(\"hybrid\"))"),
+        "bytes coercion at the binding call:\n{}",
+        go
+    );
+    assert!(go.contains("\"hybrid.program/sha3binding\""), ":\n{}", go);
+    assert!(!go.contains("\"rust/sha3\""), "rust import must not leak:\n{}", go);
+}
+
+#[test]
+fn rust_named_arg_places_by_descriptor_order() {
+    // `stream_checksum(1_000_000, seed=7)` — Go has no named args; the
+    // descriptor's param order (iters, seed) places them positionally.
+    let go = emit(
+        "import \"rust/sha3\"\n\nfn main() {\n    c := sha3.stream_checksum(1000000, seed=7)?\n    fmt.println(c)\n}\n",
+    );
+    assert!(
+        go.contains("sha3binding.StreamChecksum(1000000, 7)"),
+        ":\n{}",
+        go
+    );
+}
+
+#[test]
+fn rust_unknown_fn_is_clean_error() {
+    let msg = emit_err("import \"rust/sha3\"\n\nfn main() {\n    x := sha3.nope(1)?\n}\n");
+    assert!(msg.contains("not in the pinned binding surface"), ":\n{}", msg);
+}
+
+#[test]
+fn rust_unknown_arg_name_is_clean_error() {
+    let msg = emit_err(
+        "import \"rust/sha3\"\n\nfn main() {\n    c := sha3.stream_checksum(1, seedx=7)?\n}\n",
+    );
+    assert!(msg.contains("no parameter named `seedx`"), ":\n{}", msg);
+}
+
+#[test]
+fn hex_encode_maps_to_encode_to_string() {
+    let go = emit(
+        "fn f(d []byte) {\n    fmt.println(hex.encode(d[..8]))\n}\n",
+    );
+    assert!(go.contains("hex.EncodeToString(d[:8])"), ":\n{}", go);
+    assert!(go.contains("\"encoding/hex\""), ":\n{}", go);
+}
+
+#[test]
+fn duration_members_resolve_property_style() {
+    // dt := time.since(t0) — dt is a KNOWN duration: `.milliseconds` is a
+    // zero-arg METHOD in Go (MethodZero), not a field.
+    let go = emit(
+        "fn f() {\n    t0 := time.now()\n    dt := time.since(t0)\n    fmt.println(\"{dt.milliseconds}ms\")\n}\n",
+    );
+    assert!(go.contains("dt.Milliseconds()"), ":\n{}", go);
+    assert!(!go.contains("dt.Milliseconds\n"), "field spelling leaked:\n{}", go);
+}
+
+#[test]
+fn rust_crate_import_decl_registers_nothing_unknown_errors() {
+    let msg = emit_err("import \"rust/notpinned\"\n\nfn f() { }\n");
+    assert!(msg.contains("not in the pinned binding set"), ":\n{}", msg);
 }

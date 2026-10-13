@@ -804,7 +804,7 @@ impl Parser {
                             name: "panic".to_string(),
                             span: self.span_from(start),
                         }),
-                        args: vec![CallArg { value, spread: false, span: vspan }],
+                        args: vec![CallArg { name: None, value, spread: false, span: vspan }],
                         span,
                     },
                     span,
@@ -1741,20 +1741,26 @@ impl Parser {
         let mut args = Vec::new();
         while !self.at_punct(")") && !self.at_eof() {
             let astart = self.pos;
-            // named argument `name = expr` (spike-6 10: `seed=7`). CallArg has
-            // no name field (contract gap): the name is DROPPED here.
-            let value = if matches!(self.cur(), Tok::Ident(_))
+            // named argument `name = expr` (example 10: `seed=7`). The name
+            // rides on CallArg (contract extension, logged) — Go has no
+            // named args, so the emitter places it by descriptor order.
+            let name = if matches!(self.cur(), Tok::Ident(_))
                 && matches!(self.nth(1), Tok::Punct("="))
             {
+                let n = match self.cur() {
+                    Tok::Ident(s) => s.clone(),
+                    _ => unreachable!(),
+                };
                 self.bump();
                 self.bump();
-                self.parse_expr(true)?
+                Some(n)
             } else {
-                self.parse_expr(true)?
+                None
             };
+            let value = self.parse_expr(true)?;
             let spread = self.eat_punct("...");
             let span = self.span_from(astart);
-            args.push(CallArg { value, spread, span });
+            args.push(CallArg { name, value, spread, span });
             if !self.at_punct(",") && !self.at_punct(")") {
                 return self.err("expected ',' or ')' in argument list");
             }
