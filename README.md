@@ -118,20 +118,27 @@ unsafe boundaries hand-audited and two build systems hand-run. Hybrid's bet is
 
 ## Get it
 
-Research-phase repo; the MVP-0 walking skeleton **has landed** — six of the ten
-target programs build and run end-to-end through the Tier-0-checked pipeline
-(parse → ownership check → emit Go → `go build`). From source:
+Research-phase repo; the MVP has landed — **all ten target programs build and
+run end-to-end byte-exact** through the Tier-0-checked pipeline (parse →
+ownership check → emit Go → `go build`), including the Rust-crate boundary
+(05/10: sha3 + serde_json through the live bridge), Go-consumable package
+emission (09: a plain `go run` imports a Hybrid-compiled package with no
+Hybrid toolchain), and net/http (06). From source:
 
 ```bash
 git clone https://github.com/limitlessprojects/Go-Hybrid.git && cd Go-Hybrid
 # toolchain pins: Go 1.26.9, Rust 1.99.0 (tools/env.sh)
-make examples   # builds + runs examples 01/02/03/04/07/08, diffs vs expected.txt
-make test-quick # 157 compiler tests + checker-corpus verdict agreement (20/20)
+make examples    # all ten target programs, byte-exact vs expected.txt
+make test-quick  # 194 compiler tests + checker corpus (20/20) + differential loop (9/9 + 11/11)
+make differential # accepted corpus programs must build+run; rejected must be rejected
+make bench       # G2 call-overhead bench on the LIVE bridge (fast path 3.37 ns ≤ 5 ns)
+hyb build <file.hy> -o <bin>              # one command; enforces the pins (HYB-E9001)
+hyb build --package <name> --out-dir <dir> --binding-prefix <path>  # Go-importable package
 ```
 
-`hyb build <file.hy> -o <bin>` compiles one program (enforces the toolchain
-pins: HYB-E9001 on drift). Programs 05/10 (Rust-crate boundary) and 09
-(Go-consumable packages) land with Phase 2.
+Review gates: G0 passed, G1 ratified, G2 passed (`gates/G2.md`), G3
+(MVP-exit sweep) evidence-complete and awaiting human review
+(`gates/G3.md`).
 
 
 ## Learn more
