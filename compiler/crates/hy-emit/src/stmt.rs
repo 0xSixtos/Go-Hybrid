@@ -13,8 +13,18 @@ impl Emitter {
             Stmt::Local(l) => self.emit_local(l),
             Stmt::Assign { targets, op, values, .. } => self.emit_assign(targets, *op, values),
             Stmt::Expr { expr, .. } => {
+                // A zero-result call with `?` IS its own statement (Batch I):
+                // the hoist emits the call + propagation — no value temp, so
+                // there is nothing left to emit afterwards.
+                let zero_try = matches!(
+                    expr,
+                    Expr::Try { operand, .. } if self.call_results(operand) == Some((0, true))
+                );
                 // E3 expression form: hoist nested `?` first (Batch G).
                 self.hoist_tries_expr(expr)?;
+                if zero_try {
+                    return Ok(());
+                }
                 let text = self.emit_expr(expr, 0)?;
                 self.push(&text);
                 Ok(())
@@ -143,6 +153,18 @@ impl Emitter {
                         ));
                     }
                 }
+                // Typed var decls carry receiver knowledge (Batch I):
+                // `var hits atomic.int64` → shape-known, not a pointer.
+                if let Some(t) = &l.ty {
+                    if let Some(kind) = self.binding_kind_of_ty(t) {
+                        for n in &l.names {
+                            self.bindings.insert(n.clone(), kind);
+                        }
+                    }
+                    if l.names.len() == 1 {
+                        self.register_var_ty(&l.names[0], t);
+                    }
+                }
                 self.hint_from_values(&l.names, &l.values);
                 return Ok(());
             }
@@ -214,6 +236,14 @@ impl Emitter {
                 ));
             }
             (None, _) => self.push(&format!("{} := {}", names, values.join(", "))),
+        }
+        // A struct-literal define carries the receiver's struct name
+        // (Batch I): `stats := pool_stats{}` — field chains type through
+        // struct_fields (18's `stats.mu.lock()`).
+        if l.names.len() == 1 {
+            if let Some(Expr::StructLit { ty: Some(t), .. }) = l.values.first() {
+                self.register_var_ty(&l.names[0], t);
+            }
         }
         self.hint_from_values(&l.names, &l.values);
         Ok(())
@@ -309,8 +339,25 @@ impl Emitter {
 
     /// One hoisted `t, hyErrN := <call>` + propagation; the temp registers
     /// under the Try's span start so emit_expr's Try branch substitutes it.
+    /// The call's RESULT SHAPE (Batch I) decides the form: a 0-result call
+    /// (`doc.set(k, v)?` — Set returns only error) emits `hyErrN := call`
+    /// with no value temp; the Try substitutes to nothing (the statement
+    /// caller skips its re-emit).
     fn hoist_one_try(&mut self, operand: &Expr, key: (u32, u32)) -> Result<(), EmitError> {
+        let shape = self.call_results(operand);
         let call_text = self.emit_expr(operand, 0)?;
+        if shape == Some((0, true)) {
+            let errt = self.next_temp("hyErr");
+            self.push(&format!("{} := {}", errt, call_text));
+            self.push(&format!("if {} != nil {{", errt));
+            self.indent += 1;
+            self.propagate_error(&errt)?;
+            self.indent -= 1;
+            self.push("}");
+            // Empty-string sentinel: the Try branch substitutes to nothing.
+            self.try_temps.insert(key, String::new());
+            return Ok(());
+        }
         let temp = self.next_temp("hyT");
         let errt = self.next_temp("hyErr");
         self.push(&format!("{}, {} := {}", temp, errt, call_text));
@@ -331,6 +378,57 @@ impl Emitter {
         }
         self.try_temps.insert(key, temp);
         Ok(())
+    }
+
+    /// The result shape of a call expression: (n_results, has_error).
+    /// Known from four sources (Batch I): rust-crate descriptors, typed
+    /// binding methods, user-fn declarations, and the default rust-call
+    /// convention (1, true). None = unknown → callers keep today's shape.
+    fn call_results(&self, e: &Expr) -> Option<(usize, bool)> {
+        let callee = match e {
+            Expr::Try { operand, .. } => match operand.as_ref() {
+                Expr::Call { callee, .. } => callee.as_ref(),
+                _ => return None,
+            },
+            Expr::Call { callee, .. } => callee.as_ref(),
+            _ => return None,
+        };
+        match callee {
+            // rust-crate calls: the descriptor's results field.
+            Expr::Field { base, name, .. }
+                if matches!(base.as_ref(), Expr::Ident { .. }) =>
+            {
+                if let Expr::Ident { name: pkg, .. } = base.as_ref() {
+                    if is_package_root(pkg) {
+                        if let Some(desc) = super::shapes::lookup_rust_crate(pkg) {
+                            return desc
+                                .fns
+                                .iter()
+                                .find(|f| f.hy == name.as_str())
+                                .map(|f| (f.results.0 as usize, f.results.1));
+                        }
+                        return None;
+                    }
+                }
+                // Typed binding methods: the METHOD_RESULTS table.
+                if let Some(bt) = self.type_of_expr(base) {
+                    if let Some(m) = super::shapes::lookup_member(bt, name) {
+                        if m.kind == super::shapes::MemberKind::Method {
+                            let (n, e) = super::shapes::lookup_method_results(bt, name)
+                                .unwrap_or((1, true));
+                            return Some((n as usize, e));
+                        }
+                    }
+                }
+                None
+            }
+            // User fns: the eagerly collected declared shape.
+            Expr::Ident { name, .. } => self
+                .fn_shapes
+                .get(name.as_str())
+                .map(|(n, err, _, _)| (*n, *err)),
+            _ => None,
+        }
     }
 
     /// The `?` propagation tail, shared by every E3 shape (binding-position,
@@ -403,16 +501,11 @@ impl Emitter {
             return Ok(());
         }
 
-        let err_name = if self.in_main_closure {
-            "hyErr".to_string()
-        } else if self.cur_fn_error_returns.is_some() {
-            // Error-result fn: propagate_error fills the return.
-            String::new()
-        } else {
+        if !self.in_main_closure && self.cur_fn_error_returns.is_none() {
             return Err(EmitError::unsupported(
                 "`?` outside main (functions-with-error-results land after the walking skeleton)",
             ));
-        };
+        }
         let temp = self.next_temp("hyErr");
         let call_text = self.emit_expr(call, 0)?;
         let mut names = l.names.clone();
@@ -420,9 +513,6 @@ impl Emitter {
         self.push(&format!("{} := {}", names.join(", "), call_text));
         self.push(&format!("if {} != nil {{", temp));
         self.indent += 1;
-        if self.in_main_closure {
-            self.push(&format!("{} = {}", err_name, temp));
-        }
         self.propagate_error(&temp)?;
         self.indent -= 1;
         self.push("}");
@@ -532,6 +622,15 @@ impl Emitter {
                     }
                     return BindingKind::Foreign;
                 }
+            }
+        }
+        // A user fn whose declared result type is a known handle type: the
+        // binding resolves through the shape table (Batch I, corpus 13:
+        // `s := summary(doc)?` — s.set normalizes like any rust-call
+        // result).
+        if let Expr::Ident { name, .. } = call {
+            if let Some((_, _, Some(kind), _)) = self.fn_shapes.get(name.as_str()) {
+                return *kind;
             }
         }
         // make(chan …) → Chan (single-var range emits the value directly).
@@ -768,9 +867,17 @@ impl Emitter {
                 let lo_t = self.emit_expr(lo, 0)?;
                 let hi_t = self.emit_expr(hi, 0)?;
                 let op = if *inclusive { "<=" } else { "<" };
+                // `for _ in a..b` (differential corpus 16/17/18): Go has no
+                // blank := variable — a fresh temp carries the count. The
+                // semantics are identical: the variable is never read.
+                let v = if var == "_" {
+                    self.next_temp("hyBlank")
+                } else {
+                    var.clone()
+                };
                 format!(
                     "{}for {} := {}; {} {} {}; {}++ {{",
-                    label_prefix, var, lo_t, var, op, hi_t, var
+                    label_prefix, v, lo_t, v, op, hi_t, v
                 )
             }
             ForKind::Iterate { vars, expr } => {
@@ -780,35 +887,44 @@ impl Emitter {
                 let e = self.emit_expr(expr, 0)?;
                 let core = match vars.len() {
                     1 => {
-                        // Hybrid's single-var iterate binds the VALUE. Go's
-                        // single-var range binds the index (slices/maps) or
-                        // the value (channels) — hence the Chan hint check.
-                        let over_chan = match expr {
-                            Expr::Ident { name, .. } => {
-                                matches!(self.bindings.get(name), Some(BindingKind::Chan))
-                            }
-                            _ => false,
-                        };
-                        if over_chan {
-                            format!("for {} := range {} {{", vars[0], e)
+                        // `for _ in ch` drains without binding (corpus 17);
+                        // `for range e` is Go's blank form for every
+                        // iterable. No variable to register.
+                        if vars[0] == "_" {
+                            format!("for range {} {{", e)
                         } else {
-                            // A rust-handle slice (ForeignTy binding) ranges
-                            // value-elements of that handle type (05: u is
-                            // a serde_json.value). The range may be a named
-                            // slice OR a hoisted try temp (e IS the temp).
-                            let range_name = match expr {
-                                Expr::Ident { name, .. } => Some(name.clone()),
-                                Expr::Try { .. } => Some(e.clone()),
-                                _ => None,
-                            };
-                            if let Some(n) = range_name {
-                                if let Some(BindingKind::ForeignTy(t)) = self.bindings.get(&n) {
-                                    let t = *t;
-                                    self.bindings
-                                        .insert(vars[0].clone(), BindingKind::ForeignTy(t));
+                            // Hybrid's single-var iterate binds the VALUE.
+                            // Go's single-var range binds the index (slices/
+                            // maps) or the value (channels) — hence the Chan
+                            // hint check.
+                            let over_chan = match expr {
+                                Expr::Ident { name, .. } => {
+                                    matches!(self.bindings.get(name), Some(BindingKind::Chan))
                                 }
+                                _ => false,
+                            };
+                            if over_chan {
+                                format!("for {} := range {} {{", vars[0], e)
+                            } else {
+                                // A rust-handle slice (ForeignTy binding)
+                                // ranges value-elements of that handle type
+                                // (05: u is a serde_json.value). The range may
+                                // be a named slice OR a hoisted try temp (E IS
+                                // the temp).
+                                let range_name = match expr {
+                                    Expr::Ident { name, .. } => Some(name.clone()),
+                                    Expr::Try { .. } => Some(e.clone()),
+                                    _ => None,
+                                };
+                                if let Some(n) = range_name {
+                                    if let Some(BindingKind::ForeignTy(t)) = self.bindings.get(&n) {
+                                        let t = *t;
+                                        self.bindings
+                                            .insert(vars[0].clone(), BindingKind::ForeignTy(t));
+                                    }
+                                }
+                                format!("for _, {} := range {} {{", vars[0], e)
                             }
-                            format!("for _, {} := range {} {{", vars[0], e)
                         }
                     }
                     2 => format!("for {}, {} := range {} {{", vars[0], vars[1], e),
@@ -922,6 +1038,18 @@ impl Emitter {
                 }
             } else {
                 vs.push(self.emit_expr(v, 0)?);
+            }
+        }
+        // A short return in an error-result fn fills the remaining slots
+        // with their zero texts (13: `return v` in a (value, error) fn →
+        // `return v, nil`) — Go demands the full arity. An EMPTY slot is
+        // the error result (propagate_error fills it at propagation time);
+        // a short explicit return means nil.
+        if let Some(zeros) = &self.cur_fn_error_returns {
+            while vs.len() < zeros.len() {
+                let i = vs.len();
+                let z = &zeros[i];
+                vs.push(if z.is_empty() { "nil".to_string() } else { z.clone() });
             }
         }
         self.push(&format!("return {}", vs.join(", ")));

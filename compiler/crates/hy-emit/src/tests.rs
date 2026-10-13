@@ -893,3 +893,129 @@ fn package_mode_private_fns_stay_snake_case() {
     let go = super::emit_go_package(&file, "hybrid", "x").expect("emit");
     assert!(go.contains("func helper(n int) int {"), ":\n{}", go);
 }
+
+// ---------------------------------------------------------------------------
+// Batch I — the differential corpus loop's fixes (each pinned by an
+// accepted checker-corpus program that previously could not execute)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn diff_blank_range_for_uses_fresh_temp() {
+    // corpus 16/17/18: `for _ in 0..n` — Go has no blank := variable; the
+    // old emission `for _ := 0; _ < n; _++` was invalid Go.
+    let go = emit("fn main() {\n    n := 3\n    for _ in 0..n {\n        fmt.println(\"x\")\n    }\n}");
+    assert!(
+        go.contains("for hyBlank0 := 0; hyBlank0 < n; hyBlank0++ {"),
+        "fresh temp carries the count:\n{}",
+        go
+    );
+    assert!(!go.contains("for _ :="), "blank := leaked:\n{}", go);
+}
+
+#[test]
+fn diff_blank_iterate_emits_for_range() {
+    // corpus 17: `for _ in 0..n_probes { s := <-samples }` — the drain form.
+    let go = emit("fn main() {\n    done := make(chan bool, 2)\n    for _ in done {\n    }\n}");
+    assert!(go.contains("for range done {"), ":\n{}", go);
+}
+
+#[test]
+fn diff_mutex_methods_normalize_via_struct_field() {
+    // corpus 18: `stats.mu.lock()` — receiver typing through var_struct +
+    // struct_fields; the shape table carries sync.mutex's exact Go names.
+    let go = emit(
+        "struct pool_stats {\n    mu sync.mutex\n}\n\nfn main() {\n    stats := pool_stats{}\n    stats.mu.lock()\n    stats.mu.unlock()\n}",
+    );
+    assert!(go.contains("stats.mu.Lock()"), ":\n{}", go);
+    assert!(go.contains("stats.mu.Unlock()"), ":\n{}", go);
+    assert!(!go.contains(".lock()"), "lowercase leaked:\n{}", go);
+}
+
+#[test]
+fn diff_atomic_int64_methods() {
+    // corpus 17: `var hits atomic.int64` + `hits.add(1)` / `hits.load()` —
+    // Go's atomic.Int64 struct methods, auto-addressed on the value.
+    let go = emit(
+        "fn probe(hits *atomic.int64) {\n    hits.add(1)\n}\n\nfn main() {\n    var hits atomic.int64\n    probe(&hits)\n    fmt.println(\"{hits.load()}\")\n}",
+    );
+    assert!(go.contains("var hits atomic.Int64"), ":\n{}", go);
+    assert!(go.contains("hits.Add(1)"), ":\n{}", go);
+    assert!(go.contains("hits.Load()"), ":\n{}", go);
+    assert!(go.contains("\"sync/atomic\""), "import path:\n{}", go);
+}
+
+#[test]
+fn diff_zero_result_try_hoist_has_no_value_temp() {
+    // corpus 12: `doc.set("audited", true)?` — Set returns only error; the
+    // hoist emits `hyErrN := call` (no temp, no bare-temp statement).
+    let go = emit(
+        "fn main() {\n    doc := serde_json.parse(`{\"a\":1}`)?\n    doc.set(\"audited\", true)?\n}",
+    );
+    assert!(go.contains("hyErr1 := doc.Set(\"audited\", true)"), ":\n{}", go);
+    assert!(!go.contains("hyT"), "value temp leaked:\n{}", go);
+}
+
+#[test]
+fn diff_elided_map_value_struct_literal() {
+    // corpus 09: `map[string]service{"k": {…}}` — the elided value inherits
+    // the map's VALUE type (Go's own composite-literal sugar).
+    let go = emit(
+        "struct service {\n    replicas int\n    tag string\n}\n\nfn main() {\n    e := env{services: map[string]service{\n        \"frontend\": {replicas: 2, tag: \"prod\"},\n    }}\n    _ = e\n}\n\nstruct env {\n    services map[string]service\n}",
+    );
+    assert!(
+        go.contains("\"frontend\": service{replicas: 2, tag: \"prod\"}"),
+        "elided head filled:\n{}",
+        go
+    );
+}
+
+#[test]
+fn diff_short_return_fills_error_slot() {
+    // corpus 13: `return v` in a (value, error) fn → `return v, nil`.
+    let go = emit(
+        "fn summary() (serde_json.value, error) {\n    v := serde_json.new_object()\n    return v\n}\n\nfn main() {\n    s := summary()?\n    _ = s\n}",
+    );
+    assert!(go.contains("return v, nil"), ":\n{}", go);
+}
+
+#[test]
+fn diff_composite_const_lands_as_var() {
+    // corpus 17/18: `const thresholds = [10, 50, 250, 1000]` — Go's const
+    // admits only bool/string/number; composites lower to var.
+    let go = emit("const thresholds = [10, 50, 250, 1000]\n\nfn main() {\n    fmt.println(\"{thresholds[0]}\")\n}");
+    assert!(go.contains("var thresholds = []int{10, 50, 250, 1000}"), ":\n{}", go);
+    assert!(!go.contains("const thresholds"), ":\n{}", go);
+}
+
+#[test]
+fn diff_pointer_param_auto_address() {
+    // corpus 09: `scale_then_register(e, …)` with `e *env` — an addressable
+    // argument auto-addresses at a pointer param (Go's method-receiver
+    // precedent, pinned by the pre-registered corpus).
+    let go = emit(
+        "fn scale(e *env) {\n    _ = e\n}\n\nfn main() {\n    e := env{}\n    scale(e)\n}\n\nstruct env {\n    n int\n}",
+    );
+    assert!(go.contains("scale(&e)"), ":\n{}", go);
+}
+
+#[test]
+fn diff_hyfn_rust_typed_result_normalizes_methods() {
+    // corpus 13: `s := summary(doc)?` — summary's declared result is
+    // serde_json.value; `s.set(...)` normalizes like any rust-call result.
+    let go = emit(
+        "fn summary() (serde_json.value, error) {\n    v := serde_json.new_object()\n    return v\n}\n\nfn main() {\n    s := summary()?\n    s.set(\"cached_at\", \"2026-10-12\")?\n}",
+    );
+    assert!(go.contains("s.Set(\"cached_at\", \"2026-10-12\")"), ":\n{}", go);
+    assert!(!go.contains("s.set("), "lowercase leaked:\n{}", go);
+}
+
+#[test]
+fn diff_duplicate_hyerr_assign_gone() {
+    // The main-closure propagation pushed `hyErr = t` twice (manual push +
+    // propagate_error's branch); one is the contract.
+    let go = emit(
+        "fn main() {\n    n := count()?\n    fmt.println(\"{n}\")\n}\n\nfn count() (int, error) {\n    return 1, nil\n}",
+    );
+    let count = go.matches("hyErr = hyErr0").count();
+    assert_eq!(count, 1, "exactly one propagation assign:\n{}", go);
+}

@@ -96,6 +96,10 @@ jobs:
           cd compiler && cargo build -p hyb --quiet
           cd ..
           python3 tools/corpus_harness.py --bin compiler/target/debug/hyb
+      - name: Differential corpus loop (accept-side build+run, reject-side checker)
+        run: |
+          set -e
+          python3 tools/differential_loop.py --bin compiler/target/debug/hyb
       - name: MVP-0 examples end-to-end (parse → check → emit → go build → run)
         run: |
           set -e

@@ -176,7 +176,66 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
             ],
         },
     ),
+    (
+        // 18: sync.Mutex — value methods on a user-struct field
+        // (`stats.mu.lock()` → `stats.mu.Lock()`).
+        "sync.mutex",
+        TypeShape {
+            members: &[
+                ("lock", method("Lock", None)),
+                ("unlock", method("Unlock", None)),
+                ("try_lock", method("TryLock", None)),
+            ],
+        },
+    ),
+    (
+        // sync.RWMutex rides along for the pool family (rlock/runlock).
+        "sync.rwmutex",
+        TypeShape {
+            members: &[
+                ("lock", method("Lock", None)),
+                ("unlock", method("Unlock", None)),
+                ("rlock", method("RLock", None)),
+                ("runlock", method("RUnlock", None)),
+            ],
+        },
+    ),
+    (
+        // 17: atomic.int64 — Go's atomic.Int64 STRUCT (methods Add/Load/
+        // Store/Swap with pointer receivers; Go auto-addresses value
+        // receivers, so both `var hits atomic.Int64` and `hits *atomic.
+        // Int64` call `hits.Add(1)` identically). hy spells the methods
+        // lowercase; the shape table carries the exact Go names.
+        "atomic.int64",
+        TypeShape {
+            members: &[
+                ("load", method("Load", None)),
+                ("store", method("Store", None)),
+                ("add", method("Add", None)),
+                ("swap", method("Swap", None)),
+            ],
+        },
+    ),
 ];
+
+/// Result shapes for binding-value methods: (descriptor type, method) →
+/// (n_results, has_error). The `?` hoist needs the arity BEFORE emitting
+/// (`doc.set(k, v)?` has no value temp — Set returns only error). Methods
+/// not listed default to (1, true) — the rust-call convention.
+pub static METHOD_RESULTS: &[(&str, &str, (u8, bool))] = &[
+    ("serde_json.value", "array", (1, true)),
+    ("serde_json.value", "int", (1, true)),
+    ("serde_json.value", "string", (1, true)),
+    ("serde_json.value", "set", (0, true)),
+    ("serde_json.value", "push_string", (0, true)),
+];
+
+pub fn lookup_method_results(ty: &str, name: &str) -> Option<(u8, bool)> {
+    METHOD_RESULTS
+        .iter()
+        .find(|(t, m, _)| *t == ty && *m == name)
+        .map(|(_, _, r)| *r)
+}
 
 /// Member lookup: (descriptor type, hy member name) → Member.
 pub fn lookup_member(ty: &str, name: &str) -> Option<&'static Member> {
@@ -250,6 +309,10 @@ pub struct RustFnDesc {
     /// Param names in order — named args land here; positional args fill
     /// free slots left-to-right.
     pub params: &'static [&'static str],
+    /// (n_results, has_error) — the Go wrapper's actual signature. The `?`
+    /// hoist reads it: a 0-result call emits `hyErrN := call` (no value
+    /// temp); a no-error call under `?` is a surface error.
+    pub results: (u8, bool),
     /// Coerce string args to []byte at the call (`[]byte(arg)` is legal Go
     /// even when the arg is already a byte slice — a copy, which the
     /// copy-small/pin-large protocol allows).
@@ -275,12 +338,14 @@ pub static RUST_CRATES: &[RustCrateDesc] = &[
                 go: "Digest256",
                 params: &["data"],
                 bytes_coerce: true,
+                results: (1, true),
             },
             RustFnDesc {
                 hy: "stream_checksum",
                 go: "StreamChecksum",
                 params: &["iters", "seed"],
                 bytes_coerce: false,
+                results: (1, true),
             },
         ],
     },
@@ -294,24 +359,28 @@ pub static RUST_CRATES: &[RustCrateDesc] = &[
                 go: "Parse",
                 params: &["data"],
                 bytes_coerce: true,
+                results: (1, true),
             },
             RustFnDesc {
                 hy: "new_object",
                 go: "NewObject",
                 params: &[],
                 bytes_coerce: false,
+                results: (1, false),
             },
             RustFnDesc {
                 hy: "new_array",
                 go: "NewArray",
                 params: &[],
                 bytes_coerce: false,
+                results: (1, false),
             },
             RustFnDesc {
                 hy: "to_string_pretty",
                 go: "ToStringPretty",
                 params: &["v"],
                 bytes_coerce: false,
+                results: (1, true),
             },
         ],
     },
@@ -327,12 +396,14 @@ pub static RUST_CRATES: &[RustCrateDesc] = &[
                 go: "IsMatch",
                 params: &["pattern", "text"],
                 bytes_coerce: false,
+                results: (1, true),
             },
             RustFnDesc {
                 hy: "is_valid",
                 go: "IsValid",
                 params: &["pattern"],
                 bytes_coerce: false,
+                results: (1, false),
             },
         ],
     },
@@ -373,6 +444,10 @@ pub fn import_path_of(root: &str) -> String {
         "http" => "net/http".to_string(),
         "httptest" => "net/http/httptest".to_string(),
         "hex" => "encoding/hex".to_string(),
+        // 17: the code says `atomic.Int64` — Go's package name for the
+        // path is `atomic`, but the PATH is sync/atomic (the naive last-
+        // segment import `"atomic"` is not in std).
+        "atomic" => "sync/atomic".to_string(),
         "sha3binding" => "hybrid.program/sha3binding".to_string(),
         "jsonbinding" => "hybrid.program/jsonbinding".to_string(),
         "regexbinding" => "hybrid.program/regexbinding".to_string(),

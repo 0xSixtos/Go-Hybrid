@@ -40,6 +40,40 @@ impl Emitter {
         }
     }
 
+    /// Expression emission with an EXPECTED type (Batch I, corpus 09): a
+    /// type-elided struct literal inherits the context's type — a map
+    /// literal's VALUE type, a slice literal's ELEM type. The elision is
+    /// Go's own composite-literal sugar; the emitter fills in the head.
+    /// Everything else emits exactly like emit_expr.
+    pub fn emit_expr_exp(
+        &mut self,
+        e: &Expr,
+        min_prec: u8,
+        expected: Option<&TypeExpr>,
+    ) -> Result<String, EmitError> {
+        if let Some(exp) = expected {
+            match e {
+                Expr::StructLit { ty: None, fields, .. } => {
+                    let head = self.type_text(exp);
+                    let body = self.field_inits(fields)?;
+                    return Ok(format!("{}{{{}}}", head, body)); // atomic head
+                }
+                Expr::SliceLit { elem: None, items, .. } => {
+                    if let TypeExpr::Slice { elem, .. } = exp {
+                        let head = format!("[]{}", self.type_text(elem));
+                        let mut parts = Vec::new();
+                        for i in items {
+                            parts.push(self.emit_expr_exp(i, 0, Some(elem))?);
+                        }
+                        return Ok(format!("{}{{{}}}", head, parts.join(", ")));
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.emit_expr(e, min_prec)
+    }
+
     fn top_prec(&self, e: &Expr) -> u8 {
         match e {
             Expr::Binary { op, .. } => bin_prec(*op),
@@ -151,7 +185,9 @@ impl Emitter {
                 };
                 let mut parts = Vec::new();
                 for i in items {
-                    parts.push(self.emit_expr(i, 0)?);
+                    // Elided struct elements inherit the slice's element
+                    // type (Batch I, corpus 09).
+                    parts.push(self.emit_expr_exp(i, 0, elem.as_deref())?);
                 }
                 Ok(format!("{}{{{}}}", head, parts.join(", ")))
             }
@@ -161,7 +197,9 @@ impl Emitter {
                 let mut parts = Vec::new();
                 for (k, v) in entries {
                     let kt = self.emit_expr(k, 0)?;
-                    let vt = self.emit_expr(v, 0)?;
+                    // Elided struct values inherit the map's VALUE type
+                    // (Batch I, corpus 09: `map[string]service{"k": {…}}`).
+                    let vt = self.emit_expr_exp(v, 0, Some(value))?;
                     parts.push(format!("{}: {}", kt, vt));
                 }
                 Ok(format!("{}{{{}}}", head, parts.join(", ")))
@@ -392,14 +430,42 @@ impl Emitter {
     /// the M4 heuristic. Never guesses.
     pub fn type_of_expr(&self, e: &Expr) -> Option<&'static str> {
         match e {
-            Expr::Ident { name, .. } => match self.bindings.get(name)? {
-                BindingKind::ForeignTy(t) => Some(t),
-                _ => None,
-            },
+            Expr::Ident { name, .. } => {
+                if let Some(BindingKind::ForeignTy(t)) = self.bindings.get(name) {
+                    return Some(t);
+                }
+                // Batch I: a var/param whose declared type is shape-known
+                // (`var hits atomic.int64`) resolves through var_ty.
+                if let Some((ty, _)) = self.var_ty.get(name) {
+                    if let Some((k, _)) = super::shapes::SHAPES.iter().find(|(k, _)| *k == ty) {
+                        return Some(k);
+                    }
+                }
+                None
+            }
             Expr::Field { base, name, .. } => {
-                let bt = self.type_of_expr(base)?;
-                let m = lookup_member(bt, name)?;
-                m.result
+                if let Some(bt) = self.type_of_expr(base) {
+                    if let Some(m) = lookup_member(bt, name) {
+                        return m.result;
+                    }
+                }
+                // Batch I: user-struct field typing — `stats.mu` resolves
+                // through var_struct + struct_fields when the field's
+                // declared type is shape-known (18: sync.mutex).
+                if let Expr::Ident { name: vn, .. } = base.as_ref() {
+                    if let Some(sn) = self.var_struct.get(vn) {
+                        if let Some(fields) = self.struct_fields.get(sn) {
+                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
+                                if let Some((k, _)) =
+                                    super::shapes::SHAPES.iter().find(|(k, _)| *k == fty)
+                                {
+                                    return Some(k);
+                                }
+                            }
+                        }
+                    }
+                }
+                None
             }
             // A zero-arg/method call's result type is the member's result.
             Expr::Call { callee, .. } => self.type_of_expr(callee),
@@ -511,10 +577,29 @@ impl Emitter {
         }
 
         // --- everything else: callee(args...) ---
+        // An addressable argument auto-addresses at a pointer param (Batch
+        // I, corpus 09: `scale_then_register(e, …)` with `e *env` — Go's
+        // own method-receiver auto-address precedent, pinned by the
+        // pre-registered corpus).
+        let mut ptr_params: Vec<bool> = Vec::new();
+        if let Expr::Ident { name, .. } = callee {
+            if let Some((_, _, _, params)) = self.fn_shapes.get(name.as_str()) {
+                ptr_params = params.iter().map(|p| p.is_some()).collect();
+            }
+        }
         let c = self.emit_expr(callee, ATOM)?;
         let mut parts = Vec::new();
-        for a in args {
-            parts.push(self.emit_call_arg(a)?);
+        for (i, a) in args.iter().enumerate() {
+            let t = self.emit_call_arg(a)?;
+            let wants_ptr = ptr_params.get(i).copied().unwrap_or(false);
+            let already_ptr = matches!(a.value, Expr::AddrOf { .. });
+            let addressable =
+                matches!(a.value, Expr::Ident { .. } | Expr::Field { .. } | Expr::Index { .. });
+            if wants_ptr && !already_ptr && addressable {
+                parts.push(format!("&{}", t));
+            } else {
+                parts.push(t);
+            }
         }
         Ok(format!("{}({})", c, parts.join(", ")))
     }

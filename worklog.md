@@ -108,3 +108,20 @@ Work Log:
 Stage Summary:
 - ALL TEN target programs byte-exact — the SPEC's ten-program set is fully green
 - Remaining plan work: differential corpus loop, call-overhead bench (G2 evidence), G2 gate doc
+
+---
+Task ID: 13 (session 7 — Batch H commit + Batch I)
+Agent: lead (Super Z)
+Task: commit Batch H; then finish pending plan phases (differential loop → bench → G2)
+
+Work Log:
+- Session recovery: PLAN.md Batch H entry repaired (Example 06 text was concatenated into its reverse clause; duplicate Batch G entry removed); Batch H committed 37f165c + pushed — ALL TEN target programs byte-exact now in-repo
+- Batch I (differential corpus loop): wrote tools/differential_loop.py — ACCEPT corpus programs must survive hyb build + run exit 0; REJECT programs re-verified checker-side; wired into make test-quick/corpus + CI
+- The loop IMMEDIATELY caught seven real emission gaps on the 9 accepted programs (02/09/10/12/13/15/16/17/18): blank iterate (for _ := invalid Go), sync.mutex/atomic receiver typing, zero-result `?` hoist (bare hyT3), jsonbinding.Set scalar contract, short-return arity fill, composite const→var, type-elided map-value struct literals, pointer-param auto-address, hy-fn rust-typed result registration, duplicate hyErr assign
+- All fixed in hy-emit (shapes.rs sync.mutex/sync.rwmutex/atomic.int64 entries + METHOD_RESULTS + RustFnDesc.results; lib.rs fn_shapes/struct_fields/var_struct/var_ty eager tables; stmt.rs shape-aware hoist_one_try + call_results + blank-iterate forms + emit_return fill; expr.rs type_of_expr extension + emit_expr_exp expected-type context); jsonbinding.Set(key, any) errors — scalars box via JSON Marshal/Parse round-trip inside the binding (zero bridge changes)
+- MethodFunc variant added then REMOVED (dead — atomic.int64 is a struct-method surface) per the table's own discipline
+- 11 new regression tests (one per fix, named); 194 tests total; differential 9/9 accept + 11/11 reject FULL AGREEMENT; 10/10 examples; corpus 20/20; tripwire not fired
+
+Stage Summary:
+- PLAN.md's differential row DONE; remaining: call-overhead bench (G2 evidence) + G2 gate doc
+- Everything committed immediately per the no-data-loss directive

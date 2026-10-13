@@ -191,6 +191,17 @@ pub(crate) fn to_go_name(name: &str) -> String {
         .collect()
 }
 
+/// The base NAMED type of a TypeExpr, if any (`*atomic.int64` →
+/// "atomic.int64", `env` → "env", `map[string]int` → None). Batch I's
+/// receiver tables key on this.
+pub(crate) fn base_ty_name(t: &TypeExpr) -> Option<String> {
+    match t {
+        TypeExpr::Named { name, .. } => Some(name.clone()),
+        TypeExpr::Pointer { to, .. } => base_ty_name(to),
+        _ => None,
+    }
+}
+
 /// Is this ident a foreign package root we recognize? (Import collection is
 /// usage-driven: any dotted name's first segment gets an import line.)
 pub(crate) fn is_package_root(name: &str) -> bool {
@@ -294,6 +305,24 @@ pub struct Emitter {
     /// The current (non-main) fn's per-result RETURN texts when its results
     /// end in `error` — E3 propagates via `return <zeros…, err>`.
     cur_fn_error_returns: Option<Vec<String>>,
+    /// Per-fn result shapes, collected eagerly (Batch I): name →
+    /// (n_results, ends_in_error, first_result's binding kind, per-param
+    /// pointer-base types). Drives the `?` hoist arity (13:
+    /// `summary(doc)?`), the binding-kind registration for calls whose
+    /// result is a known handle type (serde_json.value) — `s.set(...)`
+    /// normalizes like any rust-call — and the pointer-param auto-address
+    /// at call sites (09: `scale_then_register(e, …)` with `e *env`).
+    fn_shapes: BTreeMap<String, (usize, bool, Option<BindingKind>, Vec<Option<String>>)>,
+    /// User-struct field types (Batch I): struct → (field, declared hy type
+    /// name — dotted for shape-known fields, "" otherwise). Receiver typing
+    /// for `stats.mu.lock()` (18).
+    struct_fields: BTreeMap<String, Vec<(String, String)>>,
+    /// var → user-struct name (value or pointer): `stats := pool_stats{}` /
+    /// `worker(..., stats *pool_stats)`.
+    var_struct: BTreeMap<String, String>,
+    /// var → (shape-known dotted type, is_pointer): `var hits atomic.int64`
+    /// / `hits *atomic.int64` — the MethodFunc receiver's address-of form.
+    var_ty: BTreeMap<String, (String, bool)>,
 }
 
 impl Emitter {
@@ -317,6 +346,10 @@ impl Emitter {
             binding_prefix: "hybrid.program".to_string(),
             export_pub: false,
             cur_fn_error_returns: None,
+            fn_shapes: BTreeMap::new(),
+            struct_fields: BTreeMap::new(),
+            var_struct: BTreeMap::new(),
+            var_ty: BTreeMap::new(),
         }
     }
 
@@ -352,6 +385,46 @@ impl Emitter {
             .fns()
             .filter(|f| f.name.contains('.'))
             .map(|f| f.name.clone())
+            .collect();
+
+        // Eager tables (Batch I): user-struct field types + per-fn result
+        // shapes. Both are needed BEFORE pass 1 — calls type-resolve against
+        // fns declared later in the file.
+        self.struct_fields = file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Struct(s) => Some((
+                    s.name.clone(),
+                    s.fields
+                        .iter()
+                        .map(|f| (f.name.clone(), base_ty_name(&f.ty).unwrap_or_default()))
+                        .collect::<Vec<_>>(),
+                )),
+                _ => None,
+            })
+            .collect();
+        self.fn_shapes = file
+            .fns()
+            .map(|f| {
+                let err = matches!(
+                    f.results.last(),
+                    Some(FnResult {
+                        ty: TypeExpr::Named { name, .. },
+                        ..
+                    }) if name == "error"
+                );
+                let kind = f.results.first().and_then(|r| self.binding_kind_of_ty(&r.ty));
+                let ptr_params = f
+                    .params
+                    .iter()
+                    .map(|p| match &p.ty {
+                        TypeExpr::Pointer { to, .. } => base_ty_name(to),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                (f.name.clone(), (f.results.len(), err, kind, ptr_params))
+            })
             .collect();
 
         // Pass 1: render every declaration into the body buffer, collecting
@@ -453,12 +526,21 @@ impl Emitter {
 
     fn emit_file_const(&mut self, c: &ConstDecl) -> Result<(), EmitError> {
         let value = self.emit_expr(&c.value, 0)?;
+        // Go's `const` admits only bool/string/number literals. Composite
+        // values (slices/maps/structs — 17's `const thresholds = [10, …]`,
+        // 18's seed_urls) lower to `var`: same identifier surface, the
+        // immutability contract is the checker's business, not Go's.
+        let composite = matches!(
+            &c.value,
+            Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
+        );
+        let kw = if composite { "var" } else { "const" };
         match &c.ty {
             Some(t) => {
                 let ty = self.type_text(t);
-                self.push(&format!("const {} {} = {}", c.name, ty, value));
+                self.push(&format!("{} {} {} = {}", kw, c.name, ty, value));
             }
-            None => self.push(&format!("const {} = {}", c.name, value)),
+            None => self.push(&format!("{} {} = {}", kw, c.name, value)),
         }
         Ok(())
     }
@@ -721,6 +803,27 @@ impl Emitter {
             } else if matches!(p.ty, TypeExpr::Chan { .. }) {
                 self.bindings.insert(p.name.clone(), BindingKind::Chan);
             }
+            self.register_var_ty(&p.name, &p.ty);
+        }
+    }
+
+    /// Receiver typing (Batch I): a var/param whose type is shape-known
+    /// dotted (`atomic.int64`) lands in var_ty with its pointer-ness; one
+    /// whose type is a user struct (`pool_stats`, value or pointer) lands
+    /// in var_struct — `stats.mu.lock()` types through struct_fields.
+    fn register_var_ty(&mut self, name: &str, ty: &TypeExpr) {
+        let (base, ptr) = match ty {
+            TypeExpr::Pointer { to, .. } => (base_ty_name(to), true),
+            t => (base_ty_name(t), false),
+        };
+        let Some(base) = base else { return };
+        if base.is_empty() {
+            return;
+        }
+        if shapes::SHAPES.iter().any(|(k, _)| *k == base.as_str()) {
+            self.var_ty.insert(name.to_string(), (base, ptr));
+        } else if self.struct_fields.contains_key(&base) {
+            self.var_struct.insert(name.to_string(), base);
         }
     }
 
