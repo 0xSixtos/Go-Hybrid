@@ -62,3 +62,36 @@ jobs:
           # secrets must never be committed (incl. JWT-shaped session tokens)
           ! git grep -qE 'ghp_[A-Za-z0-9]{20,}|KGAT_[A-Za-z0-9]{20,}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}' HEAD || { echo "SECRET LEAK DETECTED"; exit 1; }
           echo "hygiene OK"
+
+  # The compiler (lands with MVP-0): pinned toolchains, full test suite,
+  # corpus verdict agreement, and the walking-skeleton examples end-to-end.
+  compiler:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout (pinned v4)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install pinned toolchains (same URLs as tools/env.sh discipline)
+        run: |
+          set -e
+          curl -sSL -o /tmp/go.tgz https://go.dev/dl/go1.26.9.linux-amd64.tar.gz
+          sudo tar -C /usr/local -xzf /tmp/go.tgz
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.99.0
+          echo "/usr/local/go/bin:$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Version pins agree (env.sh ↔ README ↔ hyb ↔ PLAN)
+        run: bash tools/check-versions.sh
+      - name: Compiler tests (hy-diag + hy-syntax + hy-check + hy-emit)
+        run: |
+          set -e
+          cd compiler
+          cargo test --workspace --quiet
+      - name: Checker corpus verdict agreement (20/20 + tripwire)
+        run: |
+          set -e
+          cd compiler && cargo build -p hyb --quiet
+          cd ..
+          python3 tools/corpus_harness.py --bin compiler/target/debug/hyb
+      - name: MVP-0 examples end-to-end (parse → check → emit → go build → run)
+        run: |
+          set -e
+          CARGO_TARGET_DIR="$PWD/compiler/target" bash tools/run_examples.sh
