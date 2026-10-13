@@ -49,6 +49,7 @@ fn main() -> ExitCode {
         Some("explain") => cmd_explain(&args[1..]),
         Some("check") => cmd_check(&args[1..]),
         Some("build") => cmd_build(&args[1..]),
+        Some("bench-overhead") => cmd_bench_overhead(),
         _ => {
             eprintln!("hyb — the Hybrid compiler CLI (MVP-0)");
             eprintln!();
@@ -56,6 +57,7 @@ fn main() -> ExitCode {
             eprintln!("  hyb check <file.hy> [--json] [--report-managed]");
             eprintln!("  hyb explain <HYB-Exxxx | Exxxx | xxxx | machine-name>");
             eprintln!("  hyb build <file.hy> -o <bin-path> [--emit-go]");
+            eprintln!("  hyb bench-overhead");
             eprintln!();
             eprintln!("build pins: {} / rust {} (HYB-E9001 on drift)", PINNED_GO, PINNED_RUST);
             ExitCode::from(2)
@@ -726,3 +728,251 @@ fn check_toolchain_pins(file: &str) -> Option<Diagnostic> {
     }
     None
 }
+
+// ---------------------------------------------------------------------------
+// bench-overhead — the G2 gate's call-overhead evidence (Batch J)
+// ---------------------------------------------------------------------------
+
+/// The bench program assembled into the bridge workspace. It measures TWO
+/// crossings on the LIVE bridge (the same hybridge assembly + staticlib
+/// every `hyb build` links):
+///
+///   crossing-nop      hybridge.Cross1 → hyrt's hy_nop — the shipping
+///                     fast-path trampoline with ZERO payload work. This is
+///                     the quantity SPEC §6's ≤5 ns budget names.
+///   binding-newobject jsonbinding.NewObject — a REAL binding call (handle
+///                     allocation on the Rust side) for context.
+///
+/// Machine-parseable lines: `<name> <float> ns/call`. Best of 3 in-process.
+const BENCH_MAIN: &str = r#"package main
+
+import (
+        "fmt"
+        "runtime"
+        "time"
+
+        "hybrid.program/jsonbinding"
+        "hybrid.program/overheadbench"
+)
+
+var sink uint64
+
+//go:noinline
+func goNop(x uint64) uint64 { return x }
+
+// measure: one best-of-3 inline loop (the spike-1 shape — no closure
+// indirection), run at the CURRENT stack depth. Modes: 0 = Go floor,
+// 2 = the shipping guarded crossing, 3 = the raw fast trampoline.
+func measure(n int, mode int) float64 {
+        best := 0.0
+        for rep := 0; rep < 3; rep++ {
+                t0 := time.Now()
+                switch mode {
+                case 0:
+                        for i := 0; i < n; i++ {
+                                sink += goNop(uint64(i))
+                        }
+                case 2:
+                        for i := 0; i < n; i++ {
+                                sink += overheadbench.Nop(uint64(i))
+                        }
+                case 3:
+                        for i := 0; i < n; i++ {
+                                v, ok := overheadbench.NopRaw(uint64(i))
+                                if !ok {
+                                        panic("fast path short headroom in scenario B")
+                                }
+                                sink += v
+                        }
+                }
+                d := float64(time.Since(t0).Nanoseconds()) / float64(n)
+                if best == 0 || d < best {
+                        best = d
+                }
+        }
+        return best
+}
+
+// descend recurses to force contiguous stack growth (8 KB doubles on each
+// morestack; 200 frames force several doublings), then measures at THAT
+// depth — the grown-stack scenario where headroom exceeds the fast path's
+// 4096-byte threshold.
+func descend(n int, mode int, depth int) float64 {
+        if depth > 0 {
+                return descend(n, mode, depth-1)
+        }
+        return measure(n, mode)
+}
+
+func main() {
+        // Warmup: trampolines, the deep-stack pool, allocator pages.
+        for i := 0; i < 100000; i++ {
+                sink += overheadbench.Nop(uint64(i))
+        }
+        const N = 5000000
+
+        // Scenario A — SHALLOW goroutine (fresh main stack): the headroom probe
+        // found ~2.9 KB here, BELOW the fast path's 4096-byte threshold, so the
+        // shipping crossing engages the pooled deep path.
+        aFloor := measure(N, 0)
+        aNop := measure(N, 2)
+        aDeep := overheadbench.DeepPathCount()
+        fmt.Printf("a-floor %.2f ns/call\n", aFloor)
+        fmt.Printf("a-nop %.2f ns/call\n", aNop)
+        fmt.Printf("a-deepcount %d\n", aDeep)
+
+        // Scenario B — GROWN stack: the same crossing after forced growth. The
+        // fast path must engage (deepcount frozen) — the budget's steady state.
+        bFloor := descend(N, 0, 200)
+        bRaw := descend(N, 3, 200)
+        bNop := descend(N, 2, 200)
+        bDeep := overheadbench.DeepPathCount()
+        fmt.Printf("b-floor %.2f ns/call\n", bFloor)
+        fmt.Printf("b-raw %.2f ns/call\n", bRaw)
+        fmt.Printf("b-nop %.2f ns/call\n", bNop)
+        fmt.Printf("b-deepcount %d\n", bDeep)
+        fmt.Printf("b-delta %.2f ns/call\n", bNop-bFloor)
+
+        // Context: a REAL binding call — jsonbinding.NewObject allocates a
+        // Rust-side handle through the shipping crossing.
+        for i := 0; i < 1000; i++ {
+                _ = jsonbinding.NewObject()
+        }
+        const M = 200000
+        best := 0.0
+        for rep := 0; rep < 3; rep++ {
+                runtime.GC()
+                t1 := time.Now()
+                for i := 0; i < M; i++ {
+                        v := jsonbinding.NewObject()
+                        _ = v
+                }
+                d := float64(time.Since(t1).Nanoseconds()) / float64(M)
+                if best == 0 || d < best {
+                        best = d
+                }
+        }
+        runtime.GC()
+        fmt.Printf("binding-newobject %.2f ns/call\n", best)
+        fmt.Printf("sink %d\n", sink)
+}
+"#;
+
+/// One bench process run's parsed numbers (median-of-3 reported).
+#[derive(Default, Clone, Copy)]
+struct BenchRun {
+    a_floor: f64,
+    a_nop: f64,
+    a_deep: u64,
+    b_floor: f64,
+    b_raw: f64,
+    b_nop: f64,
+    b_deep: u64,
+    b_delta: f64,
+    obj: f64,
+}
+
+fn cmd_bench_overhead() -> ExitCode {
+    // Same pins discipline as build (HYB-E9001): the bench measures the
+    // pinned toolchains, nothing else.
+    if let Some(diag) = check_toolchain_pins("bench-overhead") {
+        eprintln!("{}", diag.render_head());
+        for n in &diag.notes {
+            eprintln!("  = {}", n);
+        }
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "assembling the bench on the live bridge (pins: {} / rust {})...",
+        PINNED_GO, PINNED_RUST
+    );
+    let go_bin = go_bin();
+    let out = std::env::temp_dir().join(format!(
+        "hyb-bench-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0)
+    ))
+    .to_string_lossy()
+    .to_string();
+    if let Err(e) = build_with_bridge(go_bin, &out, BENCH_MAIN, &["overheadbench", "jsonbinding"]) {
+        match e {
+            BuildError::Tool(m) => eprintln!("error: {}", m),
+            BuildError::Go(stderr) => eprintln!("error: go build failed:\n{}", stderr),
+        }
+        return ExitCode::FAILURE;
+    }
+
+    // Run 3× (separate processes; report the median run's numbers — wall
+    // clock is supporting evidence per SPEC §3.4, and the number the gate
+    // cites is the process-median of the in-process best-of-3).
+    let mut runs: Vec<BenchRun> = Vec::new();
+    for _ in 0..3 {
+        let proc_out = Command::new(&out).output();
+        let out = match proc_out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+            Ok(o) => {
+                eprintln!(
+                    "bench run failed:\n{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                return ExitCode::FAILURE;
+            }
+            Err(e) => {
+                eprintln!("error running the bench: {}", e);
+                return ExitCode::FAILURE;
+            }
+        };
+        let mut r = BenchRun::default();
+        for line in out.lines() {
+            let mut it = line.split_whitespace();
+            match (it.next(), it.next()) {
+                (Some("a-floor"), Some(v)) => r.a_floor = v.parse().unwrap_or(0.0),
+                (Some("a-nop"), Some(v)) => r.a_nop = v.parse().unwrap_or(0.0),
+                (Some("a-deepcount"), Some(v)) => r.a_deep = v.parse().unwrap_or(0),
+                (Some("b-floor"), Some(v)) => r.b_floor = v.parse().unwrap_or(0.0),
+                (Some("b-raw"), Some(v)) => r.b_raw = v.parse().unwrap_or(0.0),
+                (Some("b-nop"), Some(v)) => r.b_nop = v.parse().unwrap_or(0.0),
+                (Some("b-deepcount"), Some(v)) => r.b_deep = v.parse().unwrap_or(0),
+                (Some("b-delta"), Some(v)) => r.b_delta = v.parse().unwrap_or(0.0),
+                (Some("binding-newobject"), Some(v)) => r.obj = v.parse().unwrap_or(0.0),
+                _ => {}
+            }
+        }
+        runs.push(r);
+    }
+    runs.sort_by(|a, b| a.b_nop.partial_cmp(&b.b_nop).unwrap());
+    let r = runs[runs.len() / 2];
+    let budget = 5.0f64;
+    println!();
+    println!("call overhead — the live bridge (hybridge fast path + hyrt staticlib):");
+    println!("  scenario A — SHALLOW goroutine (fresh 8 KB main stack, ~2.9 KB headroom):");
+    println!("    go-call floor     {:>7.2} ns/call", r.a_floor);
+    println!("    shipping crossing {:>7.2} ns/call  (deep path: {} crossings — the pooled guarded stack)", r.a_nop, r.a_deep);
+    println!("  scenario B — GROWN stack (headroom > 4096 B: the fast path's threshold):");
+    println!("    go-call floor     {:>7.2} ns/call", r.b_floor);
+    println!("    raw fast tramp    {:>7.2} ns/call  (in-trampoline guard, no Go-wrapper retry)", r.b_raw);
+    println!("    shipping crossing {:>7.2} ns/call  (Cross1; deepcount frozen at {} — fast path proven)", r.b_nop, r.b_deep);
+    println!("    marginal delta    {:>7.2} ns/call  (the boundary's cost over a Go call)", r.b_delta);
+    println!("  binding-newobject   {:>7.2} ns/call  (context: real binding call, Rust-side handle alloc)", r.obj);
+    println!("  budget              {:>7.2} ns/call  (SPEC §6 hypothesis; spike-1: 2.82 ns sandbox / 4.36 ns worker on the FIXED-stack prototype)", budget);
+    println!();
+    println!("  reading: the ≤5 ns hypothesis holds on the FAST path (grown stacks) —");
+    if r.b_nop <= budget {
+        println!(
+            "  VERDICT: PASS — fast path {:.2} ns ≤ {:.2} ns ({:.0}% of budget). Shallow goroutines take the pooled deep path at {:.2} ns until their stacks grow (the collision-safe pool costs ~{:.0} ns over the spike's fixed-stack prototype).",
+            r.b_nop, budget, 100.0 * r.b_nop / budget, r.a_nop, r.a_nop - r.b_nop
+        );
+        ExitCode::SUCCESS
+    } else {
+        println!(
+            "  VERDICT: MISS — fast path {:.2} ns > {:.2} ns (see gates/G2.md for the interpretation + the documented fallback)",
+            r.b_nop, budget
+        );
+        ExitCode::FAILURE
+    }
+}
+

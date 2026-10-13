@@ -61,6 +61,15 @@ pub extern "C" fn hy_sha3_stream_checksum(iters: u64, seed: u64) -> u64 {
     state
 }
 
+/// The G2 overhead bench's no-op (Batch J): the SHIPPING crossing —
+/// hybridge.Cross1's fast trampoline + the C ABI — with zero payload work.
+/// Returns the argument (one register move); the measured cost is the
+/// boundary itself, exactly the quantity SPEC §6's ≤5 ns budget names.
+#[no_mangle]
+pub extern "C" fn hy_nop(x: u64) -> u64 {
+    x
+}
+
 // ---------------------------------------------------------------------------
 // rust/serde_json (pinned 1.0.140) — example 05's transform crate
 // ---------------------------------------------------------------------------

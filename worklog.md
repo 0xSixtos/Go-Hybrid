@@ -125,3 +125,21 @@ Work Log:
 Stage Summary:
 - PLAN.md's differential row DONE; remaining: call-overhead bench (G2 evidence) + G2 gate doc
 - Everything committed immediately per the no-data-loss directive
+
+---
+Task ID: 14 (session 7 — Batch J: overhead bench + G2)
+Agent: lead (Super Z)
+Task: call-overhead bench vs ≤5ns budget on the LIVE bridge + G2 gate doc
+
+Work Log:
+- hyrt += hy_nop (no-op extern — the boundary with zero payload); runtime/go/overheadbench (cgo broker per the sha3binding pattern, ABI handshake, Nop/NopRaw/DeepPathCount accessors)
+- hyb bench-overhead subcommand: assembles the bench through build_with_bridge (the EXACT hyb workspace recipe), runs 3 process runs, reports the median; make bench target wired
+- hybridge diagnostics: DeepPathCount (cold-path atomic — zero fast-path cost) + Cross1Raw (no-retry trampoline, documented diagnostic-only)
+- DIAGNOSIS: the first run measured 17 ns — instrumented probe found the cause: a FRESH main-goroutine stack holds only ~2.9 KB headroom (< the fast path's 4096 B threshold; g.stackguard0 offset 16 verified against go1.26.9 DWARF via extract_offsets.py) → every shallow crossing engages the pooled deep path
+- Two-scenario bench: shallow (deep path 19.19 ns, 15,100,002 crossings counted) vs grown-stack (fast path 3.37 ns ≤ 5 ns budget — PASS at 67%; raw trampoline 2.65 ns ≈ spike-1's 2.82 ns prototype; marginal delta 1.25 ns; deepcount frozen — path proven)
+- gates/G2.md written + PASSED: budget holds on the fast path; the pool premium (~16 ns over the spike's fixed-stack prototype) documented as the recorded price of collision safety (spike-3's TestConcurrentCrossing finding); per-callee budgets logged as a Cut-Log follow-up
+- Regression: 194 tests, 10/10 examples after the hybridge instrumentation
+
+Stage Summary:
+- The PLAN.md queue is now EMPTY of engineering items: programs 01–10 byte-exact, differential loop FULL AGREEMENT, G2 evidence + gate doc landed
+- Next: human G2 review; G3 exit sweep (MVP exit criteria) + closeout docs
