@@ -195,3 +195,20 @@ Stage Summary:
 - GATE CHAIN COMPLETE: G0 passed / G1 ratified / G2 passed+ratified / G3 passed — THE MVP IS DONE, public claim unblocked
 - 4 defects the gates' own claims missed were caught BECAUSE the review ran normal tooling — the user's instinct was right
 - Next: post-MVP queue in order (row 1 style sweep is sandbox-local; rows 2–3 need the fleet)
+
+---
+Task ID: 18 (session 8 continued — post-MVP rows 1 + 5)
+Agent: lead (Super Z)
+Task: continue the post-MVP queue opened at the G3 review (style sweep, Go runtime tests; fleet rows blocked)
+
+Work Log:
+- ROW 1 (ec279ed): style sweep — cargo clippy --fix applied 33→21, remainder by hand: 15x doc-list overindent via scripts/fix_doc_overindent.py (drives cargo clippy --message-format=json, applies clippy's OWN spans/replacements — never hand-guessed), 2x loop→while-let, to_place→place_of (6 sites), FnShape type alias, callee shorthand, matches!; cargo fmt; clippy now 0 findings workspace-wide; full suite re-run (194/0, differential, corpus, examples all green)
+- ROW 5 (3b6a6de): 20 Go tests across all five runtime packages vs the REAL staticlib — G2 path-proof + concurrency (overheadbench), SPHeadroom/constants canary (hybridge), the full jsonbinding handle protocol (move-zeroing, empty-key, type-strict getters, boxing, arrays), raw-\s regex lessons, NIST SHA3 vectors; CI hygiene leg extended to go test ./...
+- Two tests corrected by OBSERVED contract (not silently): String(float) is type-strict (error, not coercion); serde_json Map = BTreeMap → sorted pretty keys (assertions order-safe under both orderings by construction)
+- STALE-ARCHIVE TRAP documented: crate-local target/ held a pre-Batch-J libhyrt.a (missing hy_nop) because env.sh's shared CARGO_TARGET_DIR redirects manual builds; hyb's mtime check + CI are immune; rebuild crate-locally to refresh
+- Fleet rows 2/3 assessed: NO gh CLI, no GITHUB_TOKEN in env, no Kaggle creds in this sandbox — dispatch impossible from here; the sanitizer/fuzz JOB SPEC composition is the next batch's sandbox-local work
+- All work committed + pushed: 5deeea2 (review) → 8d09a30 (worklog) → ec279ed (row 1) → b2fbcc3-ish PLAN commits → 3b6a6de (row 5)
+
+Stage Summary:
+- Post-MVP queue: rows 1+5 DONE; rows 2/3 fleet-blocked (job-spec composition next); row 4 (per-callee budgets) needs its own design batch; row 6 rides the fleet
+- Session state: MVP DONE + ratified; every standard suite green (cargo 194/0, clippy 0, go vet/test 20/20, gofmt clean, 10/10 examples, differential 9/9+11/11, corpus 20/20, bench 3.44 ns)
