@@ -315,6 +315,27 @@ pub static RUST_CRATES: &[RustCrateDesc] = &[
             },
         ],
     },
+    // Pinned by example 09 (the adoption story); binding in runtime/go/regexbinding.
+    // NOTE bytes_coerce=false: the binding's Go API takes string args and
+    // pins them itself (the copy-small protocol lives inside the binding).
+    RustCrateDesc {
+        hy: "regex",
+        binding_root: "regexbinding",
+        fns: &[
+            RustFnDesc {
+                hy: "is_match",
+                go: "IsMatch",
+                params: &["pattern", "text"],
+                bytes_coerce: false,
+            },
+            RustFnDesc {
+                hy: "is_valid",
+                go: "IsValid",
+                params: &["pattern"],
+                bytes_coerce: false,
+            },
+        ],
+    },
 ];
 
 /// Rust-owned types cross as binding-package handles: `serde_json.value`
@@ -354,6 +375,7 @@ pub fn import_path_of(root: &str) -> String {
         "hex" => "encoding/hex".to_string(),
         "sha3binding" => "hybrid.program/sha3binding".to_string(),
         "jsonbinding" => "hybrid.program/jsonbinding".to_string(),
+        "regexbinding" => "hybrid.program/regexbinding".to_string(),
         other => other.to_string(),
     }
 }

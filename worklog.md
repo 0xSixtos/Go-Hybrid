@@ -90,3 +90,21 @@ Work Log:
 Stage Summary:
 - 9 of 10 target programs byte-exact; the plan's remaining work: program 09 (multi-package), differential loop, overhead bench, G2 doc
 - Commits this session: 603e3e2 → 20e63a6 → 3239154 → 783dc03 → (G)
+
+---
+Task ID: 12 (session 6 — Batch H)
+Agent: lead (Super Z)
+Task: program 09 (multi-package Go-consumable emission) — the adoption story
+
+Work Log:
+- AST contract ext: FnDecl.is_pub (the parser previously parsed-and-DROPPED `pub` at parse_decl's top)
+- hyb build --package <name> --out-dir <dir> --binding-prefix <path>: emits package <name> (pub-fn exports via M4) + hybridge core + per-crate bindings (imports rewritten to the consumer's prefix) + staticlib at <dir>/lib
+- Emitter package mode: export_pub, configurable binding_prefix, E3-in-error-result-fn propagation (zero-results return) + `return _, err` zero-fill (SPEC M2b rule added)
+- hyrt += regex =1.11.1 (is_match status-in-RAX 1/0/-1, is_valid bool — no error channel); regexbinding Go package (pinned-borrow strings, status-in-RAX)
+- Example 09: program.hy (validate_email via the pinned email regex; simple_pattern = validity bool) + committed main.go.txt consumer — go run BYTE-EXACT (`ada@lovelace.dev <nil>` / `match: true`)
+- Runner: 09 assembles the consumer module in the acceptance (skips the generic binary pre-build)
+- 183 tests; 10/10 examples; corpus 20/20
+
+Stage Summary:
+- ALL TEN target programs byte-exact — the SPEC's ten-program set is fully green
+- Remaining plan work: differential corpus loop, call-overhead bench (G2 evidence), G2 gate doc

@@ -168,9 +168,10 @@ fn cmd_check(args: &[String]) -> ExitCode {
 }
 
 fn cmd_build(args: &[String]) -> ExitCode {
-    let file = args.iter().find(|a| !a.starts_with('-')).cloned();
+    // The .hy file: the first arg ending in .hy (flag values never do).
+    let file = args.iter().find(|a| a.ends_with(".hy")).cloned();
     let Some(file) = file else {
-        eprintln!("usage: hyb build <file.hy> -o <bin-path> [--emit-go]");
+        eprintln!("usage: hyb build <file.hy> -o <bin-path> [--emit-go] | --package <name> --out-dir <dir> [--binding-prefix <path>]");
         return ExitCode::from(2);
     };
     let out_idx = args.iter().position(|a| a == "-o");
@@ -179,6 +180,17 @@ fn cmd_build(args: &[String]) -> ExitCode {
         .cloned()
         .unwrap_or_else(|| "a.out".to_string());
     let emit_go_only = args.iter().any(|a| a == "--emit-go");
+    // Package mode (example 09): emit an importable Go package + the
+    // runtime pieces, instead of building a binary.
+    let pkg_idx = args.iter().position(|a| a == "--package");
+    let pkg_name = pkg_idx.and_then(|i| args.get(i + 1)).cloned();
+    let outdir_idx = args.iter().position(|a| a == "--out-dir");
+    let out_dir = outdir_idx.and_then(|i| args.get(i + 1)).cloned();
+    let bprefix_idx = args.iter().position(|a| a == "--binding-prefix");
+    let binding_prefix = bprefix_idx
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_else(|| "hybrid.program".to_string());
 
     // --- 1. Toolchain pin enforcement (HYB-E9001) ---
     // The walking skeleton's reproducibility guard (DX study: ~30 lines).
@@ -247,16 +259,32 @@ fn cmd_build(args: &[String]) -> ExitCode {
     }
 
     // --- 4. Emit Go ---
-    let go_src = match hy_emit::emit_go(&ast) {
-        Ok(g) => g,
-        Err(e) => {
-            eprintln!("error [emit]: {}", e.message);
-            return ExitCode::from(2);
+    let go_src = if let Some(pn) = &pkg_name {
+        match hy_emit::emit_go_package(&ast, pn, &binding_prefix) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("error [emit]: {}", e.message);
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        match hy_emit::emit_go(&ast) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("error [emit]: {}", e.message);
+                return ExitCode::from(2);
+            }
         }
     };
     // Which rust bindings does the emitted Go call? (M6: known crates only;
     // the emitter errors cleanly on unknown ones, so this scan is exact.)
     let bindings = hy_emit::used_binding_roots(&go_src);
+
+    // --- 4b. Package mode: assemble the package dir + runtime pieces. ---
+    if let (Some(pn), Some(od)) = (&pkg_name, &out_dir) {
+        return cmd_build_package(od, pn, &bindings, &go_src, &binding_prefix);
+    }
+
     let go_path = format!("{}.go", out_path);
     if let Some(parent) = std::path::Path::new(&go_path).parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -321,6 +349,136 @@ fn cmd_build(args: &[String]) -> ExitCode {
 enum BuildError {
     Tool(String),
     Go(String),
+}
+
+/// Package mode (example 09): assemble an importable Go package directory:
+///
+/// ```text
+/// <out-dir>/<name>.go      the emitted package source
+/// <out-dir>/hybridge/      the boundary core (copied)
+/// <out-dir>/<binding>/     per-crate bindings (copied)
+/// <out-dir>/lib/libhyrt.a  the staticlib (built fresh or reused)
+/// ```
+/// The consumer's module imports `<module>/<name>`; --binding-prefix told
+/// the emitter what import path the bindings carry, and the binding
+/// packages' hybridge import is rewritten to the same prefix.
+fn cmd_build_package(
+    out_dir: &str,
+    pkg_name: &str,
+    bindings: &[&str],
+    go_src: &str,
+    binding_prefix: &str,
+) -> ExitCode {
+    let fail = |m: String| {
+        eprintln!("{}", m);
+        ExitCode::from(2)
+    };
+    let rt = match runtime_dir() {
+        Ok(p) => p,
+        Err(BuildError::Tool(m)) => return fail(m),
+        Err(_) => return fail("runtime dir error".to_string()),
+    };
+    let od = std::path::Path::new(out_dir);
+    if let Err(e) = std::fs::create_dir_all(od) {
+        return fail(format!("creating {}: {}", od.display(), e));
+    }
+    if let Err(e) = std::fs::write(od.join(format!("{}.go", pkg_name)), go_src) {
+        return fail(format!("writing package source: {}", e));
+    }
+    let copy_pkg = |name: &str| -> Result<(), String> {
+        let src = rt.join("go").join(name);
+        let dst = od.join(name);
+        std::fs::create_dir_all(&dst).map_err(|e| format!("mkdir {}: {}", dst.display(), e))?;
+        for entry in
+            std::fs::read_dir(&src).map_err(|e| format!("reading {}: {}", src.display(), e))?
+        {
+            let entry = entry.map_err(|e| format!("readdir: {}", e))?;
+            let p = entry.path();
+            if p.extension().map(|x| x == "go").unwrap_or(false) {
+                let mut text = std::fs::read_to_string(&p)
+                    .map_err(|e| format!("reading {}: {}", p.display(), e))?;
+                // The runtime copies' hybridge import follows the consumer's
+                // module (the prefix the emitter already used).
+                text = text.replace("hybrid.program/", &format!("{}/", binding_prefix));
+                std::fs::write(dst.join(entry.file_name()), text)
+                    .map_err(|e| format!("writing {}: {}", dst.display(), e))?;
+            } else if p.is_file() {
+                std::fs::copy(&p, dst.join(entry.file_name()))
+                    .map_err(|e| format!("copying {}: {}", p.display(), e))?;
+            }
+        }
+        Ok(())
+    };
+    if let Err(m) = copy_pkg("hybridge") {
+        return fail(m);
+    }
+    for b in bindings {
+        if let Err(m) = copy_pkg(b) {
+            return fail(m);
+        }
+    }
+    // The staticlib (fresh or reused) at <out-dir>/lib/ — the bindings'
+    // #cgo LDFLAGS point at ${SRCDIR}/../lib.
+    match ensure_staticlib(&rt) {
+        Ok(lib) => {
+            let libdir = od.join("lib");
+            if let Err(e) = std::fs::create_dir_all(&libdir) {
+                return fail(format!("creating {}: {}", libdir.display(), e));
+            }
+            if let Err(e) = std::fs::copy(&lib, libdir.join("libhyrt.a")) {
+                return fail(format!("copying staticlib: {}", e));
+            }
+        }
+        Err(BuildError::Tool(m)) => return fail(m),
+        Err(_) => return fail("staticlib build error".to_string()),
+    }
+    println!(
+        "package {} ready at {} (bindings: {})",
+        pkg_name,
+        od.display(),
+        if bindings.is_empty() { "none".to_string() } else { bindings.join(", ") }
+    );
+    ExitCode::SUCCESS
+}
+
+/// Build (or reuse) the hyrt staticlib; returns its path.
+fn ensure_staticlib(rt: &std::path::Path) -> Result<std::path::PathBuf, BuildError> {
+    let crate_dir = rt.join("rust/hyrt");
+    let src_lib = match std::env::var("CARGO_TARGET_DIR") {
+        Ok(t) => std::path::PathBuf::from(t).join("release/libhyrt.a"),
+        Err(_) => crate_dir.join("target/release/libhyrt.a"),
+    };
+    let fresh = std::fs::metadata(&src_lib).is_ok()
+        && newest_mtime(&crate_dir)
+            .map(|src_t| {
+                std::fs::metadata(&src_lib)
+                    .and_then(|l| l.modified())
+                    .ok()
+                    .map(|lib_t| lib_t >= src_t)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+    if !fresh {
+        let mut cargo = Command::new(cargo_bin());
+        cargo
+            .args(["build", "--release", "-j2"])
+            .current_dir(&crate_dir)
+            .env("CARGO_BUILD_JOBS", "2");
+        if let Ok(t) = std::env::var("CARGO_TARGET_DIR") {
+            cargo.env("CARGO_TARGET_DIR", t);
+        }
+        let out = cargo.output().map_err(|e| {
+            BuildError::Tool(format!("running cargo build (hyrt): {}", e))
+        })?;
+        if !out.status.success() {
+            return Err(BuildError::Tool(format!(
+                "cargo build (hyrt) failed:\n{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )));
+        }
+    }
+    Ok(src_lib)
 }
 
 /// The runtime directory: HYB_RUNTIME_DIR override, else the repo-relative

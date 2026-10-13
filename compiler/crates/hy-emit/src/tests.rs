@@ -849,3 +849,47 @@ fn e3_for_iterate_over_array_try_hoists_before_loop() {
     let loop_at = go.find("for _, u := range hyT1").unwrap();
     assert!(hoist < loop_at, "hoist must precede the loop:\n{}", go);
 }
+
+// ---------------------------------------------------------------------------
+// Batch H — package emission (example 09's adoption story)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn package_mode_exports_pub_fns() {
+    let file = hy_syntax::parse_file(
+        "t.hy",
+        "import \"rust/regex\"\n\npub fn validate_email(s string) (string, error) {\n    ok := regex.is_match(`^x$`, s)?\n    if !ok {\n        return _, errors.new(\"invalid email address\")\n    }\n    return s, nil\n}\n\npub fn simple_pattern(p string) bool {\n    return regex.is_valid(p)\n}\n",
+    )
+    .expect("parse");
+    let go = super::emit_go_package(&file, "hybrid", "example.com/app/hybrid").expect("emit");
+    assert!(
+        go.contains("func ValidateEmail(s string) (string, error) {"),
+        "M4 export mapping:\n{}",
+        go
+    );
+    assert!(go.contains("func SimplePattern(p string) bool {"), ":\n{}", go);
+    assert!(go.contains("package hybrid\n"), ":\n{}", go);
+    // E3 in an error-result fn propagates via the zero-results return.
+    assert!(
+        go.contains("return \"\", hyErr0"),
+        "zero-fill propagation:\n{}",
+        go
+    );
+    // `return _, err` fills the `_` slot with the zero value.
+    assert!(go.contains("return \"\", errors.New("), ":\n{}", go);
+    // Bindings import under the consumer's prefix.
+    assert!(
+        go.contains("\"example.com/app/hybrid/regexbinding\""),
+        ":\n{}",
+        go
+    );
+    assert!(go.contains("regexbinding.IsMatch("), ":\n{}", go);
+    assert!(!go.contains("[]byte("), "regex binding takes strings:\n{}", go);
+}
+
+#[test]
+fn package_mode_private_fns_stay_snake_case() {
+    let file = hy_syntax::parse_file("t.hy", "fn helper(n int) int {\n    return n\n}\n").expect("parse");
+    let go = super::emit_go_package(&file, "hybrid", "x").expect("emit");
+    assert!(go.contains("func helper(n int) int {"), ":\n{}", go);
+}

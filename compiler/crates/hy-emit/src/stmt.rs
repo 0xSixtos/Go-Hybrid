@@ -335,7 +335,8 @@ impl Emitter {
 
     /// The `?` propagation tail, shared by every E3 shape (binding-position,
     /// expression-form hoists, the httptest composite): the E11 handler
-    /// contract, the E6 main-closure return, or a clean error.
+    /// contract, the E6 main-closure return, an error-result fn's
+    /// zero-results return (package mode), or a clean error.
     fn propagate_error(&mut self, err_temp: &str) -> Result<(), EmitError> {
         if let Some(w) = self.handler_writer.clone() {
             self.use_package("http");
@@ -349,6 +350,12 @@ impl Emitter {
         if self.in_main_closure {
             self.push(&format!("hyErr = {}", err_temp));
             self.push("return");
+            return Ok(());
+        }
+        if let Some(mut rets) = self.cur_fn_error_returns.clone() {
+            let n = rets.len() - 1;
+            rets[n] = err_temp.to_string();
+            self.push(&format!("return {}", rets.join(", ")));
             return Ok(());
         }
         Err(EmitError::unsupported(
@@ -398,6 +405,9 @@ impl Emitter {
 
         let err_name = if self.in_main_closure {
             "hyErr".to_string()
+        } else if self.cur_fn_error_returns.is_some() {
+            // Error-result fn: propagate_error fills the return.
+            String::new()
         } else {
             return Err(EmitError::unsupported(
                 "`?` outside main (functions-with-error-results land after the walking skeleton)",
@@ -410,8 +420,10 @@ impl Emitter {
         self.push(&format!("{} := {}", names.join(", "), call_text));
         self.push(&format!("if {} != nil {{", temp));
         self.indent += 1;
-        self.push(&format!("{} = {}", err_name, temp));
-        self.push("return");
+        if self.in_main_closure {
+            self.push(&format!("{} = {}", err_name, temp));
+        }
+        self.propagate_error(&temp)?;
         self.indent -= 1;
         self.push("}");
         self.hint_from_values(&l.names, std::slice::from_ref(call));
@@ -885,14 +897,26 @@ impl Emitter {
         }
         // `return none` — lower against the declared option result (the
         // prelude's zero value IS none).
+        // `return _, err` — the `_` slot fills with the result's zero value
+        // (SPEC E3's sugar; unnamed results cannot say `_` in Go). Only in
+        // fns whose error-returns shape is known (E3-capable fns).
         let mut vs = Vec::new();
-        for v in values {
+        for (i, v) in values.iter().enumerate() {
             if matches!(v, Expr::Ident { name, .. } if name == "none") {
                 match &self.cur_option_result {
                     Some(opt) => vs.push(format!("{}{{}}", opt)),
                     None => {
                         return Err(EmitError::unsupported(
                             "`return none` in a function whose result is not option[T]",
+                        ));
+                    }
+                }
+            } else if matches!(v, Expr::Ident { name, .. } if name == "_") {
+                match &self.cur_fn_error_returns {
+                    Some(zeros) if i < zeros.len() => vs.push(zeros[i].clone()),
+                    _ => {
+                        return Err(EmitError::unsupported(
+                            "`return _` needs a fn whose results end in `error` (E3's zero-fill)",
                         ));
                     }
                 }

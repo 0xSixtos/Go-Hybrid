@@ -113,6 +113,18 @@ pub fn emit_go(file: &File) -> Result<String, EmitError> {
     em.emit_file(file)
 }
 
+/// Emit as an importable PACKAGE (example 09's adoption story):
+/// `package <name>`, `pub fn` exports via M4's export mapping, and the
+/// binding packages import under `binding_prefix` (the consumer module's
+/// path to the package dir). E3 propagates through error-result fns.
+pub fn emit_go_package(file: &File, pkg_name: &str, binding_prefix: &str) -> Result<String, EmitError> {
+    let mut em = Emitter::new();
+    em.package_name = pkg_name.to_string();
+    em.binding_prefix = binding_prefix.to_string();
+    em.export_pub = true;
+    em.emit_file(file)
+}
+
 /// Which rust-binding packages does the emitted Go call? (`hyb build`
 /// assembles those into the build workspace.) Scans for the binding roots'
 /// call prefix — the emitter only emits `<root>.` for KNOWN crates, so the
@@ -189,7 +201,7 @@ pub(crate) fn is_package_root(name: &str) -> bool {
         name,
         "fmt" | "os" | "io" | "time" | "sort" | "strings" | "strconv"
             | "errors" | "sync" | "bufio" | "http" | "httptest" | "json"
-            | "atomic" | "filepath" | "path" | "hex" | "sha3" | "serde_json"
+            | "atomic" | "filepath" | "path" | "hex" | "sha3" | "serde_json" | "regex"
     )
 }
 
@@ -274,6 +286,14 @@ pub struct Emitter {
     /// E3 expression-form hoists (Batch G): Try span start → the hoisted
     /// temp. emit_expr's Try branch substitutes the temp; cleared per fn.
     try_temps: BTreeMap<(u32, u32), String>,
+    /// Package mode (example 09): the emitted `package` clause, the prefix
+    /// binding-package imports use, and whether `pub fn` exports.
+    package_name: String,
+    binding_prefix: String,
+    export_pub: bool,
+    /// The current (non-main) fn's per-result RETURN texts when its results
+    /// end in `error` — E3 propagates via `return <zeros…, err>`.
+    cur_fn_error_returns: Option<Vec<String>>,
 }
 
 impl Emitter {
@@ -293,6 +313,10 @@ impl Emitter {
             pending_fnlit_conv: None,
             cur_fn_conv_result: None,
             try_temps: BTreeMap::new(),
+            package_name: "main".to_string(),
+            binding_prefix: "hybrid.program".to_string(),
+            export_pub: false,
+            cur_fn_error_returns: None,
         }
     }
 
@@ -383,14 +407,23 @@ impl Emitter {
         // sit between `package` and the first declaration — Go's required
         // order. The prelude (option/set/hy_pop) lands between imports and
         // the first user decl, only when the emitted body uses it.
-        let mut out = String::from("package main\n");
+        let mut out = String::from("package ");
+        out.push_str(&self.package_name);
+        out.push('\n');
         if !self.imports.is_empty() {
             out.push_str("\nimport (\n");
             // Roots map to their real Go import paths (http → net/http,
-            // SPEC M5's curated allowlist); the CODE keeps the root spelling
-            // because that IS Go's package name for those imports.
+            // SPEC M5's curated allowlist); binding packages live under the
+            // configured prefix (hybrid.program for program builds, the
+            // consumer's package path in package mode). The CODE keeps the
+            // root spelling — Go's package name for those imports.
             for root in &self.imports {
-                out.push_str(&format!("\t\"{}\"\n", import_path_of(root)));
+                let path = if shapes::RUST_CRATES.iter().any(|c| c.binding_root == root.as_str()) {
+                    format!("{}/{}", self.binding_prefix, root)
+                } else {
+                    import_path_of(root)
+                };
+                out.push_str(&format!("\t\"{}\"\n", path));
             }
             out.push_str(")\n");
         }
@@ -475,8 +508,13 @@ impl Emitter {
 
         // Associated functions (`lru_cache.new`) mangle to
         // `lru_cache_new` — Go has no dotted identifiers. Call sites mangle
-        // identically (see emit_call).
-        let go_name = f.name.replace('.', "_");
+        // identically (see emit_call). Package mode exports `pub fn` via
+        // M4's export mapping (example 09: validate_email → ValidateEmail).
+        let go_name = if self.export_pub && f.is_pub && f.receiver.is_none() && !f.name.contains('.') {
+            to_go_name(&f.name)
+        } else {
+            f.name.replace('.', "_")
+        };
         let is_main = f.name == "main" && f.receiver.is_none();
         // E4/E6: main's `?` sites trigger the exit contract. If main declares
         // results OR contains top-level `?` sites, the body moves into a
@@ -496,6 +534,27 @@ impl Emitter {
             }
             if let Some(conv) = self.result_conv_key(&f.results[0].ty) {
                 self.cur_fn_conv_result = Some(conv);
+            }
+        }
+
+        // E3 in an error-result fn (package mode, example 09): the
+        // propagation tail returns the zero results + the error.
+        self.cur_fn_error_returns = None;
+        if !is_main && !f.results.is_empty() && !main_needs_wrapper {
+            let last_is_err = matches!(
+                &f.results.last().unwrap().ty,
+                TypeExpr::Named { name, .. } if name == "error"
+            );
+            if last_is_err {
+                let mut texts = Vec::new();
+                for (i, r) in f.results.iter().enumerate() {
+                    if i == f.results.len() - 1 {
+                        texts.push(String::new()); // filled by propagate_error
+                    } else {
+                        texts.push(self.zero_value(&r.ty));
+                    }
+                }
+                self.cur_fn_error_returns = Some(texts);
             }
         }
 

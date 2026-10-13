@@ -105,6 +105,10 @@ pub struct EnumVariant {
 
 #[derive(Debug, Clone)]
 pub struct FnDecl {
+    /// `pub fn` — exported at package emission (example 09's adoption
+    /// surface: M4's export mapping ValidateEmail). Contract extension
+    /// (lead-owned, logged): the parser previously had no visibility flag.
+    pub is_pub: bool,
     pub name: String,
     /// Method receiver: `fn (g *graph) connect(...)`.
     pub receiver: Option<Receiver>,

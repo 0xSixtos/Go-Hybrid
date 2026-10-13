@@ -1815,6 +1815,16 @@ lowercase in the emitted Go (Go's own visibility then enforces the same
 boundary). Package-internal visibility is the only level in MVP — no
 `crate`-private/friend granularity. [decided: Go model]
 
+**M2b — Package emission (`hyb build --package`, landed with example 09).**
+The adoption story is a BUILD MODE, not a different language: the same
+pipeline emits `package <name>` with `pub fn` exported (M2's mapping) into
+a directory carrying the runtime pieces it needs (hybridge core, per-crate
+bindings, the staticlib) — a Go consumer imports it with **no Hybrid
+toolchain installed**, exactly spike 2's zero-install route. `?` inside a
+package fn whose results end in `error` propagates via the zero-results
+return (`return "", err`), and `return _, err` fills the `_` slot with
+that result's zero value (E3's sugar; unnamed Go results cannot say `_`).
+
 **M3 — Import forms.**
 
 ```hy

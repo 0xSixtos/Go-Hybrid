@@ -293,9 +293,12 @@ impl Parser {
 
     fn parse_decl(&mut self) -> PResult<Decl> {
         let start = self.pos;
+        // Visibility marker: `pub fn` carries it into the AST (package
+        // emission exports via M4's mapping); other decls drop it (same
+        // behavior as before the flag existed).
+        let mut is_pub = false;
         if self.at_kw("pub") {
-            // visibility marker — NOT representable in the AST contract
-            // (Decl has no visibility field); dropped here.
+            is_pub = true;
             self.bump();
         }
         if self.at_kw("import") {
@@ -322,7 +325,7 @@ impl Parser {
             return self.parse_type_alias();
         }
         if self.at_kw("fn") {
-            let f = self.parse_fn_decl()?;
+            let f = self.parse_fn_decl(is_pub)?;
             return Ok(Decl::Fn(f));
         }
         self.err(format!("expected declaration (import/const/struct/enum/type/fn), found {}", self.describe_cur()))
@@ -429,7 +432,7 @@ impl Parser {
         Ok(v)
     }
 
-    fn parse_fn_decl(&mut self) -> PResult<FnDecl> {
+    fn parse_fn_decl(&mut self, is_pub: bool) -> PResult<FnDecl> {
         let start = self.pos;
         self.bump(); // fn
         let receiver = if self.at_punct("(") { Some(self.parse_receiver()?) } else { None };
@@ -447,6 +450,7 @@ impl Parser {
         let results = self.parse_results()?;
         let body = if self.at_punct("{") { Some(self.parse_block()?) } else { None };
         Ok(FnDecl {
+            is_pub,
             name,
             receiver,
             type_params,

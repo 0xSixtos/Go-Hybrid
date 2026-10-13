@@ -453,6 +453,74 @@ pub extern "C" fn hy_json_live_count(out: *mut u64) -> i32 {
     })
 }
 
+
+// ---------------------------------------------------------------------------
+// rust/regex (pinned 1.11.1) — example 09's through-the-package call
+// ---------------------------------------------------------------------------
+
+/// `regex.is_match(pattern, text)` — compile + match in one crossing.
+/// Returns 1 match / 0 no-match / -1 error (null, invalid UTF-8, or a
+/// pattern that does not compile). Status-in-RAX: no out-pointers needed.
+#[no_mangle]
+pub extern "C" fn hy_regex_is_match(
+    pptr: *const u8,
+    plen: usize,
+    tptr: *const u8,
+    tlen: usize,
+) -> i64 {
+    if (plen > 0 && pptr.is_null()) || (tlen > 0 && tptr.is_null()) {
+        return -1;
+    }
+    let pat = if plen == 0 {
+        ""
+    } else {
+        match std::str::from_utf8(unsafe { std::slice::from_raw_parts(pptr, plen) }) {
+            Ok(s) => s,
+            Err(_) => return -1,
+        }
+    };
+    let text = if tlen == 0 {
+        ""
+    } else {
+        match std::str::from_utf8(unsafe { std::slice::from_raw_parts(tptr, tlen) }) {
+            Ok(s) => s,
+            Err(_) => return -1,
+        }
+    };
+    match regex::Regex::new(pat) {
+        Ok(re) => {
+            if re.is_match(text) {
+                1
+            } else {
+                0
+            }
+        }
+        Err(_) => -1,
+    }
+}
+
+/// `regex.is_valid(pattern)` — does the pattern compile? 1/0, no error
+/// channel (example 09's simple_pattern surface: validity as a bool).
+#[no_mangle]
+pub extern "C" fn hy_regex_is_valid(pptr: *const u8, plen: usize) -> i64 {
+    if plen > 0 && pptr.is_null() {
+        return 0;
+    }
+    let pat = if plen == 0 {
+        ""
+    } else {
+        match std::str::from_utf8(unsafe { std::slice::from_raw_parts(pptr, plen) }) {
+            Ok(s) => s,
+            Err(_) => return 0,
+        }
+    };
+    if regex::Regex::new(pat).is_ok() {
+        1
+    } else {
+        0
+    }
+}
+
 /// FNV-1a over the handle table's generation epoch — a cheap handshake word
 /// so a Go binary built against a different hyrt aborts loudly, not quietly.
 #[no_mangle]

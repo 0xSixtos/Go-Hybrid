@@ -30,11 +30,14 @@ run_example() {
     local bin="$WORK/$name"
 
     note "--- $name"
-    if ! "$HYB" build "$prog" -o "$bin" >"$WORK/$name.build.log" 2>&1; then
-        note "FAIL $name (build)"
-        sed 's/^/    /' "$WORK/$name.build.log"
-        FAIL=1
-        return
+    # 09 is package mode (no main fn) — it builds its own workspace below.
+    if [ "$name" != "09-go-imports-hybrid" ]; then
+        if ! "$HYB" build "$prog" -o "$bin" >"$WORK/$name.build.log" 2>&1; then
+            note "FAIL $name (build)"
+            sed 's/^/    /' "$WORK/$name.build.log"
+            FAIL=1
+            return
+        fi
     fi
 
     case "$name" in
@@ -58,6 +61,31 @@ run_example() {
         sed -E 's/^1M hashes in [0-9]+ms,/1M hashes in 0ms,/' "$WORK/$name.out" >"$WORK/$name.masked"
         if diff -u "$dir/expected.txt" "$WORK/$name.masked" >"$WORK/$name.diff"; then
             note "PASS $name (digests exact; timing masked; checksum exact)"
+            PASS="$PASS $name"
+        else
+            note "FAIL $name (output diff)"
+            sed 's/^/    /' "$WORK/$name.diff"
+            FAIL=1
+        fi
+        ;;
+    09-go-imports-hybrid)
+        # THE ADOPTION STORY: a plain Go program imports a Hybrid-compiled
+        # package (hyb --package emits the Go source + runtime pieces; the
+        # consumer needs NO Hybrid toolchain to build, only Go).
+        local ws="$WORK/09-ws"
+        mkdir -p "$ws/hybrid"
+        if ! "$HYB" build "$prog" --package hybrid --out-dir "$ws/hybrid" \
+             --binding-prefix example.com/app/hybrid >"$WORK/$name.pkg.log" 2>&1; then
+            note "FAIL $name (package build)"
+            sed 's/^/    /' "$WORK/$name.pkg.log"
+            FAIL=1
+            return
+        fi
+        printf 'module example.com/app\n\ngo 1.26\n' >"$ws/go.mod"
+        cp "$dir/main.go.txt" "$ws/main.go"
+        if (cd "$ws" && go run . >"$WORK/$name.out" 2>&1) && \
+           diff -u "$dir/expected.txt" "$WORK/$name.out" >"$WORK/$name.diff"; then
+            note "PASS $name (Go consumer imports the Hybrid package; rust/regex through the boundary)"
             PASS="$PASS $name"
         else
             note "FAIL $name (output diff)"
@@ -105,7 +133,7 @@ run_example() {
 }
 
 if [ $# -eq 0 ]; then
-    set -- 01-hello 02-cli-cat 03-worker-pool 04-pipeline-backpressure 05-json-transform 06-http-server 07-lru-generics 08-graph-ownership 10-rust-crate-import
+    set -- 01-hello 02-cli-cat 03-worker-pool 04-pipeline-backpressure 05-json-transform 06-http-server 07-lru-generics 08-graph-ownership 09-go-imports-hybrid 10-rust-crate-import
 fi
 
 for name in "$@"; do
