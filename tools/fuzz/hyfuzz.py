@@ -129,6 +129,10 @@ def main():
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
+    # resolve BEFORE any subprocess: check_one runs with cwd=workdir (a temp
+    # dir), so a relative --hyb path would resolve THERE (the 0.1s fleet
+    # failure of 2026-10-14 — FileNotFoundError, exit 1 before case 1)
+    args.hyb = os.path.abspath(args.hyb)
     corpus = load_corpus(args.corpus)
     if not corpus:
         raise SystemExit("fuzz: no corpus programs found")

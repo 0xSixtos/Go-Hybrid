@@ -257,3 +257,16 @@ Work Log:
 
 Stage Summary:
 - Lesson recorded: hyb's usage exit is 2 — never use `hyb --help` as a success sentinel in fleet jobs.
+
+---
+Task ID: 19-d
+Agent: Super Z (main)
+Task: Fleet results — row 3 verdict recorded; fuzz leg path bug fixed.
+
+Work Log:
+- Kaggle job 007 (worker-tier G2 bench) SUCCEEDED: 4-core Xeon 2.20 GHz — fast path 6.93 ns > 5.00 ns budget (VERDICT: MISS, pre-registered budget), raw trampoline 5.36 ns, go-call floor 3.15 ns, marginal delta 3.78 ns, deep path 42.41 ns, newobject 888.5 ns; DeepPathCount froze at 15100001 — fast path proven taken. Sandbox PASS does not generalize to this tier (floor 1.5x slower AND marginal cost ~3x — hardware-sensitive stack-switch). Row 3 CLOSED with the honest MISS in PLAN.md; no code change implied.
+- Heavy job 006: asan-bridge PASS + race-bridge PASS on the Actions shard (the sanitizers legs are GREEN on the fleet); fuzz leg failed in 0.1 s — reproduced locally on a fresh clone: hyfuzz ran check_one with cwd=temp-dir while --hyb was relative → FileNotFoundError before case 1. Fixed: abspath at startup. Verified: exact fleet command, 800/800 cases, all invariants held.
+
+Stage Summary:
+- Row 3: recorded MISS (the budget is sandbox-tier; row 4 per-callee budgets is the follow-up).
+- Row 2: sanitizers legs proven on the fleet; fuzz leg re-dispatching after the one-line fix.
