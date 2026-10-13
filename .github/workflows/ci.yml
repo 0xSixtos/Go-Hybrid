@@ -79,7 +79,12 @@ jobs:
           curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.99.0
           echo "/usr/local/go/bin:$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Version pins agree (env.sh ↔ README ↔ hyb ↔ PLAN)
-        run: bash tools/check-versions.sh
+        run: |
+          set -e
+          # Prefer the just-installed pinned toolchains over the runner's
+          # preinstalled rustup shim (which has no default toolchain).
+          export PATH="$HOME/.cargo/bin:/usr/local/go/bin:$PATH"
+          bash tools/check-versions.sh
       - name: Compiler tests (hy-diag + hy-syntax + hy-check + hy-emit)
         run: |
           set -e

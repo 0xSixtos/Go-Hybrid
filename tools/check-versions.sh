@@ -57,17 +57,27 @@ grep -q "$PINNED_RUST" PLAN.md \
 if [ "${1:-}" != "--no-toolchain" ]; then
     if command -v go >/dev/null 2>&1; then
         INSTALLED_GO="$(go version 2>/dev/null | awk '{print $3}')"
-        [ "$INSTALLED_GO" = "$PINNED_GO" ] \
-            && pass "installed go == $PINNED_GO" \
-            || fail "installed go ($INSTALLED_GO) != $PINNED_GO"
+        if [ -z "$INSTALLED_GO" ]; then
+            pass "go shim unusable — skipping (hyb build enforces at runtime)"
+        elif [ "$INSTALLED_GO" = "$PINNED_GO" ]; then
+            pass "installed go == $PINNED_GO"
+        else
+            fail "installed go ($INSTALLED_GO) != $PINNED_GO"
+        fi
     else
         pass "go not installed — skipping (hyb build enforces at runtime)"
     fi
     if command -v rustc >/dev/null 2>&1; then
         INSTALLED_RUST="$(rustc --version 2>/dev/null | awk '{print $2}')"
-        [ "$INSTALLED_RUST" = "$PINNED_RUST" ] \
-            && pass "installed rustc == $PINNED_RUST" \
-            || fail "installed rustc ($INSTALLED_RUST) != $PINNED_RUST"
+        if [ -z "$INSTALLED_RUST" ]; then
+            # A rustup shim with no default toolchain (bare CI images) — treat
+            # as not installed; hyb build enforces the pin at runtime.
+            pass "rustc shim has no default toolchain — skipping (hyb build enforces)"
+        elif [ "$INSTALLED_RUST" = "$PINNED_RUST" ]; then
+            pass "installed rustc == $PINNED_RUST"
+        else
+            fail "installed rustc ($INSTALLED_RUST) != $PINNED_RUST"
+        fi
     else
         pass "rustc not installed — skipping (hyb build enforces at runtime)"
     fi
