@@ -5,5 +5,5 @@
 - The bridge (landed this session): hyrt staticlib (sha3/serde_json/regex wrappers), spike-3 asm trampolines, 3 Go bindings (cgo broker once at init), E3b `?` expression form, E11 handler contract, foreign shape table, package emission
 - Works (verified): Tier-0 corpus 20/20, tripwire not fired; 194 compiler tests; differential FULL AGREEMENT (make differential + CI); toolchain pins; 10/10 acceptance
 - Blocked: nothing
-- Next 3 actions: (1) human G2 review (gates/G2.md), (2) G3 exit doc (MVP exit criteria sweep), (3) closeout docs refresh
+- Next 3 actions: (1) human review of gates/G2.md + gates/G3.md (both evidence-complete), (2) on approval: the MVP may be called done; on redirect: the queue reopens with the redirect, (3) fleet dispatch (sanitizers/fuzzing) before any release
 - Last review gate: G2 PASSED 2026-10-13 (G1 RATIFIED earlier; Batches E–J logged in PLAN Decision Log per amendment discipline)
