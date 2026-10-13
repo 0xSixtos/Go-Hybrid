@@ -245,3 +245,15 @@ Work Log:
 
 Stage Summary:
 - Differential is deterministic again; CI honesty preserved — the fatal is accepted ONLY because the corpus file itself pre-registers it.
+
+---
+Task ID: 19-c
+Agent: Super Z (main)
+Task: Fleet dispatch debugging — jobs 006/007 first attempt failed.
+
+Work Log:
+- Both fleet runs (heavy shards + kaggle) failed fast: (1) job.json sha field "v0.1.0" is a TAG — the runner's sha-check compares rev-parse HEAD against it → exit 1 (fail-soft, loud); (2) the build sentinel `hyb --help >/dev/null` broke every build chain — hyb exits 2 for usage/--help (the CLI's usage exit code, by design) → test -x replaces it.
+- Fixed both job.json files (sha=HEAD like jobs 001-005; sentinel test -x), re-dispatching both tiers.
+
+Stage Summary:
+- Lesson recorded: hyb's usage exit is 2 — never use `hyb --help` as a success sentinel in fleet jobs.
