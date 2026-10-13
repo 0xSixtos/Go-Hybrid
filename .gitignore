@@ -55,3 +55,7 @@ spikes/*/work/**/*.test
 # Python bytecode
 __pycache__/
 *.pyc
+
+# the bridge runtime crate builds via CARGO_TARGET_DIR; a crate-local
+# target/ (created when env.sh is not sourced) must never land in git
+runtime/rust/hyrt/target/
