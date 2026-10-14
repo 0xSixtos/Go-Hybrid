@@ -459,11 +459,33 @@ impl<'a> Checker<'a> {
 
     /// Recursively collect live reference bindings embedded in a composite
     /// literal and link them (may-share) to the freshly bound `name`.
+    /// Projections (pr-28's case): a literal field value like `h1.m` shares
+    /// the root's mutable storage just as much as a bare `h1` — the
+    /// recursion must look through Field/Index/Slice to the root ident.
     fn record_literal_ref(&self, st: &mut FnState, name: &str, e: &Expr) {
         match unwrap_parens(e) {
             Expr::Ident { name: src, .. } => {
                 if self.binding_may_share(st, src) {
                     st.share_edge(name, src);
+                }
+            }
+            // `holder{m: h1.m}` / `xs{a: s1[:]}` — the embedded projection
+            // aliases the root binding's storage (pr-28, still-accepting
+            // repro `h2 := holder{m: h1.m}` after the pr-35 seam).
+            Expr::Slice { base, .. } => {
+                if let Some(root) = unwrap_parens(base).root_ident() {
+                    if self.binding_may_share(st, root) {
+                        st.share_edge(name, root);
+                    }
+                }
+            }
+            Expr::Field { .. } | Expr::Index { .. } => {
+                if self.shape_may_share(&self.shape_of_expr(st, unwrap_parens(e))) {
+                    if let Some(root) = e.root_ident() {
+                        if self.binding_may_share(st, root) {
+                            st.share_edge(name, root);
+                        }
+                    }
                 }
             }
             Expr::StructLit { fields, .. } => {
