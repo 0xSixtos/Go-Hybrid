@@ -511,12 +511,45 @@ impl<'a> Checker<'a> {
         _span: Span,
         idx: usize,
     ) {
+        // T22 (issue #37): `const` is deeply immutable — a rebind, an
+        // element/index write, or a field store whose ROOT resolves to a
+        // `const` binding is HYB-E3006. `Binding::immutable` is set iff
+        // the binding was declared `const` (fn-local or file-level), and
+        // lookup is locals-first, so a shadowing `let`/`var` copy stays
+        // writable. Rejected targets are excluded from the A3/A6/N1 and
+        // rebind bookkeeping below: the verdict is already reject.
+        let is_const_write: Vec<bool> = targets
+            .iter()
+            .map(|t| match self.const_write_root(st, t) {
+                Some(name) => {
+                    let msg = format!(
+                        "cannot write to `{}` — it is a `const` (deeply immutable)",
+                        name
+                    );
+                    let notes = vec![
+                        "`const` is a compile-time constant: no rebind, no element write, no field store through it (SPEC-LANGUAGE T22)".to_string(),
+                        "a file-level `const` lowers to package-level state every task body reaches ambiently — an accepted write would be a data race with zero spawn-site evidence (issue #37)".to_string(),
+                        "use a `let`/`var` local and cross task boundaries with a proof (`move`/send), or guard shared updates with `managed(\"why this is safe\", \"mutex\"|\"atomic\"|\"actor\")`".to_string(),
+                    ];
+                    self.diags.push(
+                        Diagnostic::error("HYB-E3006", self.path.clone(), t.span, msg)
+                            .with_notes(notes),
+                    );
+                    true
+                }
+                None => false,
+            })
+            .collect();
+
         for v in values {
             self.mark_move_in_value(st, v, format!("the move-assign `{}`", v.render()));
         }
 
         // A3: an index-assign on a loaned base path is a potential INSERT
-        for t in targets {
+        for (i, t) in targets.iter().enumerate() {
+            if is_const_write[i] {
+                continue;
+            }
             if matches!(t.kind, PlaceKind::Index { .. }) {
                 if let Some(path) = walk::place_path(t) {
                     self.emit_a3_if_live(st, &path, t.span, idx, "insert");
@@ -526,7 +559,10 @@ impl<'a> Checker<'a> {
 
         // A6: a borrow stored into a struct field (single, parallel, or multi-return)
         if targets.len() == values.len() {
-            for (t, v) in targets.iter().zip(values.iter()) {
+            for (i, (t, v)) in targets.iter().zip(values.iter()).enumerate() {
+                if is_const_write[i] {
+                    continue;
+                }
                 if matches!(t.kind, PlaceKind::Field { .. }) {
                     let is_borrow = as_addr_of(v).is_some()
                         || matches!(self.shape_of_expr(st, v), TypeShape::BorrowHandle(_));
@@ -550,7 +586,10 @@ impl<'a> Checker<'a> {
         // non-nilable target is a compile error (HYB-E4001). An unresolvable
         // target stays silent here — no boundary is involved; N1 fires only
         // where the type is known.
-        for (t, v) in targets.iter().zip(values.iter()) {
+        for (i, (t, v)) in targets.iter().zip(values.iter()).enumerate() {
+            if is_const_write[i] {
+                continue;
+            }
             if Checker::is_nil_literal(v) {
                 if let Some(shape) = self.place_shape(st, t) {
                     if !matches!(shape, TypeShape::Unknown)
@@ -592,9 +631,15 @@ impl<'a> Checker<'a> {
                         })
                         .collect();
 
-                for ((t, v), (shape, ty, non_owned)) in
-                    targets.iter().zip(values.iter()).zip(rhs_info)
+                for (i, ((t, v), (shape, ty, non_owned))) in targets
+                    .iter()
+                    .zip(values.iter())
+                    .zip(rhs_info)
+                    .enumerate()
                 {
+                    if is_const_write[i] {
+                        continue;
+                    }
                     if let PlaceKind::Ident(name) = &t.kind {
                         if let Some(b) = st.env_lookup_mut(name) {
                             if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
@@ -647,6 +692,25 @@ impl<'a> Checker<'a> {
         self.diags.push(
             Diagnostic::error("HYB-E3103", self.path.clone(), t.span, msg).with_notes(notes),
         );
+    }
+
+    /// The binding name at the ROOT of place `p` when that binding is a
+    /// `const` (fn-local `LocalKind::Const` or a file-level const — both
+    /// carry `immutable: true`, and `lookup_binding` resolves locals first,
+    /// so a shadowing copy is never reported). Field/index places walk to
+    /// their base: `cells[0]`, `cfg.tag`, and the plain rebind `cells = ...`
+    /// all resolve through here (T22 / issue #37).
+    fn const_write_root(&self, st: &FnState, p: &Place) -> Option<String> {
+        match &p.kind {
+            PlaceKind::Ident(name) => self
+                .lookup_binding(st, name)
+                .filter(|b| b.immutable)
+                .map(|_| name.clone()),
+            PlaceKind::Field { base, .. } | PlaceKind::Index { base, .. } => {
+                self.const_write_root(st, base)
+            }
+            _ => None,
+        }
     }
 
     /// The shape of an assignment place, when it resolves (drives the N1
