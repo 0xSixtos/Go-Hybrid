@@ -20,9 +20,11 @@ package overheadbench
 
 extern uint64_t hy_nop(uint64_t x);
 extern uint64_t hyrt_abi_word(void);
+extern uint64_t hyrt_stack_alignment_probe(void);
 
 static void* a_nop(void)      { return (void*)&hy_nop; }
 static void* a_abi_word(void) { return (void*)&hyrt_abi_word; }
+static void* a_align(void)    { return (void*)&hyrt_stack_alignment_probe; }
 */
 import "C"
 
@@ -35,6 +37,7 @@ import (
 var (
 	FnNop     = unsafe.Pointer(C.a_nop())
 	FnAbiWord = unsafe.Pointer(C.a_abi_word())
+	FnAlign   = unsafe.Pointer(C.a_align())
 )
 
 // abiWordExpected is hyrt_abi_word() for this binding generation.

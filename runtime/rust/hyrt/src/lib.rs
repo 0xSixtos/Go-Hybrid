@@ -77,6 +77,23 @@ pub extern "C" fn hy_nop(x: u64) -> u64 {
     x
 }
 
+/// Win64 ABI regression probe (fleet-found misalignment, 2026-10-14): the
+/// address of a 16-byte-aligned local, mod 16. A conforming Win64 crossing
+/// (RSP % 16 == 0 at the CALL, RSP % 16 == 8 at callee entry) leaves the
+/// prologue's frame 16-aligned, so this returns 0. The misaligned-8 fast
+/// path returned 8 and crashed the first `movaps` in any gcc-built callee
+/// with aligned SSE stores (sha3's frame zeroing). Pure compute — SMALL
+/// class; Cross1S exercises the exact fast trampoline shape.
+#[no_mangle]
+pub extern "C" fn hyrt_stack_alignment_probe() -> u64 {
+    #[repr(align(16))]
+    struct Align16([u8; 16]);
+    let a = Align16([0; 16]);
+    let p = &a as *const Align16 as u64;
+    std::hint::black_box(&a);
+    p & 15
+}
+
 // ---------------------------------------------------------------------------
 // rust/serde_json (pinned 1.0.140) — example 05's transform crate
 // ---------------------------------------------------------------------------
