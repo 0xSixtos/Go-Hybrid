@@ -56,16 +56,24 @@ fetch() {
 }
 
 # --- resolve the release ---
+# Primary: the releases/latest REDIRECT (no API, no rate limit):
+#   HEAD https://github.com/<repo>/releases/latest -> Location: .../tag/vX.Y.Z
+# Fallback: the API (rate-limited 60/hr unauthenticated — documented).
 if [ -n "$VERSION" ]; then
     TAG="$VERSION"
 else
     echo "==> resolving latest release"
-    API_JSON="$(mktemp)"
-    fetch "https://api.github.com/repos/$REPO/releases/latest" "$API_JSON"
-    TAG="$(sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' "$API_JSON" | head -1)"
-    rm -f "$API_JSON"
+    TAG="$(curl -fsSI "https://github.com/$REPO/releases/latest" 2>/dev/null \
+        | sed -n 's/^location:.*\/tag\/\(v[0-9A-Za-z._-]*\).*/\1/ip' | head -1)"
     if [ -z "$TAG" ]; then
-        echo "install.sh: could not resolve the latest release (rate limit?)" >&2
+        API_JSON="$(mktemp)"
+        if fetch "https://api.github.com/repos/$REPO/releases/latest" "$API_JSON" 2>/dev/null; then
+            TAG="$(sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' "$API_JSON" | head -1)"
+        fi
+        rm -f "$API_JSON"
+    fi
+    if [ -z "$TAG" ]; then
+        echo "install.sh: could not resolve the latest release (network? rate limit?)" >&2
         echo "Pin one manually: HYB_VERSION=v0.1.0 sh install.sh" >&2
         exit 1
     fi
