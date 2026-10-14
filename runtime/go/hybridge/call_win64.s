@@ -51,16 +51,16 @@ TEXT ·spHeadroom(SB), NOSPLIT, $0-8
         RET
 
 // ------------------------------- fast path (caller's goroutine stack)
-// ALIGNMENT CONTRACT (fleet-proven, sha3 crash 2026-10-14): Go asm function
-// ENTRY has RSP % 16 == 0 (the return address sits on top of a 16-aligned
-// SP — the arm64 port's "no SP surgery on the fast path" only works under
-// this rule). Win64 requires RSP % 16 == 0 AT the CALL, so the fast path
-// subtracts 48 (≡0 mod 16): 32 bytes of shadow space directly above the
-// call plus 16 of slack. A $40 version (the SysV-entry ≡8 assumption) left
-// RSP ≡ 8 at the CALL — the callee's frame then sat misaligned and the
-// first 16-byte-aligned SSE store (movaps, in gcc-built sha3) faulted.
-// The deep path never trusted entry alignment (ANDQ $-16 from a page-aligned
-// top) and was correct from the start.
+// ALIGNMENT CONTRACT (fleet-proven twice, sha3 crashes 2026-10-14): Go's
+// ABI0 does NOT guarantee 16-byte alignment at a call site — the entry
+// residue varies with the caller's frame layout, and gcc-built callees
+// zero their frames with 16-byte-aligned SSE (movaps), which faults on a
+// misaligned RSP. The fast path therefore FORCES alignment exactly like
+// the SysV file does: ANDQ $-16 (round down), then 32 bytes of shadow
+// space (≡0 mod 16 at the CALL, the Win64 requirement). Two fixed-sub
+// attempts ($40, then $48) each crashed on a different callee because
+// each silently assumed a constant entry residue. The deep path was
+// always correct (page-aligned top + ANDQ $-16).
 
 // func callFast1(fn unsafe.Pointer, a1 uintptr) uint64
 TEXT ·callFast1(SB), NOSPLIT, $0-24
@@ -74,7 +74,8 @@ TEXT ·callFast1(SB), NOSPLIT, $0-24
         CMPQ    R11, $4096
         JLT     needsdeep1
         MOVQ    SP, BX
-        SUBQ    $48, SP
+        ANDQ    $-16, SP
+        SUBQ    $32, SP
         CALL    AX
         MOVQ    BX, SP
         MOVQ    AX, ret+16(FP)
@@ -97,7 +98,8 @@ TEXT ·callFast2(SB), NOSPLIT, $0-32
         CMPQ    R12, $4096
         JLT     needsdeep2
         MOVQ    SP, BX
-        SUBQ    $48, SP
+        ANDQ    $-16, SP
+        SUBQ    $32, SP
         CALL    AX
         MOVQ    BX, SP
         MOVQ    AX, ret+24(FP)
@@ -121,7 +123,8 @@ TEXT ·callFast3(SB), NOSPLIT, $0-40
         CMPQ    R12, $4096
         JLT     needsdeep3
         MOVQ    SP, BX
-        SUBQ    $48, SP
+        ANDQ    $-16, SP
+        SUBQ    $32, SP
         CALL    AX
         MOVQ    BX, SP
         MOVQ    AX, ret+32(FP)
@@ -146,7 +149,8 @@ TEXT ·callFast4(SB), NOSPLIT, $0-48
         CMPQ    R12, $4096
         JLT     needsdeep4
         MOVQ    SP, BX
-        SUBQ    $48, SP
+        ANDQ    $-16, SP
+        SUBQ    $32, SP
         CALL    AX
         MOVQ    BX, SP
         MOVQ    AX, ret+40(FP)
@@ -172,7 +176,8 @@ TEXT ·callFast1S(SB), NOSPLIT, $0-24
         CMPQ    R11, $1024
         JLT     needsdeep1s
         MOVQ    SP, BX
-        SUBQ    $48, SP
+        ANDQ    $-16, SP
+        SUBQ    $32, SP
         CALL    AX
         MOVQ    BX, SP
         MOVQ    AX, ret+16(FP)
@@ -195,7 +200,8 @@ TEXT ·callFast2S(SB), NOSPLIT, $0-32
         CMPQ    R12, $1024
         JLT     needsdeep2s
         MOVQ    SP, BX
-        SUBQ    $48, SP
+        ANDQ    $-16, SP
+        SUBQ    $32, SP
         CALL    AX
         MOVQ    BX, SP
         MOVQ    AX, ret+24(FP)
@@ -219,7 +225,8 @@ TEXT ·callFast3S(SB), NOSPLIT, $0-40
         CMPQ    R12, $1024
         JLT     needsdeep3s
         MOVQ    SP, BX
-        SUBQ    $48, SP
+        ANDQ    $-16, SP
+        SUBQ    $32, SP
         CALL    AX
         MOVQ    BX, SP
         MOVQ    AX, ret+32(FP)
@@ -244,7 +251,8 @@ TEXT ·callFast4S(SB), NOSPLIT, $0-48
         CMPQ    R12, $1024
         JLT     needsdeep4s
         MOVQ    SP, BX
-        SUBQ    $48, SP
+        ANDQ    $-16, SP
+        SUBQ    $32, SP
         CALL    AX
         MOVQ    BX, SP
         MOVQ    AX, ret+40(FP)
