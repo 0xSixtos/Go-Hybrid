@@ -15,7 +15,7 @@ package overheadbench
 /*
 #cgo LDFLAGS: -L${SRCDIR}/../lib -lhyrt
 #cgo !windows LDFLAGS: -lpthread -ldl -lm
-#cgo windows LDFLAGS: -lwinpthread
+#cgo windows LDFLAGS: -lwinpthread -lntdll -lws2_32 -lbcrypt -luserenv -lole32 -loleaut32 -lsynchronization -ladvapi32
 #include <stdint.h>
 
 extern uint64_t hy_nop(uint64_t x);
