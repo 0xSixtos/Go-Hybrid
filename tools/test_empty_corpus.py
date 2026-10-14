@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-spec = importlib.util.spec_from_file_location('harness', Path(__file__).parent / 'tools/corpus_harness.py')
+spec = importlib.util.spec_from_file_location('harness', Path(__file__).with_name('corpus_harness.py'))
 harness = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(harness)
 
