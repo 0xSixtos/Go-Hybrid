@@ -82,7 +82,23 @@ def checker_rejects(bin_path, hy_path):
     )
 
 
-def build_and_run(bin_path, hy_path, workdir):
+def documented_runtime_hazard(stderr, hazards):
+    """Match the runtime's first diagnostic against a registered fatal.
+
+    Inspect the complete stderr before display truncation: Go stack traces
+    may exceed the report's tail limit. Generic panic/fatal output is not
+    evidence that the specific pre-registered hazard occurred.
+    """
+    first_line = next((line.strip().lower() for line in stderr.splitlines()
+                       if line.strip()), "")
+    for hazard in hazards:
+        message = hazard.split("(", 1)[0].strip().lower()
+        if message and first_line in (f"fatal error: {message}", f"panic: {message}"):
+            return True
+    return False
+
+
+def build_and_run(bin_path, hy_path, workdir, hazards=()):
     """Full pipeline: hyb build + run the binary. Returns (ok, detail)."""
     build = subprocess.run(
         [bin_path, "build", hy_path],
@@ -97,6 +113,8 @@ def build_and_run(bin_path, hy_path, workdir):
         [binary], cwd=workdir, capture_output=True, text=True, timeout=60
     )
     if run.returncode != 0:
+        if documented_runtime_hazard(run.stderr, hazards):
+            return True, "documented RUNTIME-HAZARD fatal (pre-registered)"
         return False, f"run exit {run.returncode}: {(run.stderr or run.stdout)[-200:]}"
     return True, "exit 0"
 
@@ -144,20 +162,12 @@ def main():
             accept_total += 1
             workdir = tempfile.mkdtemp(prefix="hydiff-")
             try:
-                ok, detail = build_and_run(bin_path, path, workdir)
+                ok, detail = build_and_run(bin_path, path, workdir, hazards)
             finally:
                 shutil.rmtree(workdir, ignore_errors=True)
-            if not ok and hazards and detail.startswith("run exit"):
-                # the run died at runtime — is it the DOCUMENTED hazard?
-                blob = detail.lower()
-                if any(h.split("(")[0].strip() in blob for h in hazards) or any(
-                    k in blob for k in ("fatal error", "panic", "concurrent map")
-                ):
-                    ok = True
-                    detail = "documented RUNTIME-HAZARD fatal (pre-registered): " + detail[:100]
             if ok:
                 accept_pass += 1
-                print(f"PASS  {name} ({verdict}: builds + runs)")
+                print(f"PASS  {name} ({verdict}: {detail})")
             else:
                 failures.append(name)
                 print(f"FAIL  {name} ({verdict}: {detail})")
