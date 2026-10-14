@@ -359,7 +359,10 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
 
         // Statement-specific processing.
         match stmt {
-            Stmt::Local(l) => ck.process_local(&mut st, l, idx, managed),
+            Stmt::Local(l) => {
+                ck.process_local(&mut st, l, idx, managed);
+                ck.record_local_borrow_aliases(&mut st, l);
+            }
 
             Stmt::Assign {
                 targets,
@@ -368,6 +371,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 span,
             } => {
                 ck.process_assign(&mut st, targets, *op, values, *span, idx);
+                ck.record_assign_borrow_aliases(&mut st, targets, *op, values);
             }
 
             Stmt::Return { values, .. } => ck.process_return(&mut st, values),
@@ -536,6 +540,56 @@ mod tests {
         let r = check("fn main() { x := 1 \n fmt.println(x) }");
         assert_eq!(r.verdict, Verdict::Accept);
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn move_cannot_launder_closure_borrow_handle_or_unknown_at_boundary() {
+        let r_closure = check(
+            "fn run(f fn()) { f() }\n\
+             fn main() {\n\
+               m := map[string]int{}\n\
+               f := fn() { m[\"k\"] = 1 }\n\
+               task run(move f)\n\
+               m[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r_closure.verdict, Verdict::Reject);
+        assert_eq!(first_error_rule(&r_closure).as_deref(), Some("A1c"));
+
+        let r_ptr = check(
+            "struct st { n int }\n\
+             fn take(r *st) {}\n\
+             fn main() {\n\
+               x := st{}\n\
+               r := &x\n\
+               task take(move r)\n\
+               x.n = 2\n\
+             }",
+        );
+        assert_eq!(r_ptr.verdict, Verdict::Reject);
+        assert_eq!(first_error_rule(&r_ptr).as_deref(), Some("A1b"));
+
+        let r_borrow = check(
+            "import \"rust/serde_json\"\n\
+             fn send_val(v any) {}\n\
+             fn main() {\n\
+               doc := serde_json.parse(`{}`)?\n\
+               v := doc.get(\"k\")?\n\
+               task send_val(move v)\n\
+               doc.set(\"k\", 1)?\n\
+             }",
+        );
+        assert_eq!(r_borrow.verdict, Verdict::Reject);
+
+        let r_unknown = check(
+            "fn send_val(v any) {}\n\
+             fn main() {\n\
+               u := mystery_factory()\n\
+               task send_val(move u)\n\
+             }",
+        );
+        assert_eq!(r_unknown.verdict, Verdict::Reject);
+        assert_eq!(first_error_rule(&r_unknown).as_deref(), Some("FC"));
     }
 
     #[test]
