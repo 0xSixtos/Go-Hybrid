@@ -945,6 +945,39 @@ mod tests {
     }
 
     #[test]
+    fn fc_e3005_fixit_suggests_current_managed_syntax() {
+        // Issue #7 (bounty wording sweep): the HYB-E3005 fix-it used to tell
+        // readers to write a bare `managed { ... }` — syntax the checker now
+        // rejects outright (HYB-E0003: reason + category are required, see
+        // fc_unresolved_name_at_boundary_rejects' sibling test below). The
+        // fix-it must name the hatch that actually compiles.
+        let r = check(
+            "fn handle(x int) { fmt.println(x) }\n\
+             fn main() {\n\
+               task handle(nosuch)\n\
+             }",
+        );
+        let e3005 = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "HYB-E3005")
+            .expect("unresolved name at a spawn boundary is HYB-E3005");
+        assert!(
+            e3005
+                .notes
+                .iter()
+                .any(|n| n.contains("managed(\"why this bypass is safe\", \"category\")")),
+            "fix-it must suggest the real managed(reason, category) syntax: {:?}",
+            e3005.notes
+        );
+        assert!(
+            !e3005.notes.iter().any(|n| n.contains("managed { ")),
+            "fix-it must not suggest the bare `managed {{ ... }}` form, which HYB-E0003 rejects: {:?}",
+            e3005.notes
+        );
+    }
+
+    #[test]
     fn fc_unproven_name_via_managed_escapes() {
         // the SAME unproven value inside a managed block escapes through the
         // explicit hatch: warning only, counted — never a silent pass
