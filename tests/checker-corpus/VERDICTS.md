@@ -63,10 +63,12 @@ renumbered).
 | 18 | 18-pool-shared-struct-managed | ACCEPT-MANAGED | — (A1c escape route 3) | 04 wrapped in `managed`, lock kept: the runtime-honest escape shape |
 | 19 | 19-freeze-read-through-moved-binding | REJECT (contested) | A1b (read-form) | pure READ through the moved binding after the send — pins SPEC O5.2 / open decision D1 (Q1's literal wording bans "mutations" only); **contested — flagged for G1 human pre-review** |
 | 20 | 20-freeze-alias-write | REJECT | A1b (alias-form) | write through a live alias (`m2 := agg` before the send) — the freeze-defeat shape; alias coverage entailed by any sound freeze (05's REQUIRED MUTANT, materialized) |
+| 21 | 21-let-shared-map-reject | REJECT | A1c | `let`-bound map crossing a spawn site — T22 says `let` is SHALLOW, so it is a named mutable GC value, not class-4 immutable (regression for issue #12; corpus growth, added after the fix) |
 
-**Distribution: ACCEPT 7 · ACCEPT-MANAGED 2 · REJECT 11 — 20 programs.**
+**Distribution: ACCEPT 7 · ACCEPT-MANAGED 2 · REJECT 12 — 21 programs.**
 (19 and 20 were added by the lead during integration on 2026-10-12 — still
-BEFORE any checker existed; see the pre-registration statement.)
+BEFORE any checker existed; see the pre-registration statement. 21 is a
+post-checker corpus GROWTH — see the amendment log.)
 
 ## Reading-distinguishing power (what Spike 6's corpus could not do)
 
@@ -328,8 +330,17 @@ by editing the table above, never silently. A checker/checker-corpus
 disagreement is resolved by deciding which side is wrong and amending the
 artifact that is wrong, with the decision recorded.
 
-**Amendment log:** (empty — no amendments since pre-registration
-2026-10-12)
+**Amendment log:**
+
+- **2026-10-14 — corpus GROWTH, `21-let-shared-map-reject` (REJECT A1c).**
+  Not a verdict change to an existing program: a new regression program
+  added with the fix for issue #12. The checker had been promoting a
+  `let`-bound map (and `let`-rooted field/index reads) to class 4 via
+  `LocalKind::is_immutable()` (Let | Const), so this program was ACCEPTED
+  and the emitted Go raced. T22 (`let` is shallow) and the O4 class-4 row
+  (`const` values) settle it: the `let` arm must not grant class 4. Fix:
+  `process_local` grants the class-4 shortcut only to `LocalKind::Const`.
+  Author: @Ratanlavate.
 
 ## Open questions (flagged for SPEC-LANGUAGE.md — NOT silently decided)
 
