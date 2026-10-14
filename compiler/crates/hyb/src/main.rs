@@ -758,8 +758,15 @@ fn check_toolchain_pins(file: &str) -> Option<Diagnostic> {
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
     if let Some(v) = rust_out {
+        // Empty/unparseable output is treated as ABSENT: the rust pin
+        // governs the toolchain WHEN IT IS USED (bridge builds via
+        // ensure_staticlib); a bridge-free build — the arm64 release smoke,
+        // where rustc is legitimately not on PATH at all — must not die on
+        // a rustc that exists but prints nothing. Absent (ENOENT) already
+        // skips; this closes the same hole for the found-but-silent case.
+        // Found during the arm64 release-matrix smoke (row 11/16).
         let found = v.split_whitespace().nth(1).unwrap_or("").to_string();
-        if found != PINNED_RUST {
+        if !found.is_empty() && found != PINNED_RUST {
             return Some(Diagnostic::error(
                 "HYB-E9001",
                 file,
