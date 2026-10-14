@@ -138,14 +138,14 @@ graph ownership moves, a Rust-crate digest service, and a Hybrid package
 consumed by plain Go — every one parses, checks, emits, builds and runs
 byte-exact in CI.
 
-**Windows note:** bridge-free programs (8 of 10) build and run on Windows
-today. The Rust bridge on Windows is **not ready for adoption**: the
-trampolines encode the SysV amd64 ABI while Win64 needs its own, so
-`call_win64.s` is still to come (tracked as a roadmap row). `hyb` now
-recognizes both staticlib flavors (`libhyrt.a` from mingw builds, `hyrt.lib`
-from msvc builds) and the runtime packages compile for windows/amd64 in CI,
-so the porting groundwork is laid. Until the Win64 trampolines land and the
-release matrix runs a Windows bridge smoke, keep bridge workloads on Linux.
+**Windows note:** bridge programs build and run on Windows today. The
+Win64 trampolines (`call_win64.s`) landed and are fleet-proven: every
+release's Windows leg links the staticlib through mingw cgo and runs the
+full runtime suite natively — real crossings through the real trampolines
+(PLAN row 17; the fleet crashes that shaped the ABI work — struct-by-value
+args and stack alignment — are recorded there). `hyb` accepts both
+staticlib flavors (`libhyrt.a` from mingw builds, `hyrt.lib` from msvc
+builds). The one requirement: a mingw-w64 gcc for the cgo link.
 
 ## Docker (CI)
 

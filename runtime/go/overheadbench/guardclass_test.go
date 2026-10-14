@@ -111,3 +111,24 @@ func TestSmallClassAfterStackGrowth(t *testing.T) {
 			before, after)
 	}
 }
+
+// TestStackAlignmentContract (row 17, fleet-found): the Win64 fast-path
+// trampolines must keep RSP 16-aligned at the CALL — a misaligned-8 callee
+// frame crashed the first `movaps` in gcc-built sha3 (the fleet bisected
+// the 0xc0000005 to TestStreamChecksumDeterministic, then to
+// hy_sha3_digest256+0x5c; two fixed-sub attempts each failed on a
+// different callee because Go's ABI0 entry residue VARIES with the
+// caller's frame). The probe returns a 16-byte-aligned local's address
+// mod 16: 0 = the ABI held, 8 = the frame is misaligned. Runs on every
+// platform through the exact fast trampoline shapes the small guard uses.
+func TestStackAlignmentContract(t *testing.T) {
+	if got := hybridge.Cross1S(FnAlign, 0); got != 0 {
+		t.Fatalf("Cross1S: callee frame misaligned by %d (Win64 ABI contract broken)", got)
+	}
+	if got := hybridge.Cross2S(FnAlign, 0, 0); got != 0 {
+		t.Fatalf("Cross2S: callee frame misaligned by %d", got)
+	}
+	if got := hybridge.CrossDeep1(FnAlign, 0); got != 0 {
+		t.Fatalf("CrossDeep1: callee frame misaligned by %d", got)
+	}
+}

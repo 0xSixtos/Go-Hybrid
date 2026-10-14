@@ -115,17 +115,17 @@ jobs:
           cp runtime/rust/hyrt/target/x86_64-pc-windows-gnu/release/libhyrt.a /tmp/goci-win/lib/
           cd /tmp/goci-win
           export CGO_ENABLED=1
-          # Bisect FIRST (each its own process, never dies mid-loop), then
-          # the full packages with || true so every result lands in the log.
-          for t in TestDigest256NISTVectors TestDigest256EmptyInputNoError TestStreamChecksumDeterministic; do
-            go test -count=1 -v -run "$t" ./sha3binding/ 2>&1 | tail -8
-            echo "windows sha3 $t: rc=$?"
-          done
+          # The Win64 bridge smoke (row 17): call_win64.s assembles, mingw
+          # cgo links the GNU-flavored staticlib, and the full 5-package Go
+          # suite (real crossings through the real trampolines) runs
+          # NATIVELY. The alignment contract is pinned by
+          # overheadbench's TestStackAlignmentContract (the probe) — the
+          # fleet crashes that shaped it are in PLAN row 17's history.
           for p in hybridge jsonbinding regexbinding overheadbench sha3binding; do
-            go test -count=1 -v -timeout 5m "./$p/" 2>&1 | tail -160 || true
-            echo "windows $p: done"
+            go test -count=1 "./$p/"
+            echo "windows $p: PASS"
           done
-          echo "windows go runtime suite complete — see per-test lines above"
+          echo "windows go runtime suite PASS (5 packages) — the Win64 bridge crossing is fleet-proven"
       - uses: actions/upload-artifact@v4
         with:
           name: hybrid-${{ inputs.version }}-${{ matrix.pkg-os }}-${{ matrix.pkg-arch }}
