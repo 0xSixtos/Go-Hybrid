@@ -24,6 +24,14 @@ def audit(hyb, prog):
         [hyb, "check", prog, "--json", "--report-managed"],
         capture_output=True, text=True, timeout=120,
     )
+    # Fail closed on a checker failure (issue #53): a rejected or malformed
+    # program has no trustworthy managed-block inventory. Treating that as
+    # "zero blocks" reported PASS and — in --rebaseline mode — could replace
+    # a reviewed baseline with an empty one. The gate must stop instead; the
+    # rebaseline path flows through this same audit() call.
+    if r.returncode != 0:
+        print(f"GATE ERROR: {prog}: hyb check exited {r.returncode}; no gate decision on a failed check\n{r.stderr}")
+        sys.exit(2)
     try:
         out = json.loads(r.stdout)
     except json.JSONDecodeError:

@@ -20,14 +20,15 @@ def block(reason):
 
 
 class ManagedGateTests(unittest.TestCase):
-    def audit(self, source, blocks):
+    def audit(self, source, blocks, returncode=0):
         with tempfile.TemporaryDirectory() as directory:
             prog = pathlib.Path(directory) / 'test.hy'
             prog.write_text(source, encoding='utf-8')
             report = {'summary': {'managed': {'blocks': blocks}}}
-            result = subprocess.CompletedProcess([], 0, json.dumps(report), '')
+            result = subprocess.CompletedProcess([], returncode, json.dumps(report), '')
             with patch.object(gate.subprocess, 'run', return_value=result):
                 return gate.audit('hyb', str(prog))
+
 
     def test_separate_lines_keep_existing_baseline_keys(self):
         found = self.audit('managed("a", "other") {}\nmanaged("b", "other") {}',
@@ -69,6 +70,14 @@ class ManagedGateTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as error:
             self.audit('managed("a", "invalid") {}',
                        [{'reason': 'a', 'category': 'invalid'}])
+        self.assertEqual(error.exception.code, 2)
+
+    def test_checker_failure_fails_the_gate_even_with_parseable_output(self):
+        # Issue #53: a rejected/malformed program must not read as "zero
+        # blocks". Even a parseable JSON report cannot back a PASS (or a
+        # rebaseline) when hyb check itself exited nonzero.
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as error:
+            self.audit('fn main( {}', [], returncode=1)
         self.assertEqual(error.exception.code, 2)
 
 
