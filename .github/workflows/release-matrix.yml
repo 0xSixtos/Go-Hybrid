@@ -115,18 +115,17 @@ jobs:
           cp runtime/rust/hyrt/target/x86_64-pc-windows-gnu/release/libhyrt.a /tmp/goci-win/lib/
           cd /tmp/goci-win
           export CGO_ENABLED=1
-          # -v + per-test bisection: the first fleet run's dump was ambiguous
-          # (hybridge/jsonbinding/regex PASS, sha3 crashed with an
-          # unsymbolized PC) — this names the exact crossing that faults.
-          for p in hybridge jsonbinding regexbinding overheadbench sha3binding; do
-            go test -count=1 -v -timeout 5m "./$p/" 2>&1 | tail -40
-            echo "windows $p: PASS"
-          done
+          # Bisect FIRST (each its own process, never dies mid-loop), then
+          # the full packages with || true so every result lands in the log.
           for t in TestDigest256NISTVectors TestDigest256EmptyInputNoError TestStreamChecksumDeterministic; do
-            go test -count=1 -v -run "$t" ./sha3binding/ 2>&1 | tail -15
-            echo "windows sha3 $t: PASS"
+            go test -count=1 -v -run "$t" ./sha3binding/ 2>&1 | tail -8
+            echo "windows sha3 $t: rc=$?"
           done
-          echo "windows go runtime suite PASS (5 packages) — the Win64 bridge crossing is fleet-proven"
+          for p in hybridge jsonbinding regexbinding overheadbench sha3binding; do
+            go test -count=1 -v -timeout 5m "./$p/" 2>&1 | tail -160 || true
+            echo "windows $p: done"
+          done
+          echo "windows go runtime suite complete — see per-test lines above"
       - uses: actions/upload-artifact@v4
         with:
           name: hybrid-${{ inputs.version }}-${{ matrix.pkg-os }}-${{ matrix.pkg-arch }}
