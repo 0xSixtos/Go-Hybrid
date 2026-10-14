@@ -174,7 +174,9 @@ impl<'a> Checker<'a> {
             // not resolve cannot silently cross a boundary.
             return Outcome::Unproven(UnprovenInfo {
                 value: name.to_string(),
-                reason: "its type did not resolve to a sendability class (no ascription and the initializer's type was unresolvable)".to_string(),
+                reason: unproven_atomic_reason(b).unwrap_or_else(|| {
+                    "its type did not resolve to a sendability class (no ascription and the initializer's type was unresolvable)".to_string()
+                }),
             });
         }
         if b.shape.is_sendable_by_type() {
@@ -237,7 +239,9 @@ impl<'a> Checker<'a> {
             // FAIL-CLOSED (O4.9): a borrow of an unproven value.
             return Outcome::Unproven(UnprovenInfo {
                 value: expr.render(),
-                reason: format!("the pointee `{root}` has an unresolvable type"),
+                reason: unproven_atomic_reason(b).unwrap_or_else(|| {
+                    format!("the pointee `{root}` has an unresolvable type")
+                }),
             });
         }
         match &b.shape {
@@ -726,3 +730,16 @@ impl<'a> Checker<'a> {
         }
     }
 }
+
+fn unproven_atomic_reason(b: &Binding) -> Option<String> {
+    let ty = b.ty.as_ref()?.render();
+    let head = ty.split('[').next().unwrap_or(ty.as_str());
+    if crate::foreign::is_unproven_atomic(head) {
+        Some(format!(
+            "`{ty}` is not in the Tier-0 scalar atomic set (GUARANTEES.md row 11: `atomic.pointer[T]` / `atomic.value` publish a reference to arbitrary state without proving the pointee is race-free — unproven → rejected)"
+        ))
+    } else {
+        None
+    }
+}
+
