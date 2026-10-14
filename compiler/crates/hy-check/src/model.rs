@@ -147,6 +147,11 @@ pub(crate) struct Binding {
     pub managed_taint: bool,
     /// Moved-from / consumed-from state (O5.1 / O13).
     pub moved: Option<MoveInfo>,
+    /// When `Some(reason)`, this binding is not exclusively owned by the
+    /// current function/closure invocation (parameter, receiver, closure
+    /// capture, or non-channel `for ... in` element), so `move x` at a
+    /// concurrency boundary cannot freeze all live aliases (O5.1/O5.2/O5.4).
+    pub non_owned_origin: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

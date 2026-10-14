@@ -582,6 +582,9 @@ impl<'a> Checker<'a> {
                 let op = crate::model::unwrap_parens(v);
                 if let Expr::Ident { name, span: ispan } = op {
                     if self.lookup_binding(st, name).is_some() {
+                        if !managed {
+                            self.check_non_owned_move(st, name, *ispan);
+                        }
                         moves.push((name.clone(), *ispan));
                     } else {
                         unprovens.push(UnprovenInfo {
@@ -600,6 +603,9 @@ impl<'a> Checker<'a> {
             for (op, mspan) in v_moves {
                 if let Expr::Ident { name, .. } = op {
                     if self.lookup_binding(st, name).is_some() {
+                        if !managed {
+                            self.check_non_owned_move(st, name, mspan);
+                        }
                         moves.push((name.clone(), mspan));
                     } else {
                         unprovens.push(UnprovenInfo {

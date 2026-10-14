@@ -342,6 +342,9 @@ impl<'a> Checker<'a> {
                 };
                 // `x := move y` — y is moved; x takes ownership (no alias);
                 // non-ident moves (`x := move s.data`) trigger HYB-E3004 (O5.4).
+                let moved_non_owned = move_operand_ident(value)
+                    .and_then(|src| self.lookup_binding(st, &src))
+                    .and_then(|b| b.non_owned_origin.clone());
                 self.mark_move_in_value(
                     st,
                     value,
@@ -349,6 +352,11 @@ impl<'a> Checker<'a> {
                 );
                 if move_operand_ident(value).is_some() {
                     self.define_binding(st, name, shape, ty, immutable, managed);
+                    if let Some(origin) = moved_non_owned {
+                        if let Some(b) = st.env_lookup_mut(name) {
+                            b.non_owned_origin = Some(origin);
+                        }
+                    }
                     continue;
                 }
                 let is_view = matches!(shape, TypeShape::BorrowHandle(_));
@@ -365,8 +373,14 @@ impl<'a> Checker<'a> {
                 // alias recording: `m2 := agg` (reference-typed value)
                 if let Expr::Ident { name: src, .. } = value {
                     if let Some(b) = self.lookup_binding(st, src) {
+                        let src_origin = b.non_owned_origin.clone();
                         if b.shape.is_reference_alias() {
                             st.aliases.insert(name.clone(), src.clone());
+                        }
+                        if let Some(origin) = src_origin {
+                            if let Some(nb) = st.env_lookup_mut(name) {
+                                nb.non_owned_origin = Some(origin);
+                            }
                         }
                     }
                 }
@@ -421,6 +435,7 @@ impl<'a> Checker<'a> {
                 immutable,
                 managed_taint: managed, // O6.2: born inside `managed {}`
                 moved: None,
+                non_owned_origin: None,
             },
         );
     }
@@ -500,12 +515,21 @@ impl<'a> Checker<'a> {
         if op == AssignOp::Assign && values.len() == 1 {
             let shape = self.shape_of_expr(st, &values[0]);
             let ty = self.ty_of_expr(st, &values[0]);
+            let rhs_non_owned = match &values[0] {
+                Expr::Ident { name: src, .. } => self
+                    .lookup_binding(st, src)
+                    .and_then(|b| b.non_owned_origin.clone()),
+                other => move_operand_ident(other)
+                    .and_then(|src| self.lookup_binding(st, &src))
+                    .and_then(|b| b.non_owned_origin.clone()),
+            };
             for t in targets {
                 if let PlaceKind::Ident(name) = &t.kind {
                     if let Some(b) = st.env_lookup_mut(name) {
                         b.shape = shape.clone();
                         b.ty = ty.clone();
                         b.moved = None; // a fresh value re-owns the binding
+                        b.non_owned_origin = rhs_non_owned.clone();
                     }
                     // rebind may create a fresh alias
                     st.aliases.remove(name);
@@ -688,6 +712,7 @@ impl<'a> Checker<'a> {
             immutable: true, // class 4: const values are immutable-by-type
             managed_taint: false,
             moved: None,
+            non_owned_origin: None,
         }
     }
 }
