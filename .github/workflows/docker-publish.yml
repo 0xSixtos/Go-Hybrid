@@ -38,7 +38,7 @@ jobs:
         # one container run in the next (each docker run is a fresh fs).
         run: |
           set -e
-          IMG="${{ env.IMG }}"
+          IMG="${{ env.IMG }}"   # already includes the version tag
           # (a) toolchain pins inside the image + the CLI answers
           docker run --rm "$IMG" sh -c 'go version | grep -q go1.26.9 && hyb explain E0002 >/dev/null && echo pins-ok'
           # (b) bridge-free program: build + run inside the image
@@ -62,10 +62,10 @@ jobs:
         env:
           IMG: ${{ env.IMG }}
         run: |
-          docker tag "$IMG:${{ inputs.version }}" "$IMG:latest"
-          docker push "$IMG:${{ inputs.version }}"
+          docker tag "$IMG" "$IMG:latest"
+          docker push "$IMG"
           docker push "$IMG:latest"
       - name: Published tags
         env:
           IMG: ${{ env.IMG }}
-        run: echo "$IMG:${{ inputs.version }} and $IMG:latest are live"
+        run: echo "$IMG and $IMG:latest are live"
