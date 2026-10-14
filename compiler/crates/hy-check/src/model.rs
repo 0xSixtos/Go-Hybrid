@@ -200,6 +200,14 @@ pub(crate) struct FnState {
     /// alias name -> target binding name (binding-level only — enough for the
     /// 20-program corpus; documented limitation).
     pub aliases: HashMap<String, String>,
+    /// undirected may-share graph (#27): binding name -> names that may share
+    /// the same mutable GC storage. A Go assign `b := a` is a true alias only
+    /// for reference types, but a SHALLOW copy of a struct/array that carries
+    /// a reference field, a re-slice `s[:]`, a field/index projection, or a
+    /// composite literal that embeds a live binding all leave `b` sharing
+    /// storage with `a` too. The freeze rule (O5.2) must cover the whole
+    /// connected component, not just the single-parent `aliases` chain.
+    pub may_share: HashMap<String, HashSet<String>>,
     pub loans: Vec<Loan>,
     /// name -> last statement index that references it (Pass A result).
     pub last_use: HashMap<String, usize>,
@@ -251,6 +259,52 @@ impl FnState {
         } else {
             self.env.insert(name.to_string(), b);
         }
+    }
+
+    /// Record that `a` and `b` may share mutable GC storage (#27). Undirected:
+    /// a `move` of either must freeze the other.
+    pub(crate) fn share_edge(&mut self, a: &str, b: &str) {
+        if a == b {
+            return;
+        }
+        self.may_share
+            .entry(a.to_string())
+            .or_default()
+            .insert(b.to_string());
+        self.may_share
+            .entry(b.to_string())
+            .or_default()
+            .insert(a.to_string());
+    }
+
+    /// Drop `name`'s may-share edges: a whole-binding rebind re-owns the
+    /// binding, so it leaves the old sharing component.
+    pub(crate) fn share_clear(&mut self, name: &str) {
+        if let Some(peers) = self.may_share.remove(name) {
+            for p in peers {
+                if let Some(set) = self.may_share.get_mut(&p) {
+                    set.remove(name);
+                }
+            }
+        }
+    }
+
+    /// The connected component of `name` under may-share, EXCLUDING `name`
+    /// itself (bounded to bindings that exist in this environment).
+    pub(crate) fn share_group(&self, name: &str) -> HashSet<String> {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut stack = vec![name.to_string()];
+        while let Some(n) = stack.pop() {
+            if let Some(peers) = self.may_share.get(&n) {
+                for p in peers {
+                    if seen.insert(p.clone()) {
+                        stack.push(p.clone());
+                    }
+                }
+            }
+        }
+        seen.remove(name);
+        seen
     }
 }
 

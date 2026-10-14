@@ -50,7 +50,11 @@ impl<'a> Checker<'a> {
     }
 
     fn emit_use_after_move(&mut self, st: &FnState, u: &Use, mv: &MoveInfo) {
-        let is_alias = st.aliases.contains_key(&u.name);
+        // A may-share peer (#27) is an alias in every way that matters here,
+        // even when the single-parent `aliases` chain does not name it (e.g.
+        // a projection or composite-literal capture).
+        let is_alias =
+            st.aliases.contains_key(&u.name) || st.may_share.contains_key(&u.name);
         let orig = resolve_alias(st, &u.name);
         let span_str = format!("{}:{}", mv.span.start.line, mv.span.start.col);
 
@@ -150,6 +154,17 @@ impl<'a> Checker<'a> {
                 members.push(a.clone());
             }
         }
+        // #27: a move also freezes everything that may share the same mutable
+        // GC storage — shallow struct/array copies, re-slices, field/index
+        // projections, and composite literals that embedded a live binding.
+        // The single-parent `aliases` chain above cannot express that graph,
+        // so union in the may-share connected component of every member.
+        let seeded = members.clone();
+        for m in seeded {
+            members.extend(st.share_group(&m));
+        }
+        members.sort();
+        members.dedup();
         for m in &members {
             if let Some(b) = st.env_lookup_mut(m) {
                 b.moved = Some(MoveInfo {
