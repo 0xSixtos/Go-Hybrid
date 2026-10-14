@@ -22,8 +22,12 @@ func TestDarwinDeepStackPool(t *testing.T) {
 		}
 		// Both ends of the usable region must be writable. In particular,
 		// using a 4 KiB guard offset on Apple Silicon must not protect it.
-		*(*byte)(unsafe.Pointer(top - deepStackSz)) = byte(i)
-		*(*byte)(unsafe.Pointer(top - 1)) = byte(i)
+		mapping := deepMappings[i]
+		if top != uintptr(unsafe.Pointer(&mapping[len(mapping)-1]))+1 {
+			t.Fatal("stack top does not match the mapping end")
+		}
+		mapping[syscall.Getpagesize()] = byte(i)
+		mapping[len(mapping)-1] = byte(i)
 	}
 }
 
@@ -37,5 +41,5 @@ func TestDarwinDeepStackGuard(t *testing.T) {
 			t.Error("write below the usable stack did not fault: guard is unprotected")
 		}
 	}()
-	*(*byte)(unsafe.Pointer(deepTops[i] - deepStackSz - 1)) = 1
+	deepMappings[i][syscall.Getpagesize()-1] = 1
 }

@@ -24,8 +24,9 @@ const (
 )
 
 var (
-	deepTops [deepStacks]uintptr // stack tops (base + guard + size)
-	deepBits uint64              // bitmap: bit i set = stack i in use
+	deepMappings [deepStacks][]byte  // retain the guarded mappings for the pool lifetime
+	deepTops     [deepStacks]uintptr // stack tops (base + guard + size)
+	deepBits     uint64              // bitmap: bit i set = stack i in use
 )
 
 func init() {
@@ -42,6 +43,7 @@ func init() {
 			_ = syscall.Munmap(b)
 			panic("hybridge: mprotect guard page: " + err.Error())
 		}
+		deepMappings[i] = b
 		deepTops[i] = uintptr(unsafe.Pointer(&b[0])) + uintptr(total)
 	}
 }

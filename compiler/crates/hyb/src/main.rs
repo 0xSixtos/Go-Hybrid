@@ -1183,13 +1183,13 @@ fn lib_arch_matches(p: &std::path::Path) -> bool {
     }
 }
 
-/// COFF machine-type counterpart of `machine_matches` (same host-arch rule).
+/// COFF machine-type counterpart of the ELF/Mach-O host-architecture probe.
 fn coff_machine_matches(m: u16) -> bool {
     match std::env::consts::ARCH {
         "x86_64" => m == 0x8664,
         "aarch64" => m == 0xAA64,
-        // Unknown host arch: accept a known-good COFF machine, nothing else.
-        _ => m == 0x8664 || m == 0xAA64,
+        // Never guess the ABI for an unsupported host architecture.
+        _ => false,
     }
 }
 
