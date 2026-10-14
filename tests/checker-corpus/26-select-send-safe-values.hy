@@ -4,7 +4,7 @@
 // check-sites, but O4's safe-by-type classes still permit a known string
 // and a channel value without a move or managed hatch. This positive
 // control guards against rejecting all select-send clauses while the
-// mutable-map case 21 and unproven-name case 23 pin distinct rejections.
+// mutable-map case 25 and unproven-name case 27 pin distinct rejections.
 // Both sends are type-compatible with their respective channel elements.
 
 fn main() {
