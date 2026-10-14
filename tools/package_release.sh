@@ -130,15 +130,18 @@ for p in $PATH; do
     case "$p" in *.cargo/bin*) ;; *) RUSTLESS_PATH="${RUSTLESS_PATH:+$RUSTLESS_PATH:}$p" ;; esac
 done
 IFS="$OLDIFS"
-# cross linux/arm64: build via GOARCH + the cross CC, execute under qemu
-# (hyb itself sets CGO_ENABLED=1 for the bridge; mirrored here so `go build`
-# cross-mode keeps cgo on — go defaults it OFF for foreign GOARCH)
+# cross linux/arm64: run the arm64 hyb under qemu (binfmt has NO sysroot —
+# the -L flag is mandatory or even the CLI can't exec), build via GOARCH +
+# the cross CC, execute under qemu. The smoke program (01-hello) imports no
+# rust/ crate, so the bridge asm (call_amd64.s — amd64-ONLY until the
+# aarch64 trampoline port, PLAN row 16) is never linked; bridge programs on
+# arm64 are a documented cut, not a hidden one.
 CROSS_GO_ENV=""
 if [ "$PKG_OS/$ARCH" = "linux/arm64" ] && [ -n "$RUST_TARGET" ]; then
     CROSS_GO_ENV="GOARCH=arm64 CGO_ENABLED=1 CC=$CROSS_CC"
     QEMU_RUNNER="${QEMU_RUNNER:-qemu-aarch64}"
 fi
-if ( cd "$SMOKE" && env PATH="$RUSTLESS_PATH" $CROSS_GO_ENV \
+if ( cd "$SMOKE" && env PATH="$RUSTLESS_PATH" $CROSS_GO_ENV $QEMU_RUNNER \
         "$SMOKE/hybrid-${VER}/$HYB_OUT_NAME" build \
         "$REPO_ROOT/examples/01-hello/program.hy" -o "$SMOKE/hello" ) \
     && $QEMU_RUNNER "$SMOKE/hello" > "$SMOKE/out.txt" 2>&1 \
