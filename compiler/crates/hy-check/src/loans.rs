@@ -18,8 +18,8 @@
 
 use crate::foreign::{self, CallMode};
 use crate::model::{
-    as_addr_of, move_operand_ident, Binding, Checker, FnState, Loan, LoanTarget, MoveKind,
-    TypeShape,
+    as_addr_of, move_operand_ident, unwrap_parens, Binding, Checker, FnState, Loan, LoanTarget,
+    MoveKind, TypeShape,
 };
 use crate::shape::receiver_type_name;
 use crate::walk::{self, CallRef};
@@ -381,13 +381,31 @@ impl<'a> Checker<'a> {
                 if is_view {
                     self.extend_call_loans_to_view(st, value, name, idx);
                 }
-                // alias recording: `m2 := agg` (reference-typed value)
-                if let Expr::Ident { name: src, .. } = value {
-                    if let Some(b) = self.lookup_binding(st, src) {
-                        let src_origin = b.non_owned_origin.clone();
-                        if b.shape.is_reference_alias() {
-                            st.aliases.insert(name.clone(), src.clone());
-                        }
+                // alias recording: `m2 := agg` — and `alias := same(m)` (#38)
+                self.record_alias(st, name, value);
+            }
+        }
+    }
+
+    /// Record a binding-level alias created by `name := value` (#38).
+    ///
+    /// The original check only saw a bare reference-typed `Ident` copy
+    /// (`m2 := agg`). But a CALL that returns a reference-typed value can
+    /// hand back storage owned by one of its arguments — `same(m)`,
+    /// `append(xs, v)`, and every filter/trim/identity helper do it — and
+    /// the checker has no interprocedural summary to rule that out. Record
+    /// the result as an alias of the first reference-typed argument binding,
+    /// so a later `move` of either freezes the other (O5.2). `move`-wrapped
+    /// arguments transfer ownership into the callee and are skipped. The
+    /// new binding also inherits the source's non_owned_origin (O5.1): an
+    /// alias of a parameter/receiver/range variable is itself non-owned.
+    fn record_alias(&self, st: &mut FnState, name: &str, value: &Expr) {
+        match unwrap_parens(value) {
+            Expr::Ident { name: src, .. } => {
+                if let Some(b) = self.lookup_binding(st, src) {
+                    let src_origin = b.non_owned_origin.clone();
+                    if b.shape.is_reference_alias() {
+                        st.aliases.insert(name.to_string(), src.clone());
                         if let Some(origin) = src_origin {
                             if let Some(nb) = st.env_lookup_mut(name) {
                                 nb.non_owned_origin = Some(origin);
@@ -396,6 +414,35 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            Expr::Call { args, .. }
+                if self
+                    .shape_of_expr(st, unwrap_parens(value))
+                    .is_reference_alias() =>
+            {
+                for a in args {
+                    if matches!(unwrap_parens(&a.value), Expr::Move { .. }) {
+                        continue;
+                    }
+                    if let Some(src) = a.value.root_ident() {
+                        if src == name {
+                            continue;
+                        }
+                        if let Some(b) = self.lookup_binding(st, src) {
+                            if b.shape.is_reference_alias() {
+                                let origin = b.non_owned_origin.clone();
+                                st.aliases.insert(name.to_string(), src.to_string());
+                                if let Some(origin) = origin {
+                                    if let Some(nb) = st.env_lookup_mut(name) {
+                                        nb.non_owned_origin = Some(origin);
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -526,7 +573,7 @@ impl<'a> Checker<'a> {
                 // Evaluate all RHS shapes, types, and alias sources before
                 // mutating target bindings so parallel swaps/rebinds read the
                 // pre-assignment environment.
-                type RhsInfo = (TypeShape, Option<hy_syntax::TypeExpr>, Option<String>, Option<String>);
+                type RhsInfo = (TypeShape, Option<hy_syntax::TypeExpr>, Option<String>);
                 let rhs_info: Vec<RhsInfo> =
                     values
                         .iter()
@@ -541,22 +588,13 @@ impl<'a> Checker<'a> {
                                     .and_then(|src| self.lookup_binding(st, &src))
                                     .and_then(|b| b.non_owned_origin.clone()),
                             };
-                            let alias_src = if move_operand_ident(v).is_some() {
-                                None
-                            } else if let Expr::Ident { name: src, .. } =
-                                crate::model::unwrap_parens(v)
-                            {
-                                self.lookup_binding(st, src)
-                                    .filter(|b| b.shape.is_reference_alias())
-                                    .map(|_| src.clone())
-                            } else {
-                                None
-                            };
-                            (shape, ty, alias_src, non_owned)
+                            (shape, ty, non_owned)
                         })
                         .collect();
 
-                for (t, (shape, ty, alias_src, non_owned)) in targets.iter().zip(rhs_info) {
+                for ((t, v), (shape, ty, non_owned)) in
+                    targets.iter().zip(values.iter()).zip(rhs_info)
+                {
                     if let PlaceKind::Ident(name) = &t.kind {
                         if let Some(b) = st.env_lookup_mut(name) {
                             if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
@@ -569,11 +607,9 @@ impl<'a> Checker<'a> {
                             b.non_owned_origin = non_owned;
                         }
                         st.aliases.remove(name);
-                        if let Some(src) = alias_src {
-                            if src != *name {
-                                st.aliases.insert(name.clone(), src);
-                            }
-                        }
+                        // rebind may create a fresh alias — ident copies AND
+                        // call results that hand back argument storage (#38)
+                        self.record_alias(st, name, v);
                     }
                 }
             } else if values.len() == 1 && targets.len() > 1 {

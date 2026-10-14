@@ -654,6 +654,49 @@ mod tests {
     }
 
     #[test]
+    fn a1b_call_returned_alias_is_frozen_by_move() {
+        // Issue #38: a call that returns a reference-typed value may hand
+        // back storage owned by an argument (`same(m)`), so `move m` must
+        // freeze the call result too — no interprocedural summary exists to
+        // prove the return is fresh.
+        let r = check(
+            "fn same(m map[string]int) map[string]int {\n\
+               return m\n\
+             }\n\
+             fn main() {\n\
+               agg := map[string]int{}\n\
+               results := make(chan map[string]int, 1)\n\
+               alias := same(agg)\n\
+               results <- move agg\n\
+               alias[\"total\"] = len(alias)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        let d = &r.diagnostics[0];
+        assert!(d.message.contains("alias"), "{}", d.message);
+    }
+
+    #[test]
+    fn a1b_call_returned_fresh_map_not_frozen() {
+        // Negative control: the result does not alias any reference-typed
+        // argument, so moving a primitive argument does not freeze it.
+        let r = check(
+            "fn fresh(seed int) map[string]int {\n\
+               return map[string]int{\"s\": seed}\n\
+             }\n\
+             fn main() {\n\
+               n := 1\n\
+               results := make(chan int, 1)\n\
+               alias := fresh(n)\n\
+               results <- move n\n\
+               alias[\"x\"] = 1\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    #[test]
     fn a2_mutate_during_loan_rejects() {
         let r = check(
             "import \"rust/serde_json\"\n\
