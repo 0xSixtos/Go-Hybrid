@@ -1245,5 +1245,56 @@ mod tests {
         assert_eq!(r2.verdict, Verdict::Reject, "{:?}", r2.diagnostics);
         assert!(r2.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
     }
+
+    // -----------------------------------------------------------------------
+    // `new(T)` returns `*T`, not a primitive (O4 / O4.9). Regression for the
+    // accepted-but-unsound shape `p := new(S); task w(p)`, which shared a
+    // `*S` across tasks with zero diagnostics and raced under `go -race`.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn new_builtin_spawn_pointer_rejects() {
+        let r = check(
+            "struct pool_stats { processed int }\n\
+             fn bump(s *pool_stats) { s.processed = s.processed + 1 }\n\
+             fn main() {\n\
+               p := new(pool_stats)\n\
+               task bump(p)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1c"));
+        assert_eq!(r.diagnostics[0].code, "HYB-E3001");
+        assert!(r.diagnostics[0].message.contains("*pool_stats"));
+    }
+
+    #[test]
+    fn new_builtin_send_pointer_rejects() {
+        let r = check(
+            "fn main() {\n\
+               jobs := make(chan int, 1)\n\
+               p := new(int)\n\
+               jobs <- p\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1c"));
+        assert_eq!(r.diagnostics[0].code, "HYB-E3002");
+    }
+
+    #[test]
+    fn new_builtin_local_only_use_accepts() {
+        // No boundary: a locally-confined `new` must not be rejected.
+        let r = check(
+            "struct pool_stats { processed int }\n\
+             fn main() {\n\
+               p := new(pool_stats)\n\
+               p.processed = 5\n\
+               fmt.println(\"{p.processed}\")\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
 }
 
