@@ -726,7 +726,7 @@ mod tests {
         assert_eq!(r.managed.categories.get("mutex"), Some(&1));
         assert_eq!(r.managed.blocks.len(), 1);
         assert_eq!(r.managed.blocks[0].tickets, vec!["PROJ-42".to_string()]);
-        assert_eq!(r.managed.blocks[0].reason.len() > 0, true);
+        assert!(!r.managed.blocks[0].reason.is_empty());
     }
 
     #[test]

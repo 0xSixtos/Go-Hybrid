@@ -370,3 +370,22 @@ Work Log:
 Stage Summary:
 - Discussion #1's install-friction ask is now FULLY answered: one command, no Rust, four platforms, sha256-verified, honest about the arm64 bridge cut
 - The release-matrix workflow is the reusable release recipe (row 6's bench rides every dispatch)
+
+---
+Task ID: 24 (Batch U: the bounty decision landed + Batch V: the emitter sweep)
+Agent: Super Z (main)
+Task: Owner's bounty decision to a live program; the last documented follow-up (row 13's emitter base-indent) closed; community radar via the bounty-hunter shape.
+
+Work Log:
+- Read the state first: rows 1-16 were already closed, the bounty DECISION was the one open escalation; this session's owner message supplied it
+- Batch U: wrote BOUNTY.md ($500 pool, top 10, ladder $75/$60/$50 + $45x7 with the reasoning recorded: strict 30% for the top three forces 3rd below 4th with 4-10 equal, so the top-three share lands at ~37% and the owner keeps final say), severity tiers, pay-only-after-reproduction, CI-pass-before-review, safe harbor, 48h triage SLA, first-reporter duplicates rule, AI-assisted reports (impact over volume, spam disqualified), all-contributors credit, Hall of Fame seeded with ssmurfgg04-gif, Discord-is-coming note, star-and-share ask; wired into GUARANTEES.md (the "under consideration" line became the live link), README Contributing, and the v0.1.0 release notes (PATCHED via the API, section inserted before "What's next")
+- Created the 💎 Bounty label (the exact string bounty-hunter-style scanners query) + three scoped bounty issues (#5 soundness hunting, #6 adversarial corpus, #7 diagnostics wording) — honest amounts, no honeypot shapes, so the program reads trustworthy to the hunter-side tooling the owner flagged
+- Discussion #1 bumped with the bounty announcement + three fresh asks (confusing diagnostics, what makes bounty tracks worth an evening, Discord vs Discussions)
+- Batch V (row 13 follow-up): measured the blast radius first (all 10 examples gofmt-unclean, 670 diff lines), fixed four roots (emit_fn double indent, struct alignment, leading-import stray blank, inline loop labels), added the build gofmt pass for go/printer's spacing heuristics (cosmetic; failure falls back, go build stays the real gate), and caught a REAL CLI bug: bare-filename `hyb generate` died on read_dir("") — fixed + pinned by hyb/tests/generate_paths.rs
+- Also fixed the 2 pre-existing clippy --all-targets findings (repeat_n, bool_assert)
+- Full standard suites after every change: cargo 217/0 · clippy 0 (--all-targets) · go 5 pkgs vet/build/test · examples 10/10 · corpus 20/20 tripwire quiet · differential 9/9+11/11 · managed gate PASS · sample module green · blast radius 0 diff lines
+
+Stage Summary:
+- The bounty program is LIVE end to end: policy doc, label, three issues, announcement, release-notes section, radar-friendly shape
+- The last documented follow-up in the plan is CLOSED; no open plan rows remain, standing work is community replies + bounty triage only
+- One real user-facing bug found and fixed by the sweep (bare-filename generate), which is the process working: cosmetic work still ran the full suites

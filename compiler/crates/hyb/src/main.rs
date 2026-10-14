@@ -447,8 +447,12 @@ fn generate_one(
     // Package inference: the sibling .go files decide (an existing go.mod
     // project has its own package clauses; .hy has none BY DESIGN — the
     // emitted file joins the directory's package). Siblings must agree.
+    // A bare filename's parent() is Some("") — an EMPTY relative path,
+    // which read_dir rejects; normalize it to "." so `hyb generate
+    // --check calc.hy` works beside the `./calc.hy` and `.` forms.
     let dir = hy
         .parent()
+        .filter(|p| !p.as_os_str().is_empty())
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     let mut pkg: Option<String> = None;
@@ -510,9 +514,10 @@ fn generate_one(
     let unformatted = format!("{}{}", header, go_src);
     // The checked-in file must be gofmt-CANONICAL (row 13's constraint:
     // reviewable, diffable, go build-clean) — so generate pipes it through
-    // the project's own gofmt. (The emitter's canonical body indent is one
-    // tab deeper than gofmt's; a base-indent sweep of the emitter + its
-    // exact-match tests is a documented follow-up, not a generate concern.)
+    // the project's own gofmt. (The emitter now emits gofmt-canonical
+    // indentation directly — the base-indent sweep landed 2026-10-14 — the
+    // pass stays as defense in depth for anything gofmt normalizes beyond
+    // indentation.)
     let out_text = run_gofmt(&unformatted)?;
 
     let stem = hy
@@ -748,6 +753,22 @@ fn cmd_build(args: &[String]) -> ExitCode {
             }
         }
     };
+    // --- 3b. gofmt pass (cosmetic, semantics-preserving by definition) ---
+    // The emitter emits gofmt-canonical indentation and struct alignment
+    // directly (the 2026-10-14 base-indent sweep); go/printer's remaining
+    // normalizations are deep-expression SPACING heuristics not worth
+    // re-implementing, so build pipes through the pinned toolchain's own
+    // gofmt. Build requires the pinned go anyway (E9001), so gofmt is
+    // present by definition. On any gofmt failure the unformatted source
+    // proceeds unchanged (gofmt is cosmetic; go build is the real gate).
+    let go_src = match run_gofmt(&go_src) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("notice: gofmt pass skipped ({})", e);
+            go_src
+        }
+    };
+
     // Which rust bindings does the emitted Go call? (M6: known crates only;
     // the emitter errors cleanly on unknown ones, so this scan is exact.)
     let bindings = hy_emit::used_binding_roots(&go_src);
@@ -1572,7 +1593,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         // Minimal 20-byte ELF headers: magic + e_machine (LE u16 at 0x12).
         let mut x86 = vec![0x7fu8, b'E', b'L', b'F'];
-        x86.extend(std::iter::repeat(0u8).take(14));
+        x86.extend(std::iter::repeat_n(0u8, 14));
         x86.extend_from_slice(&62u16.to_le_bytes()); // EM_X86_64
         let mut arm = x86.clone();
         arm[18] = 183u8; // EM_AARCH64

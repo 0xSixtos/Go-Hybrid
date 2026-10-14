@@ -901,13 +901,17 @@ impl Emitter {
     fn emit_for(&mut self, kind: &ForKind, body: &Block) -> Result<(), EmitError> {
         // A labeled `break loop` / `continue loop` inside this loop (NOT
         // inside a nested loop — that one labels itself) makes this loop the
-        // Go label target: `hyLoop: for { … break hyLoop … }`.
+        // Go label target: `hyLoop:` + the for head, `break hyLoop` inside.
         let needs_label = self.block_has_loop_break(body);
-        let label_prefix = if needs_label { "hyLoop: " } else { "" };
+        // gofmt puts a loop label on its OWN line (`hyLoop:` then the for
+        // head one level in) — emit it as a separate line, never inline.
+        if needs_label {
+            self.push("hyLoop:");
+        }
         let head = match kind {
-            ForKind::Infinite => format!("{}for {{", label_prefix),
+            ForKind::Infinite => "for {".to_string(),
             ForKind::While { cond } => {
-                format!("{}for {} {{", label_prefix, self.emit_expr(cond, 0)?)
+                format!("for {} {{", self.emit_expr(cond, 0)?)
             }
             ForKind::Range {
                 var,
@@ -927,8 +931,8 @@ impl Emitter {
                     var.clone()
                 };
                 format!(
-                    "{}for {} := {}; {} {} {}; {}++ {{",
-                    label_prefix, v, lo_t, v, op, hi_t, v
+                    "for {} := {}; {} {} {}; {}++ {{",
+                    v, lo_t, v, op, hi_t, v
                 )
             }
             ForKind::Iterate { vars, expr } => {
@@ -986,7 +990,7 @@ impl Emitter {
                         )))
                     }
                 };
-                format!("{}{}", label_prefix, core)
+                core
             }
         };
         self.push(&head);

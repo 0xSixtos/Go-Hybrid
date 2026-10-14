@@ -481,7 +481,11 @@ impl Emitter {
         for decl in &file.decls {
             if first_decl {
                 first_decl = false;
-            } else if !self.body.ends_with("\n\n") {
+            } else if !self.body.is_empty() && !self.body.ends_with("\n\n") {
+                // The emptiness guard matters: a leading `import` decl
+                // records itself and emits NOTHING, so the next emitting
+                // decl must not inherit a stray blank at body start (it
+                // rendered as a double blank after the import block).
                 self.body.push('\n');
             }
             match decl {
@@ -613,11 +617,15 @@ impl Emitter {
             self.push(&format!("type {} struct {{", s.name));
         }
         self.indent += 1;
+        // gofmt aligns consecutive field declarations: names padded to the
+        // longest, types in one column. Do it here so emitted output is
+        // gofmt-canonical without a post-pass.
+        let width = s.fields.iter().map(|f| f.name.len()).max().unwrap_or(0);
         for f in &s.fields {
             // Our own struct fields stay snake_case (M4 normalizes FOREIGN
             // names, never ours).
             let ty = self.type_text(&f.ty);
-            self.push(&format!("{} {}", f.name, ty));
+            self.push(&format!("{:<width$} {}", f.name, ty, width = width));
         }
         self.indent -= 1;
         self.push("}");
@@ -735,7 +743,12 @@ impl Emitter {
             self.in_main_closure = true;
             self.emit_hints_from_params(&f.params);
             if let Some(body) = &f.body {
+                // The closure-body level is already pushed above;
+                // emit_block_body adds its own, so drop one first or every
+                // wrapper body line renders one tab deeper than gofmt.
+                self.indent -= 1;
                 self.emit_block_body(&body.stmts)?;
+                self.indent += 1;
             }
             // Terminal bare `return`: the wrapper closure's named result
             // makes it legal, and a body ending in a non-terminating
@@ -799,12 +812,14 @@ impl Emitter {
                 )));
             }
         }
-        self.indent += 1;
+        // emit_block_body supplies ONE level for the block it emits (the
+        // contract every statement-level block relies on), so a fn body is
+        // exactly one tab under its header — gofmt's canonical base. The
+        // hints write no lines; no bump is needed anywhere here.
         self.emit_hints_from_params(&f.params);
         if let Some(body) = &f.body {
             self.emit_block_body(&body.stmts)?;
         }
-        self.indent -= 1;
         self.push("}");
         Ok(())
     }

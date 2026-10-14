@@ -562,8 +562,8 @@ fn inclusive_range_and_labeled_break() {
         "fn main() {\n    total := 0\n    loop {\n        select {\n            v, ok := <-sq:\n                if !ok { break loop }\n                total += v\n        }\n    }\n    for i in 1..=8 {\n        total += i\n    }\n}\n",
     );
     assert!(
-        go.contains("hyLoop: for {"),
-        "loop gets the Go label:\n{}",
+        go.contains("hyLoop:\n\tfor {"),
+        "loop gets the Go label on its own line (gofmt canonical):\n{}",
         go
     );
     assert!(go.contains("break hyLoop"), ":\n{}", go);
