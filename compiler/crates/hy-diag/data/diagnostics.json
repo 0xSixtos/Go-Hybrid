@@ -350,6 +350,21 @@
       ],
       "example": "hyb build prog.hy -o out/   // reject: HYB-E9001 — go1.21 found, go1.26.9 pinned",
       "rule": "TOOL"
+    },
+    {
+      "code": "HYB-E9002",
+      "name": "generate-no-package",
+      "category": "tooling",
+      "severity": "error",
+      "title": "no Go package beside the .hy file",
+      "summary": "`hyb generate` emits the transpiled Go INTO the directory's existing package — but .hy files have no package clause BY DESIGN (the emitted file joins the sibling .go files' package). A directory without any `package <name>` clause gives the emitter nothing to join.",
+      "fixits": [
+        "add any .go file with a `package <name>` clause beside the .hy file (or run `hyb vendor-runtime <dir>` for a fresh go.mod project)",
+        "an existing go.mod project: point generate at the package directories (go:generate hyb generate ./...)"
+      ],
+      "example": "hyb generate ./internal/thing   // reject: HYB-E9002 — ./internal/thing has no .go files; add one with `package thing`",
+      "rule": "",
+      "tier0_rule_id": null
     }
   ]
 }

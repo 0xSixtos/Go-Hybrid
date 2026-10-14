@@ -61,3 +61,6 @@ __pycache__/
 runtime/rust/hyrt/target/
 compiler/target/
 dist/
+
+# the row-13 sample: hybridrt/ is derived (hyb vendor-runtime), never committed
+examples/gomod-integration/hybridrt/

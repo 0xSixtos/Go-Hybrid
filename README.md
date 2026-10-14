@@ -138,6 +138,36 @@ graph ownership moves, a Rust-crate digest service, and a Hybrid package
 consumed by plain Go — every one parses, checks, emits, builds and runs
 byte-exact in CI.
 
+## Adding Hybrid to an EXISTING `go.mod` project (10 minutes)
+
+No new build system, no separate module culture — `.hy` files live beside
+your `.go` files and transpile to checked-in, reviewable, gofmt-clean Go
+([discussion #3](https://github.com/limitlessprojects/Go-Hybrid/discussions/3),
+design B). A complete working sample lives at
+[`examples/gomod-integration/`](examples/gomod-integration/) — this is the
+whole recipe:
+
+```bash
+# 1. vendor the runtime once (binding packages + prebuilt staticlib)
+hyb vendor-runtime .
+
+# 2. add two lines to your go.mod
+#    require hybrid.program v0.0.0
+#    replace hybrid.program => ./hybridrt
+
+# 3. drop .hy files beside your .go files + one generate line in any Go file:
+#    //go:generate hyb generate .
+
+go generate ./...
+go build ./... && go test ./...
+```
+
+The generated `<name>.hy.go` is plain Go: read it, diff it, review it.
+**Delete the `.hy` file and your project is a plain Go module again** — the
+pitch is literal. CI staleness gate: `hyb generate --check .` fails when a
+`.hy` changed without regenerating, so untranspiled code can never silently
+skip the checker.
+
 ## When *not* to use Hybrid
 
 - You need **arbitrary existing Go code to run unmodified** inside the checked

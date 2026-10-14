@@ -100,6 +100,27 @@ jobs:
           cd compiler && cargo build -p hyb --quiet
           cd ..
           python3 tools/corpus_harness.py --bin compiler/target/debug/hyb
+      - name: Row-13 sample module (existing go.mod integration)
+        # The 10-minute story must stay TRUE: vendor-runtime, go generate,
+        # ordinary go build/test, and generate --check catching drift.
+        run: |
+          set -e
+          cd compiler && cargo build --release -p hyb --quiet
+          cd ../examples/gomod-integration
+          HYB=../../compiler/target/release/hyb
+          $HYB vendor-runtime .
+          $HYB generate .
+          go build ./... && go vet ./... && go test ./... && go run .
+          $HYB generate --check .
+          # semantic drift must FAIL the check (staleness = build failure)
+          cp calc.hy /tmp/calc.bak
+          sed -i 's/acc += x/acc += 2 * x/' calc.hy
+          if $HYB generate --check . >/dev/null 2>&1; then
+            echo 'generate --check FAILED to catch semantic drift' >&2; exit 1
+          fi
+          cp /tmp/calc.bak calc.hy
+          $HYB generate --check .
+          echo "row-13 sample: OK (build/vet/test/run + drift detection)"
       - name: Managed-block gate (new hatch = review event, row 14)
         # A managed block NOT in gates/managed-baseline.json fails CI;
         # removals are always allowed. Re-baseline WITH review:
