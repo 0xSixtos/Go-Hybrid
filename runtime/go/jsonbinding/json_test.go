@@ -157,3 +157,25 @@ func TestZeroValueGuard(t *testing.T) {
 		t.Fatal("zero Value must error, not cross")
 	}
 }
+
+func TestStringValueUnescape(t *testing.T) {
+	doc := NewObject()
+	cases := []string{
+		"simple",
+		"with \"quotes\" and \\backslash",
+		"newline\nand\ttab",
+		"unicode: \u2764 \u0026 \u00a9",
+	}
+	for _, want := range cases {
+		if err := doc.Set("k", want); err != nil {
+			t.Fatalf("Set(%q): %v", want, err)
+		}
+		got, err := doc.String("k")
+		if err != nil {
+			t.Fatalf("String(%q): %v", want, err)
+		}
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	}
+}
