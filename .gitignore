@@ -64,3 +64,6 @@ dist/
 
 # the row-13 sample: hybridrt/ is derived (hyb vendor-runtime), never committed
 examples/gomod-integration/hybridrt/
+
+# the sample module build output
+examples/gomod-integration/hybrid-demo
