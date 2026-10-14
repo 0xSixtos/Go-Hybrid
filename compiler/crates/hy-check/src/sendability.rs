@@ -16,9 +16,7 @@
 //!     hatch is explicit and auditable: `managed` (HYB-E8001, counted by
 //!     --report-managed).
 
-use crate::model::{
-    as_addr_of, move_operand_ident, Binding, Checker, FnState, MoveKind, TypeShape,
-};
+use crate::model::{as_addr_of, unwrap_parens, Binding, Checker, FnState, MoveKind, TypeShape};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::Expr;
 
@@ -64,8 +62,8 @@ impl<'a> Checker<'a> {
     // -----------------------------------------------------------------------
 
     pub(crate) fn classify_value(&self, st: &FnState, expr: &Expr) -> Outcome {
-        // `move x` — class 3; the transfer marking happens at the site.
-        if matches!(expr, Expr::Move { .. }) {
+        // `move x` — class 3; the transfer marking + O5.4 validation happens at the site.
+        if matches!(unwrap_parens(expr), Expr::Move { .. }) {
             return Outcome::Ok;
         }
         // literals and interpolated strings
@@ -381,21 +379,47 @@ impl<'a> Checker<'a> {
         let mut moves: Vec<(String, Span)> = Vec::new();
 
         for v in values {
-            // class-3 owned moves first: `move x` (Expr form) and the
-            // parser's flagged-Ident form (`Send{is_move: true, value: x}`).
-            // Either way the value is sendable AND the binding is moved-from
-            // at this site — never also classified (that would reject the
-            // legal move itself).
-            if let Some(name) = move_operand_ident(v) {
-                moves.push((name, v.span()));
+            // class-3 owned moves first: `move x` (Expr form, top-level or
+            // nested inside a composite literal / parens) and the parser's
+            // flagged-Ident form (`Send{is_move: true, value: x}`).
+            if implicit_move {
+                let op = crate::model::unwrap_parens(v);
+                if let Expr::Ident { name, span: ispan } = op {
+                    if self.lookup_binding(st, name).is_some() {
+                        moves.push((name.clone(), *ispan));
+                    } else {
+                        unprovens.push(UnprovenInfo {
+                            value: name.clone(),
+                            reason: "the name did not resolve in this scope".to_string(),
+                        });
+                    }
+                } else if !managed {
+                    self.check_o54_non_ident_move(st, op, v.span());
+                }
                 continue;
             }
-            if implicit_move {
-                if let Expr::Ident { name, span: ispan } = v {
-                    moves.push((name.clone(), *ispan));
-                    continue;
+
+            let mut v_moves = Vec::new();
+            crate::model::collect_move_operands(v, &mut v_moves);
+            for (op, mspan) in v_moves {
+                if let Expr::Ident { name, .. } = op {
+                    if self.lookup_binding(st, name).is_some() {
+                        moves.push((name.clone(), mspan));
+                    } else {
+                        unprovens.push(UnprovenInfo {
+                            value: name.clone(),
+                            reason: "the name did not resolve in this scope".to_string(),
+                        });
+                    }
+                } else if !managed {
+                    self.check_o54_non_ident_move(st, op, mspan);
                 }
             }
+
+            if matches!(crate::model::unwrap_parens(v), Expr::Move { .. }) {
+                continue;
+            }
+
             match self.classify_value(st, v) {
                 Outcome::Ok => {}
                 Outcome::Managed { desc, risky } => {

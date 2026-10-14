@@ -163,10 +163,56 @@ impl<'a> Checker<'a> {
 
     /// Process an expression that may carry a move transfer at a
     /// define/assign/return site (`x := move y`, `x = move y`,
-    /// `return move y`).
-    pub(crate) fn mark_move_in_value(&self, st: &mut FnState, value: &Expr, desc: String) {
-        if let Some(name) = move_operand_ident(value) {
-            self.mark_move(st, &name, value.span(), desc, MoveKind::Moved);
+    /// `return move y`), freezing moved bindings (O5.1) and rejecting
+    /// moves out of GC fields with HYB-E3004 (O5.4).
+    pub(crate) fn mark_move_in_value(&mut self, st: &mut FnState, value: &Expr, desc: String) {
+        let mut ops = Vec::new();
+        crate::model::collect_move_operands(value, &mut ops);
+        for (op, mspan) in ops {
+            if let Expr::Ident { name, .. } = op {
+                self.mark_move(st, name, mspan, desc.clone(), MoveKind::Moved);
+            } else {
+                self.check_o54_non_ident_move(st, op, mspan);
+            }
         }
     }
+
+    /// O5.4 move-form check (HYB-E3004): `move` applies to whole bindings and
+    /// own-handle fields (`move s.conn`), never GC composite fields (`move s.data`).
+    pub(crate) fn check_o54_non_ident_move(
+        &mut self,
+        st: &FnState,
+        operand: &Expr,
+        span: hy_diag::Span,
+    ) {
+        let shape = self.shape_of_expr(st, operand);
+        if matches!(operand, Expr::Field { .. })
+            && matches!(shape, crate::model::TypeShape::OwnHandle(_))
+        {
+            return;
+        }
+        let parent = operand.root_ident().unwrap_or("<value>");
+        let msg = format!(
+            "cannot move `{}` ({}) — `move` applies to whole bindings and own-handle fields, not GC fields (O5.4)",
+            operand.render(),
+            shape.render()
+        );
+        let notes = vec![
+            format!(
+                "why: `{}` still aliases the underlying storage after `move {}`, so freezing the field expression cannot prevent concurrent access through `{}` (O5.4)",
+                parent,
+                operand.render(),
+                parent
+            ),
+            format!(
+                "fix: move the whole binding (`move {}`) so it and every live alias are frozen, or copy `{}` into a fresh local before transferring",
+                parent,
+                operand.render()
+            ),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E3004", self.path.clone(), span, msg).with_notes(notes),
+        );
+    }
 }
+

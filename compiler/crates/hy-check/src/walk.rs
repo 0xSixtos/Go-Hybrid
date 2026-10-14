@@ -246,7 +246,7 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
         }
         Expr::Unary { operand, .. } => expr_uses(operand, out),
         Expr::AddrOf { operand, .. } => expr_uses(operand, out),
-        Expr::Move { operand, span } => match &**operand {
+        Expr::Move { operand, span } => match crate::model::unwrap_parens(operand) {
             Expr::Ident { name, .. } => out.push(Use {
                 name: name.clone(),
                 span: *span,

@@ -1162,4 +1162,88 @@ mod tests {
         // first error in source order is the spawn (A1c)
         assert_eq!(first_error_rule(&r).as_deref(), Some("A1c"));
     }
+
+    #[test]
+    fn o54_move_on_gc_field_at_spawn_rejects_e3004() {
+        let r = check(
+            "struct holder { data map[string]int }\n\
+             fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               h := holder{data: map[string]int{\"k\": 0}}\n\
+               task worker(move h.data)\n\
+               h.data[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn o54_move_on_gc_field_at_send_rejects_e3004() {
+        let r = check(
+            "struct holder { data map[string]int }\n\
+             fn main() {\n\
+               s := holder{data: map[string]int{}}\n\
+               jobs := make(chan map[string]int, 1)\n\
+               jobs <- move s.data\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn o54_move_on_gc_field_at_local_define_rejects_e3004() {
+        let r = check(
+            "struct holder { data map[string]int }\n\
+             fn main() {\n\
+               s := holder{data: map[string]int{}}\n\
+               m := move s.data\n\
+               fmt.println(m)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn o51_parenthesized_and_composite_nested_move_freezes_binding() {
+        let r1 = check(
+            "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               counts := map[string]int{}\n\
+               task worker(move (counts))\n\
+               counts[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r1.verdict, Verdict::Reject, "{:?}", r1.diagnostics);
+        assert!(r1.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        let r2 = check(
+            "struct job { data map[string]int }\n\
+             fn main() {\n\
+               counts := map[string]int{}\n\
+               ch := make(chan job, 1)\n\
+               ch <- job{data: move counts}\n\
+               counts[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r2.verdict, Verdict::Reject, "{:?}", r2.diagnostics);
+        assert!(r2.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+    }
 }
+
