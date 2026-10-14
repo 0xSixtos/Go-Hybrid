@@ -59,6 +59,43 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// May a value of this shape share mutable GC storage with a shallow Go
+    /// copy of it? True for reference types (map/slice/pointer), and — the
+    /// #27 gap — transitively true for a struct or array that CARRIES a
+    /// reference-typed field/element: Go copies such a value by value, but
+    /// the reference interior is shared. Used by the freeze rule's alias
+    /// tracking so `h2 := h1; task f(move h1)` freezes `h2` too.
+    ///
+    /// `Unknown` is deliberately NOT may-share: an unresolvable shape makes
+    /// no aliasing claim (the boundary rules still fail closed on it). The
+    /// depth guard is conservative (deep/recursive struct types claim
+    /// sharing) and cannot loop on Go's acyclic value types.
+    pub(crate) fn shape_may_share(&self, shape: &TypeShape) -> bool {
+        self.shape_may_share_at(shape, 0)
+    }
+
+    fn shape_may_share_at(&self, shape: &TypeShape, depth: usize) -> bool {
+        if depth > 16 {
+            return true;
+        }
+        if shape.is_reference_alias() {
+            return true;
+        }
+        match shape {
+            TypeShape::Array(elem) => self.shape_may_share_at(elem, depth + 1),
+            TypeShape::Struct(Some(name)) => self
+                .structs
+                .get(name)
+                .map(|fields| {
+                    fields.iter().any(|(_, ty)| {
+                        self.shape_may_share_at(&self.shape_of_type(ty), depth + 1)
+                    })
+                })
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
     /// Does this struct decl guard something with a `sync.*` lock? (Used for
     /// the contested-04 note: "Tier 0 does not credit locks at spawn sites".)
     pub(crate) fn struct_has_mutex_field(&self, sname: &str) -> bool {
@@ -173,46 +210,62 @@ impl<'a> Checker<'a> {
     }
 
     fn call_shape(&self, st: &FnState, callee: &Expr, args: &[CallArg]) -> TypeShape {
-        match callee {
-            Expr::Ident { name, .. } => match name.as_str() {
-                // `make(chan T, n)` — defensive against parser spellings of
-                // the type argument; defaults Unknown (fail-closed at
-                // boundaries, O4.9). See the TECH DEBT note in foreign.rs.
-                "make" => self.make_shape(args),
-                "append" => args
-                    .first()
-                    .map(|a| self.shape_of_expr(st, &a.value))
-                    .unwrap_or(TypeShape::Unknown),
-                "len" | "cap" | "min" | "max" => TypeShape::Primitive,
-                // `new(T)` is Go's `new`: it returns `*T` — a POINTER to
-                // zeroed, mutable storage — never a primitive copy. Typing
-                // it Primitive made it sendable-by-type (class 1), so
-                // `p := new(S); task w(p)` shared a `*S` across tasks with no
-                // diagnostic and raced (O4 class table: `*T` is a named
-                // mutable GC value, not sendable; O4.9: unresolved/unknown
-                // shapes fail closed). Type it as a pointer so it is
-                // classified as shared mutable state and rejected at every
-                // check-site. The pointee is inferred when the type argument
-                // resolves; otherwise Unknown — still a non-sendable pointer.
-                "new" => {
-                    let pointee = match args.first().map(|a| &a.value) {
-                        // `new(pool_stats)` — the argument is a type name,
-                        // not a value; name a declared struct precisely.
-                        Some(Expr::Ident { name, .. }) if self.structs.contains_key(name) => {
-                            TypeShape::Struct(Some(name.clone()))
-                        }
-                        Some(other) => self.shape_of_expr(st, other),
-                        None => TypeShape::Unknown,
-                    };
-                    TypeShape::Pointer(Box::new(pointee))
+        match crate::model::unwrap_parens(callee) {
+            Expr::FnLit { results, .. } => results
+                .first()
+                .map(|r| self.shape_of_type(&r.ty))
+                .unwrap_or(TypeShape::Unknown),
+            Expr::Ident { name, .. } => {
+                // Local bindings shadow top-level functions and builtins.
+                if let Some(b) = self.lookup_binding(st, name) {
+                    if let Some(TypeExpr::Fn { results, .. }) = &b.ty {
+                        return results
+                            .first()
+                            .map(|r| self.shape_of_type(r))
+                            .unwrap_or(TypeShape::Unknown);
+                    }
+                    return TypeShape::Unknown;
                 }
-                _ => self
-                    .fns
-                    .get(name.as_str())
-                    .and_then(|f| f.results.first())
-                    .map(|r| self.shape_of_type(&r.ty))
-                    .unwrap_or(TypeShape::Unknown),
-            },
+                match name.as_str() {
+                    // `make(chan T, n)` — defensive against parser spellings of
+                    // the type argument; defaults Unknown (fail-closed at
+                    // boundaries, O4.9). See the TECH DEBT note in foreign.rs.
+                    "make" => self.make_shape(args),
+                    "append" => args
+                        .first()
+                        .map(|a| self.shape_of_expr(st, &a.value))
+                        .unwrap_or(TypeShape::Unknown),
+                    "len" | "cap" | "min" | "max" => TypeShape::Primitive,
+                    // `new(T)` is Go's `new`: it returns `*T` — a POINTER to
+                    // zeroed, mutable storage — never a primitive copy. Typing
+                    // it Primitive made it sendable-by-type (class 1), so
+                    // `p := new(S); task w(p)` shared a `*S` across tasks with no
+                    // diagnostic and raced (O4 class table: `*T` is a named
+                    // mutable GC value, not sendable; O4.9: unresolved/unknown
+                    // shapes fail closed). Type it as a pointer so it is
+                    // classified as shared mutable state and rejected at every
+                    // check-site. The pointee is inferred when the type argument
+                    // resolves; otherwise Unknown — still a non-sendable pointer.
+                    "new" => {
+                        let pointee = match args.first().map(|a| &a.value) {
+                            // `new(pool_stats)` — the argument is a type name,
+                            // not a value; name a declared struct precisely.
+                            Some(Expr::Ident { name, .. }) if self.structs.contains_key(name) => {
+                                TypeShape::Struct(Some(name.clone()))
+                            }
+                            Some(other) => self.shape_of_expr(st, other),
+                            None => TypeShape::Unknown,
+                        };
+                        TypeShape::Pointer(Box::new(pointee))
+                    }
+                    _ => self
+                        .fns
+                        .get(name.as_str())
+                        .and_then(|f| f.results.first())
+                        .map(|r| self.shape_of_type(&r.ty))
+                        .unwrap_or(TypeShape::Unknown),
+                }
+            }
             Expr::Field { base, name, .. } => {
                 // package call (`serde_json.parse`) vs method call (`doc.array`)
                 if let Expr::Ident { name: b, .. } = &**base {
@@ -310,46 +363,134 @@ impl<'a> Checker<'a> {
                 elem: e.clone(),
                 span: *span,
             }),
+            Expr::FnLit {
+                params,
+                results,
+                span,
+                ..
+            } => Some(TypeExpr::Fn {
+                params: params.clone(),
+                results: results.iter().map(|r| r.ty.clone()).collect(),
+                span: *span,
+            }),
             Expr::Move { operand, .. }
             | Expr::Try { operand, .. }
             | Expr::Paren { inner: operand, .. } => self.ty_of_expr(st, operand),
-            Expr::Call { callee, .. } => match callee.as_ref() {
-                Expr::Ident { name, .. } => self
-                    .fns
-                    .get(name.as_str())
-                    .and_then(|f| f.results.first())
-                    .map(|r| r.ty.clone()),
+            Expr::Call { callee, .. } => match crate::model::unwrap_parens(callee) {
+                Expr::FnLit { results, .. } => results.first().map(|r| r.ty.clone()),
+                Expr::Ident { name, .. } => {
+                    if let Some(b) = self.lookup_binding(st, name) {
+                        if let Some(TypeExpr::Fn { results, .. }) = &b.ty {
+                            return results.first().cloned();
+                        }
+                        return None;
+                    }
+                    self.fns
+                        .get(name.as_str())
+                        .and_then(|f| f.results.first())
+                        .map(|r| r.ty.clone())
+                }
                 _ => None,
             },
             _ => None,
         }
     }
 
-    /// Shapes for a multi-name define from one value (`v, ok := m[k]`).
+    /// Shapes for a multi-name define/assign from one value (`v, ok := m[k]`,
+    /// `v, ok := <-ch`, `a, b := f()`, `a, b = f()?`).
     pub(crate) fn multi_value_shapes(
         &self,
         st: &FnState,
         value: &Expr,
         n_names: usize,
     ) -> Vec<TypeShape> {
+        let v = crate::model::unwrap_parens(value);
         if n_names == 2 {
-            if let Expr::Index { base, .. } = value {
-                if let TypeShape::Map(_, v) = self.shape_of_expr(st, base) {
-                    return vec![*v, TypeShape::Primitive]; // v, ok := m[k]
+            if let Expr::Index { base, .. } = v {
+                if let TypeShape::Map(_, val) = self.shape_of_expr(st, base) {
+                    return vec![*val, TypeShape::Primitive]; // v, ok := m[k]
                 }
             }
             // `v, ok := <-ch` — the value is the channel's element; `ok` is
             // the receive-ok flag (a bool)
-            if let Expr::Receive { chan, .. } = value {
+            if let Expr::Receive { chan, .. } = v {
                 let elem = match self.shape_of_expr(st, chan) {
                     TypeShape::Chan(e) => *e,
                     _ => TypeShape::Unknown,
                 };
                 return vec![elem, TypeShape::Primitive];
             }
-            // `a, b := f()` and other multi-value forms: permissive
+        }
+        let (call_expr, is_try) = match v {
+            Expr::Try { operand, .. } => (crate::model::unwrap_parens(operand), true),
+            other => (other, false),
+        };
+        if let Expr::Call { callee, .. } = call_expr {
+            if let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) {
+                if self.lookup_binding(st, name).is_none() {
+                    if let Some(f) = self.fns.get(name.as_str()) {
+                        let avail = if is_try {
+                            f.results.len().saturating_sub(1)
+                        } else {
+                            f.results.len()
+                        };
+                        if avail == n_names {
+                            return f
+                                .results
+                                .iter()
+                                .take(n_names)
+                                .map(|r| self.shape_of_type(&r.ty))
+                                .collect();
+                        }
+                    }
+                }
+            }
         }
         vec![TypeShape::Unknown; n_names]
+    }
+
+    /// As-written source types for a multi-name define/assign from one value
+    /// (`a, b := f()`, `a, b = f()?`, `v, ok := m[k]`), when directly available.
+    pub(crate) fn multi_value_tys(
+        &self,
+        st: &FnState,
+        value: &Expr,
+        n_names: usize,
+    ) -> Vec<Option<TypeExpr>> {
+        let v = crate::model::unwrap_parens(value);
+        if n_names == 2 {
+            if let Expr::Index { base, .. } = v {
+                if let Some(TypeExpr::Map { value: val_ty, .. }) = self.ty_of_expr(st, base) {
+                    return vec![Some(*val_ty), None];
+                }
+            }
+        }
+        let (call_expr, is_try) = match v {
+            Expr::Try { operand, .. } => (crate::model::unwrap_parens(operand), true),
+            other => (other, false),
+        };
+        if let Expr::Call { callee, .. } = call_expr {
+            if let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) {
+                if self.lookup_binding(st, name).is_none() {
+                    if let Some(f) = self.fns.get(name.as_str()) {
+                        let avail = if is_try {
+                            f.results.len().saturating_sub(1)
+                        } else {
+                            f.results.len()
+                        };
+                        if avail == n_names {
+                            return f
+                                .results
+                                .iter()
+                                .take(n_names)
+                                .map(|r| Some(r.ty.clone()))
+                                .collect();
+                        }
+                    }
+                }
+            }
+        }
+        vec![None; n_names]
     }
 }
 
@@ -367,3 +508,109 @@ pub(crate) fn receiver_type_name(shape: &TypeShape) -> Option<String> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{check_file, Verdict};
+
+    fn check(src: &str) -> crate::CheckResult {
+        let ast = hy_syntax::parse_file("test.hy", src).expect("test source must parse");
+        check_file(&ast)
+    }
+
+    #[test]
+    fn pointer_receiver_alias_is_frozen_on_move() {
+        let r = check(
+            "import \"fmt\"\n\
+             struct stats { count int }\n\
+             fn worker(s *stats) { s.count = s.count + 1 }\n\
+             fn (s *stats) run() {\n\
+               alias := s\n\
+               task worker(move s)\n\
+               alias.count = 42\n\
+               fmt.println(alias.count)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        // The non-owned-move guard (E3004) fires at the move site first: the
+        // receiver aliases caller-owned storage, so `move s` is invalid
+        // outright. The alias freeze (E3003) is the diagnosis for the
+        // owned-binding variant of this shape.
+        assert_eq!(r.diagnostics[0].code, "HYB-E3004");
+    }
+
+    #[test]
+    fn pointer_receiver_to_empty_struct_is_still_a_pointer_at_spawn() {
+        // Even when the pointee is a 0-field struct (which `named_shape` treats
+        // as Primitive by value), a pointer receiver `s *marker` has shape
+        // `Pointer(...)` and must be rejected at spawn without `move`.
+        let r = check(
+            "struct marker {}\n\
+             fn worker(m *marker) {}\n\
+             fn (m *marker) run() {\n\
+               task worker(m)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E3001");
+        assert!(r.diagnostics[0].message.contains("*marker"));
+    }
+
+    #[test]
+    fn method_with_same_name_does_not_overwrite_toplevel_fn_in_table() {
+        let r = check(
+            "struct dummy { x int }\n\
+             fn make_data() map[string]int {\n\
+               return map[string]int{\"init\": 0}\n\
+             }\n\
+             fn (d dummy) make_data() int {\n\
+               return d.x\n\
+             }\n\
+             fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               m := make_data()\n\
+               task worker(m)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E3001");
+        assert!(r.diagnostics[0].message.contains("map[string]int"));
+    }
+
+    #[test]
+    fn local_closure_shadowing_toplevel_fn_is_not_resolved_from_fn_table() {
+        let r = check(
+            "fn get_data() int { return 0 }\n\
+             fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               get_data := fn() map[string]int {\n\
+                 return map[string]int{\"init\": 0}\n\
+               }\n\
+               m := get_data()\n\
+               task worker(m)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E3001");
+        assert!(r.diagnostics[0].message.contains("map[string]int"));
+    }
+
+    #[test]
+    fn pointer_receiver_move_rejects_as_non_owned_even_without_post_use() {
+        // Updated to the non-owned-move doctrine (pr-61): a receiver aliases
+        // caller-owned storage, so `move s` is rejected outright — no
+        // post-move use required. The diagnostic still names the pointee
+        // `*stats`, pinning the pointer-receiver shape fix this PR added.
+        let r = check(
+            "struct stats { count int }\n\
+             fn worker(s *stats) { s.count = s.count + 1 }\n\
+             fn (s *stats) run() {\n\
+               task worker(move s)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E3004");
+        assert!(r.diagnostics[0].message.contains("*stats"));
+    }
+}
+

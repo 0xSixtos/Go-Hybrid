@@ -50,7 +50,11 @@ impl<'a> Checker<'a> {
     }
 
     fn emit_use_after_move(&mut self, st: &FnState, u: &Use, mv: &MoveInfo) {
-        let is_alias = st.aliases.contains_key(&u.name);
+        // A may-share peer (#27) is an alias in every way that matters here,
+        // even when the single-parent `aliases` chain does not name it (e.g.
+        // a projection or composite-literal capture).
+        let is_alias =
+            st.aliases.contains_key(&u.name) || st.may_share.contains_key(&u.name);
         let orig = resolve_alias(st, &u.name);
         let span_str = format!("{}:{}", mv.span.start.line, mv.span.start.col);
 
@@ -150,6 +154,17 @@ impl<'a> Checker<'a> {
                 members.push(a.clone());
             }
         }
+        // #27: a move also freezes everything that may share the same mutable
+        // GC storage — shallow struct/array copies, re-slices, field/index
+        // projections, and composite literals that embedded a live binding.
+        // The single-parent `aliases` chain above cannot express that graph,
+        // so union in the may-share connected component of every member.
+        let seeded = members.clone();
+        for m in seeded {
+            members.extend(st.share_group(&m));
+        }
+        members.sort();
+        members.dedup();
         for m in &members {
             if let Some(b) = st.env_lookup_mut(m) {
                 b.moved = Some(MoveInfo {
@@ -208,6 +223,57 @@ impl<'a> Checker<'a> {
                 "fix: move the whole binding (`move {}`) so it and every live alias are frozen, or copy `{}` into a fresh local before transferring",
                 parent,
                 operand.render()
+            ),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E3004", self.path.clone(), span, msg).with_notes(notes),
+        );
+    }
+
+    /// O5.1 / O5.2 / O5.4: `move x` at a concurrency boundary requires that `x`
+    /// be an exclusively owned local binding so freezing `x` (and its local
+    /// aliases) freezes every live reference in the sending task. A function/
+    /// closure parameter or receiver, an outer binding captured by a closure,
+    /// or a range variable over a non-channel collection remains aliased in
+    /// the caller / enclosing scope / collection, so moving it is rejected
+    /// with HYB-E3004 (`tier0_rule: "A1b"`).
+    pub(crate) fn check_non_owned_move(
+        &mut self,
+        st: &FnState,
+        name: &str,
+        span: hy_diag::Span,
+    ) {
+        let Some(b) = self.lookup_binding(st, name) else {
+            return;
+        };
+        if b.shape.is_sendable_by_type() || b.immutable || b.managed_taint {
+            return;
+        }
+        let root = resolve_alias(st, name);
+        let origin = b.non_owned_origin.clone().or_else(|| {
+            self.lookup_binding(st, &root)
+                .and_then(|rb| rb.non_owned_origin.clone())
+        });
+        let Some(origin) = origin else {
+            return;
+        };
+        let ty_str = b
+            .ty
+            .as_ref()
+            .map(|t| t.render())
+            .unwrap_or_else(|| b.shape.render());
+        let msg = format!(
+            "cannot move `{}` ({}) — `move` requires an exclusively owned local binding, not {} (O5.1 / O5.4)",
+            name, ty_str, origin
+        );
+        let notes = vec![
+            format!(
+                "why: {} still aliases the underlying storage outside this move site, so freezing `{}` cannot prevent concurrent access (O5.2 / O5.4)",
+                origin, name
+            ),
+            format!(
+                "fix: copy `{}` into a fresh local before moving (`fresh := ...; move fresh`), move the caller's owned binding at the spawn/send site directly, or wrap a genuinely synchronized share in `managed(\"reason\", \"category\") {{ ... }}`",
+                name
             ),
         ];
         self.diags.push(

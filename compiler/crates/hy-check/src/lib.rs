@@ -165,7 +165,11 @@ fn build_tables(ck: &mut Checker<'_>) {
                 );
             }
             Decl::Fn(f) => {
-                ck.fns.insert(f.name.clone(), f);
+                // Only top-level functions belong in `ck.fns` (methods have a
+                // receiver and must not overwrite or impersonate top-level fns).
+                if f.receiver.is_none() {
+                    ck.fns.insert(f.name.clone(), f);
+                }
             }
             Decl::Enum(_) => {}
             Decl::TypeAlias(_) => {}
@@ -183,15 +187,30 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     // environment seed: receiver + params
     let mut st = FnState::default();
     if let Some(r) = &f.receiver {
-        let shape = ck.shape_of_type(&r.ty);
+        let base_shape = ck.shape_of_type(&r.ty);
+        let (shape, ty) = if r.is_pointer {
+            (
+                TypeShape::Pointer(Box::new(base_shape)),
+                Some(hy_syntax::TypeExpr::Pointer {
+                    to: Box::new(r.ty.clone()),
+                    span: r.ty.span(),
+                }),
+            )
+        } else {
+            (base_shape, Some(r.ty.clone()))
+        };
         st.env.insert(
             r.name.clone(),
             Binding {
                 shape,
-                ty: Some(r.ty.clone()),
+                ty,
                 immutable: false,
                 managed_taint: false,
                 moved: None,
+                non_owned_origin: Some(format!(
+                    "method receiver `{}` (the caller retains the receiver across intra-task calls)",
+                    r.name
+                )),
             },
         );
     }
@@ -205,6 +224,10 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 immutable: false,
                 managed_taint: false,
                 moved: None,
+                non_owned_origin: Some(format!(
+                    "parameter `{}` (the caller retains the argument across intra-task calls)",
+                    p.name
+                )),
             },
         );
     }
@@ -220,19 +243,33 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     for (stmt, idx) in &flat.stmts {
         let stmt: &Stmt = stmt;
         let idx = *idx;
-        // Issue #14: apply the statement's scope events BEFORE processing.
-        // A Push opens the block scope its defines live in; a Pop closes the
-        // scope of a construct that ended at the previous statement, which
-        // restores the outer binding (an inner `m := 1` can no longer
-        // overwrite the outer map's shape and launder it past a spawn).
-        let (push, pop) = flat.events.get(&idx).copied().unwrap_or((false, false));
-        if pop {
-            st.scope_pop();
-        }
-        if push {
-            st.scope_push();
-        }
         let managed = flat.in_managed(idx);
+        // Issue #14: apply the statement's scope events BEFORE processing, in
+        // exact order so multiple Pop/Push events at the same index never
+        // coalesce into one, and select-receive arm bindings live inside their
+        // own arm scope.
+        if let Some(evs) = flat.events.get(&idx) {
+            for ev in evs {
+                match ev {
+                    walk::ScopeEvent::Push => st.scope_push(),
+                    walk::ScopeEvent::Pop => st.scope_pop(),
+                    walk::ScopeEvent::SelectRecv { names, chan } => {
+                        let elem = match ck.shape_of_expr(&st, chan) {
+                            TypeShape::Chan(e) => *e,
+                            _ => TypeShape::Unknown,
+                        };
+                        for (i, n) in names.iter().enumerate() {
+                            let shape = if i == 0 {
+                                elem.clone()
+                            } else {
+                                TypeShape::Primitive
+                            };
+                            ck.define_binding(&mut st, n, shape, None, false, managed);
+                        }
+                    }
+                }
+            }
+        }
         if let Stmt::Managed {
             reason,
             category,
@@ -392,9 +429,27 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             // Loop variables: fresh bindings per iteration shape.
             Stmt::For { kind, .. } => match kind {
                 ForKind::Iterate { vars, expr } => {
+                    let is_chan = matches!(ck.shape_of_expr(&st, expr), TypeShape::Chan(_));
                     let shapes = ck.iterate_var_shapes(&st, expr, vars.len());
                     for (name, shape) in vars.iter().zip(shapes) {
+                        let is_ref = shape.is_reference_alias();
                         ck.define_binding(&mut st, name, shape, None, false, managed);
+                        if !is_chan {
+                            if is_ref {
+                                if let Some(root) = expr.root_ident() {
+                                    if ck.lookup_binding(&st, root).is_some() {
+                                        st.aliases.insert(name.clone(), root.to_string());
+                                    }
+                                }
+                            }
+                            if let Some(b) = st.env_lookup_mut(name) {
+                                b.non_owned_origin = Some(format!(
+                                    "range variable `{}` iterating `{}` (the collection still holds the element)",
+                                    name,
+                                    expr.render()
+                                ));
+                            }
+                        }
                     }
                 }
                 ForKind::Range { var, .. } => {
@@ -404,8 +459,8 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             },
 
             // select arms: `ch <- v` is a send check-site; `v, ok := <-ch`
-            // defines its names (Unknown — fail-closed if they later cross
-            // a boundary, O4.9: ascribe or route through a known chan).
+            // defines its names inside that arm's own scope via
+            // `ScopeEvent::SelectRecv` (see `walk.rs`).
             Stmt::Select { arms, .. } => {
                 for arm in arms {
                     match &arm.kind {
@@ -430,27 +485,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                                 targets.as_deref(),
                             );
                         }
-                        SelectArmKind::Recv { names, chan } => {
-                            // `v[, ok] := <-ch` — the value's shape is the
-                            // channel's ELEMENT when the channel resolves
-                            // (fewer unknowns); `ok` is the receive flag
-                            // (a bool). An unresolvable element stays
-                            // Unknown — fail-closed if v later crosses a
-                            // boundary (O4.9).
-                            let elem = match ck.shape_of_expr(&st, chan) {
-                                TypeShape::Chan(e) => *e,
-                                _ => TypeShape::Unknown,
-                            };
-                            for (i, n) in names.iter().enumerate() {
-                                let shape = if i == 0 {
-                                    elem.clone()
-                                } else {
-                                    TypeShape::Primitive
-                                };
-                                ck.define_binding(&mut st, n, shape, None, false, managed);
-                            }
-                        }
-                        SelectArmKind::Default => {}
+                        SelectArmKind::Recv { .. } | SelectArmKind::Default => {}
                     }
                 }
             }
@@ -616,6 +651,49 @@ mod tests {
         assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
         let d = &r.diagnostics[0];
         assert!(d.message.contains("alias"), "{}", d.message);
+    }
+
+    #[test]
+    fn a1b_call_returned_alias_is_frozen_by_move() {
+        // Issue #38: a call that returns a reference-typed value may hand
+        // back storage owned by an argument (`same(m)`), so `move m` must
+        // freeze the call result too — no interprocedural summary exists to
+        // prove the return is fresh.
+        let r = check(
+            "fn same(m map[string]int) map[string]int {\n\
+               return m\n\
+             }\n\
+             fn main() {\n\
+               agg := map[string]int{}\n\
+               results := make(chan map[string]int, 1)\n\
+               alias := same(agg)\n\
+               results <- move agg\n\
+               alias[\"total\"] = len(alias)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        let d = &r.diagnostics[0];
+        assert!(d.message.contains("alias"), "{}", d.message);
+    }
+
+    #[test]
+    fn a1b_call_returned_fresh_map_not_frozen() {
+        // Negative control: the result does not alias any reference-typed
+        // argument, so moving a primitive argument does not freeze it.
+        let r = check(
+            "fn fresh(seed int) map[string]int {\n\
+               return map[string]int{\"s\": seed}\n\
+             }\n\
+             fn main() {\n\
+               n := 1\n\
+               results := make(chan int, 1)\n\
+               alias := fresh(n)\n\
+               results <- move n\n\
+               alias[\"x\"] = 1\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
     }
 
     #[test]
@@ -1385,19 +1463,131 @@ mod tests {
     #[test]
     fn if_init_define_does_not_overwrite_outer_binding() {
         // An if-init define shares Go's if-scope; after the if, the outer
-        // binding is intact and the spawn must classify against the MAP.
+        // binding is intact and the spawn must classify against the MAP,
+        // even when the if-init variable itself shadows `m` (both the
+        // `then` body scope and the `if` scope pop at the same index).
         let r = check(
             "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
              fn main() {\n\
                m := map[string]int{\"k\": 0}\n\
-               if x := 1; x > 0 {\n\
-                 fmt.println(x)\n\
+               if m := 1; m > 0 {\n\
+                 fmt.println(m)\n\
                }\n\
                task worker(m)\n\
              }",
         );
         assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
         assert_eq!(first_error_rule(&r).as_deref(), Some("A1c"));
+        assert_eq!(r.diagnostics[0].code, "HYB-E3001");
+    }
+
+    #[test]
+    fn for_var_and_nested_block_shadow_do_not_leak_outer_map() {
+        // Both `for m in 0..1 { ... }` and `{ { m := 1; ... } }` close two
+        // nested scopes at the same statement index; neither may leave the
+        // inner `m: Primitive` scope on the stack after the construct ends.
+        let r1 = check(
+            "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               for m in 0..1 {\n\
+                 fmt.println(m)\n\
+               }\n\
+               task worker(m)\n\
+             }",
+        );
+        assert_eq!(r1.verdict, Verdict::Reject, "{:?}", r1.diagnostics);
+        assert_eq!(first_error_rule(&r1).as_deref(), Some("A1c"));
+        assert_eq!(r1.diagnostics[0].code, "HYB-E3001");
+
+        let r2 = check(
+            "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               { { m := 1\n fmt.println(m) } }\n\
+               task worker(m)\n\
+             }",
+        );
+        assert_eq!(r2.verdict, Verdict::Reject, "{:?}", r2.diagnostics);
+        assert_eq!(first_error_rule(&r2).as_deref(), Some("A1c"));
+        assert_eq!(r2.diagnostics[0].code, "HYB-E3001");
+    }
+
+    #[test]
+    fn select_recv_define_stays_scoped_to_its_arm() {
+        // A `select` arm receive (`m := <-ch:`) is scoped to that arm's body:
+        // it must not overwrite an outer `m` after the select or overwrite a
+        // sibling arm's `m` before that arm's body is checked.
+        let r1 = check(
+            "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               ch := make(chan int, 1)\n\
+               select {\n\
+               m := <-ch: { fmt.println(m) }\n\
+               }\n\
+               task worker(m)\n\
+             }",
+        );
+        assert_eq!(r1.verdict, Verdict::Reject, "{:?}", r1.diagnostics);
+        assert_eq!(first_error_rule(&r1).as_deref(), Some("A1c"));
+        assert_eq!(r1.diagnostics[0].code, "HYB-E3001");
+
+        let r2 = check(
+            "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               map_ch := make(chan map[string]int, 1)\n\
+               int_ch := make(chan int, 1)\n\
+               select {\n\
+               m := <-map_ch: { task worker(m) }\n\
+               m := <-int_ch: { fmt.println(m) }\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r2.verdict, Verdict::Reject, "{:?}", r2.diagnostics);
+        assert_eq!(first_error_rule(&r2).as_deref(), Some("A1c"));
+        assert_eq!(r2.diagnostics[0].code, "HYB-E3001");
+    }
+
+    #[test]
+    fn closure_select_arm_body_boundaries_and_recv_scope_are_checked() {
+        // Inside a closure body (closures.rs), `Stmt::Select` must both walk
+        // each arm's body for boundary statements (`task` / `send`) and scope
+        // `SelectArmKind::Recv` defines to their arm.
+        let r1 = check(
+            "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               ch := make(chan int, 1)\n\
+               f := fn() {\n\
+                 select {\n\
+                 <-ch: { task worker(m) }\n\
+                 }\n\
+               }\n\
+               f()\n\
+             }",
+        );
+        assert_eq!(r1.verdict, Verdict::Reject, "{:?}", r1.diagnostics);
+        assert_eq!(first_error_rule(&r1).as_deref(), Some("A1c"));
+        assert_eq!(r1.diagnostics[0].code, "HYB-E3001");
+
+        let r2 = check(
+            "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               ch := make(chan int, 1)\n\
+               f := fn() {\n\
+                 m := map[string]int{\"k\": 0}\n\
+                 select {\n\
+                 m := <-ch: { fmt.println(m) }\n\
+                 }\n\
+                 task worker(m)\n\
+               }\n\
+               f()\n\
+             }",
+        );
+        assert_eq!(r2.verdict, Verdict::Reject, "{:?}", r2.diagnostics);
+        assert_eq!(first_error_rule(&r2).as_deref(), Some("A1c"));
+        assert_eq!(r2.diagnostics[0].code, "HYB-E3001");
     }
 
     #[test]
@@ -1419,7 +1609,7 @@ mod tests {
     // -----------------------------------------------------------------------
     // `new(T)` returns `*T`, not a primitive (O4 / O4.9). Regression for the
     // accepted-but-unsound shape `p := new(S); task w(p)`, which shared a
-    // `*S` across tasks with zero diagnostics and raced under `go -race`.
+    // `*S` across tasks with zero diagnostics and races under `go -race`.
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1465,6 +1655,263 @@ mod tests {
         );
         assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn fc_atomic_pointer_and_value_reject_e3005_row_11() {
+        let r_ptr = check(
+            "import \"sync/atomic\"\n\
+             struct holder { data map[string]int }\n\
+             fn worker(p *atomic.pointer[holder], done chan<- bool) {\n\
+               h := p.load()\n\
+               for i in 0..10 { h.data[\"k\"] = i }\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               var p atomic.pointer[holder]\n\
+               shared := holder{data: map[string]int{\"k\": 0}}\n\
+               p.store(&shared)\n\
+               done := make(chan bool, 1)\n\
+               task worker(&p, done)\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_ptr.verdict, Verdict::Reject, "{:?}", r_ptr.diagnostics);
+        assert_eq!(first_error_rule(&r_ptr).as_deref(), Some("FC"));
+        let d = r_ptr
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "HYB-E3005")
+            .expect("atomic.pointer[T] must fail closed with HYB-E3005");
+        assert!(
+            d.notes.iter().any(|n| n.contains("GUARANTEES.md row 11")),
+            "notes must cite GUARANTEES.md row 11: {:?}",
+            d.notes
+        );
+
+        let r_val = check(
+            "import \"sync/atomic\"\n\
+             fn worker(v *atomic.value) { }\n\
+             fn main() {\n\
+               var v atomic.value\n\
+               task worker(&v)\n\
+             }",
+        );
+        assert_eq!(r_val.verdict, Verdict::Reject, "{:?}", r_val.diagnostics);
+        assert!(r_val.diagnostics.iter().any(|d| d.code == "HYB-E3005"));
+    }
+
+    #[test]
+    fn non_owned_param_capture_and_range_moves_reject_e3004() {
+        // 1. Function parameter moved across a task boundary: caller retains `m`.
+        let r_param = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn spawn_it(m map[string]int, done chan<- bool) {\n\
+               task worker(move m, done)\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 1)\n\
+               spawn_it(m, done)\n\
+               m[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_param.verdict, Verdict::Reject, "{:?}", r_param.diagnostics);
+        assert_eq!(first_error_rule(&r_param).as_deref(), Some("A1b"));
+        assert!(r_param.diagnostics.iter().any(|d| d.code == "HYB-E3004"));
+
+        // 2.Captured outer binding moved inside a closure: enclosing scope retains `m`.
+        let r_cap = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 1)\n\
+               f := fn() {\n\
+                 task worker(move m, done)\n\
+               }\n\
+               f()\n\
+               m[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_cap.verdict, Verdict::Reject, "{:?}", r_cap.diagnostics);
+        assert_eq!(first_error_rule(&r_cap).as_deref(), Some("A1b"));
+        assert!(r_cap.diagnostics.iter().any(|d| d.code == "HYB-E3004"));
+
+        // 3. Non-channel `for k, v in mm` range variable moved: `mm` still holds the element.
+        let r_range = check(
+            "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               mm := map[string]map[string]int{\"a\": map[string]int{\"k\": 0}}\n\
+               for k, v in mm {\n\
+                 task worker(move v)\n\
+               }\n\
+               mm[\"a\"][\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r_range.verdict, Verdict::Reject, "{:?}", r_range.diagnostics);
+        assert_eq!(first_error_rule(&r_range).as_deref(), Some("A1b"));
+        assert!(r_range.diagnostics.iter().any(|d| d.code == "HYB-E3004"));
+        assert!(r_range.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // 4. Positive control: channel iteration (`for b in ch`) transfers ownership per element.
+        let r_chan = check(
+            "struct batch { rows []int }\n\
+             fn relay(in_ch <-chan batch, out_ch chan<- batch) {\n\
+               for b in in_ch {\n\
+                 out_ch <- move b\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r_chan.verdict, Verdict::Accept, "{:?}", r_chan.diagnostics);
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-value unpack (`n, m = make_pair()` / `n, m := make_pair()`),
+    // parallel assignment aliases (`m2, x = m, 1`), and pointer-receiver
+    // method aliases (`fn (s *state) run() { p := s; ... }`).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn multival_assign_does_not_overwrite_map_with_first_result_shape_e3001() {
+        // Regression: `n, m = make_pair()` had `values.len() == 1` and
+        // `targets.len() == 2`, and `process_assign` assigned
+        // `shape_of_expr(&values[0])` (`f.results.first()` = Primitive) to
+        // EVERY target, turning `m` (`map[string]int`) into a Primitive and
+        // accepting `task worker(m, done)` with 0 diagnostics.
+        let r = check(
+            "fn make_pair() (int, map[string]int) {\n\
+               return 1, map[string]int{\"k\": 0}\n\
+             }\n\
+             fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               var n int\n\
+               var m map[string]int\n\
+               n, m = make_pair()\n\
+               done := make(chan bool, 1)\n\
+               task worker(m, done)\n\
+               fmt.println(n)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1c"));
+        assert_eq!(r.diagnostics[0].code, "HYB-E3001");
+        assert!(r.diagnostics[0].message.contains("map[string]int"));
+    }
+
+    #[test]
+    fn multival_define_resolves_declared_fn_results() {
+        // `n, m := make_pair()` resolves each binding from its corresponding
+        // declared function result: `n` (int) is sendable (Accept), while
+        // `m` (map[string]int) is rejected under A1c (`HYB-E3001`).
+        let r_reject = check(
+            "fn make_pair() (int, map[string]int) {\n\
+               return 1, map[string]int{\"k\": 0}\n\
+             }\n\
+             fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               n, m := make_pair()\n\
+               fmt.println(n)\n\
+               task worker(m)\n\
+             }",
+        );
+        assert_eq!(
+            r_reject.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_reject.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_reject).as_deref(), Some("A1c"));
+        assert_eq!(r_reject.diagnostics[0].code, "HYB-E3001");
+
+        let r_accept = check(
+            "fn make_pair() (int, string) {\n\
+               return 1, \"ok\"\n\
+             }\n\
+             fn worker(n int, s string) { fmt.println(n, s) }\n\
+             fn main() {\n\
+               n, s := make_pair()\n\
+               task worker(n, s)\n\
+             }",
+        );
+        assert_eq!(
+            r_accept.verdict,
+            Verdict::Accept,
+            "{:?}",
+            r_accept.diagnostics
+        );
+    }
+
+    #[test]
+    fn parallel_assign_records_reference_alias_for_freeze_e3003() {
+        // Regression: `m2, x = m, 1` had `values.len() == 2` and skipped the
+        // `values.len() == 1` guard in `process_assign`, so `m2 -> m` was
+        // never recorded in `st.aliases` and `m2["k"] = 2` after `move m`
+        // passed with 0 diagnostics.
+        let r = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               var m2 map[string]int\n\
+               var x int\n\
+               m2, x = m, 1\n\
+               done := make(chan bool, 1)\n\
+               task worker(move m, done)\n\
+               m2[\"k\"] = 2\n\
+               fmt.println(x)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        assert_eq!(r.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn pointer_receiver_method_preserves_pointer_shape_and_freezes_alias_e3003() {
+        // Regression: `parse_receiver` strips `*` into `r.is_pointer = true`
+        // and stores the base type in `r.ty`, but `check_fn` ignored
+        // `r.is_pointer` and gave `s` `TypeShape::Struct` instead of
+        // `TypeShape::Pointer(Struct)`. As a result, `p := s` inside
+        // `fn (s *state) run(...)` was not recorded as a reference alias and
+        // `p.m["k"] = 2` after `task worker(move s, done)` passed with 0
+        // diagnostics.
+        let r = check(
+            "struct state { m map[string]int }\n\
+             fn worker(s *state, done chan<- bool) {\n\
+               s.m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn (s *state) run(done chan<- bool) {\n\
+               p := s\n\
+               task worker(move s, done)\n\
+               p.m[\"k\"] = 2\n\
+             }\n\
+             fn main() {\n\
+               st := state{m: map[string]int{\"k\": 0}}\n\
+               done := make(chan bool, 1)\n\
+               st.run(done)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        // The E3004 (receiver `s` is not exclusively owned, so `move s` is
+        // invalid outright — the non-owned-move guard) now fires at the move
+        // site BEFORE the alias story can; the alias freeze (E3003) remains
+        // the diagnosis for the owned-binding variant of this shape.
+        assert_eq!(r.diagnostics[0].code, "HYB-E3004");
     }
 }
 

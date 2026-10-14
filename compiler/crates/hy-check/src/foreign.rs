@@ -54,11 +54,44 @@ pub(crate) enum CallMode {
     Unknown,
 }
 
+/// The SCALAR `sync/atomic` types — the only atomics that are class 2
+/// (sendable-by-type). Each one holds a plain machine value behind
+/// internally synchronized Load/Store/Add/Swap/CompareAndSwap, so sharing
+/// it across tasks cannot alias mutable GC state.
+pub(crate) const SCALAR_ATOMICS: &[&str] = &[
+    "atomic.bool",
+    "atomic.int32",
+    "atomic.int64",
+    "atomic.uint32",
+    "atomic.uint64",
+    "atomic.uintptr",
+];
+
+/// Is `name` a scalar atomic (class 2)?
+pub(crate) fn is_scalar_atomic(name: &str) -> bool {
+    SCALAR_ATOMICS.contains(&name)
+}
+
+/// Is `name` a `sync/atomic` type OUTSIDE the scalar set — `atomic.pointer[T]`,
+/// `atomic.value`, or anything else under `atomic.`? GUARANTEES.md row 11:
+/// these are not on the curated surface yet ("unproven → rejected"). They
+/// publish a reference to arbitrary (possibly mutable GC) state: the atomic
+/// makes the pointer swap race-free, NOT the pointee, so treating them as
+/// class 2 let two tasks write the same map through `p.load()`.
+pub(crate) fn is_unproven_atomic(name: &str) -> bool {
+    name.starts_with("atomic.") && !is_scalar_atomic(name)
+}
+
 /// Classify a dotted foreign type name; `None` = not a known foreign type
 /// (the caller falls back to local struct decls / `Unknown`).
 pub(crate) fn foreign_named_type(name: &str) -> Option<TypeShape> {
-    if name.starts_with("atomic.") {
+    if is_scalar_atomic(name) {
         return Some(TypeShape::Atomic);
+    }
+    if is_unproven_atomic(name) {
+        // fail-closed (O4.9): Unknown → HYB-E3005 at spawn/send boundaries,
+        // with the row-11 explanation (sendability.rs)
+        return Some(TypeShape::Unknown);
     }
     match name {
         "serde_json.value" => Some(TypeShape::OwnHandle("serde_json.value".into())),
@@ -106,6 +139,9 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("strings", "split") | ("strings", "fields") => TypeShape::Slice(Box::new(TypeShape::Str)),
         ("http", "new_serve_mux") => TypeShape::ForeignOpaque("http.serve_mux".into()),
         ("http", "handler") => TypeShape::ForeignOpaque("http.handler".into()),
+        // `atomic.load_pointer` / `atomic.swap_pointer` return an
+        // unsafe.Pointer to arbitrary state — not a primitive (row 11)
+        ("atomic", "load_pointer" | "swap_pointer") => TypeShape::Unknown,
         _ if pkg == "atomic" => TypeShape::Primitive,
         _ => TypeShape::Unknown,
     }
@@ -141,7 +177,11 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         ("serde_json.value" | "serde_json.view", "string" | "to_string_pretty") => TypeShape::Str,
         ("flate2.writer", "write") => TypeShape::Primitive,
         ("flate2.writer", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
-        _ if recv_type.starts_with("atomic.") => TypeShape::Primitive,
+        // scalar atomics only ("atomic.int" is receiver_type_name's key for
+        // TypeShape::Atomic): load/swap/add yield the scalar. A non-scalar
+        // atomic's `load()` / `swap()` returns a pointer / `any` — Unknown,
+        // fail-closed (GUARANTEES row 11).
+        _ if recv_type == "atomic.int" || is_scalar_atomic(recv_type) => TypeShape::Primitive,
         _ => TypeShape::Unknown,
     }
 }
