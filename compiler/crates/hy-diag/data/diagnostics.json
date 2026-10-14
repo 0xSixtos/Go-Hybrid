@@ -43,6 +43,35 @@
       "rule": "P"
     },
     {
+      "code": "HYB-E0003",
+      "name": "managed-payload-required",
+      "category": "parse",
+      "severity": "error",
+      "title": "managed blocks need a reason and a category",
+      "summary": "The escape hatch must be review-visible: a bare `managed { ... }` (or an empty reason/category) is a reject, not a lint — what the hatch bypasses and why must be IN the program (discussion #4, PLAN row 14; fail-closed like the boundary rule FC).",
+      "fixits": [
+        "add the payload: managed(\"why this bypass is safe\", \"category\") { ... }",
+        "pick the category from the closed set: mutex, atomic, actor, finalizer, interop, other"
+      ],
+      "example": "managed { counts := map[string]int{} }   // reject: HYB-E0003 — write managed(\"shared map across tasks\", \"mutex\") { ... }",
+      "rule": "MANAGED",
+      "tier0_rule_id": "MANAGED"
+    },
+    {
+      "code": "HYB-E0004",
+      "name": "managed-unknown-category",
+      "category": "parse",
+      "severity": "error",
+      "title": "unknown managed category",
+      "summary": "The category is a CLOSED set so reviewers know which invariant a block bypasses without reading prose (discussion #4). Unknown categories are rejected; `other` exists for everything else and requires the reason to carry the specifics.",
+      "fixits": [
+        "use one of the closed set: mutex, atomic, actor, finalizer, interop, other"
+      ],
+      "example": "managed(\"r\", \"misc\") { ... }   // reject: HYB-E0004 — `misc` is not a category; use `other` and put the specifics in the reason",
+      "rule": "MANAGED",
+      "tier0_rule_id": "MANAGED"
+    },
+    {
       "code": "HYB-E1001",
       "name": "unresolved-name",
       "category": "resolve",

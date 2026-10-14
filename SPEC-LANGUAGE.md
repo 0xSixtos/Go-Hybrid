@@ -319,14 +319,23 @@ omitted when uniquely inferable from context (06: `fn(w, r) { … }` passed to
 `http.handler`). Closures capture by reference into the enclosing GC frame
 (Go closure semantics); captures are GC values, never loans (O12).
 
-**LX16 — `managed` blocks.**
+**LX16 — `managed` blocks (payload REQUIRED since row 14 — discussion #4).**
 
 ```ebnf
-ManagedStmt  = "managed" Block .
+ManagedStmt  = "managed" [ "(" StrLit { "," StrLit } ")" ] Block .
 ```
 
 Lexically scoped suspension of the Tier-0 sendability checks; full rule O6.
 Greppable by keyword; counted by `--report-managed` (O6.3, normative).
+
+The payload (row 14, fail-closed): `managed("reason", "category", tickets...)`.
+String LITERALS only (computed payloads would make the audit un-greppable).
+arg 1 = the reason (non-empty); arg 2 = the category — a CLOSED set
+(`mutex`, `atomic`, `actor`, `finalizer`, `interop`, `other`); args 3.. =
+ticket references. A bare `managed { … }` PARSES but the checker rejects it
+(HYB-E0003 — both missing parts named); an unknown category rejects with
+HYB-E0004. The category+reason+tickets flow into `--report-managed` and the
+emitted Go's marker comment (`{ // managed [mutex] reason ... }`).
 
 ### 1.4 Grammar — expressions
 
@@ -1645,7 +1654,16 @@ never one without the other.
   addition 4 — `managed` must be greppable, auditable, and countable per
   project, "turning the escape hatch into a visible trust metric instead
   of a hidden hole." The keyword itself is greppable; the report makes the
-  *usage* countable.
+  *usage* countable. **Row 14 amendment (discussion #4):** the report is a
+  TABLE of invariants bypassed — per-category counts plus every block's
+  reason/category/tickets — not a bare number.
+- **O6.4 — The new-block gate (row 14, discussion #4).** A `managed` block
+  that is not in the committed baseline (`gates/managed-baseline.json`)
+  FAILS CI (`tools/managed_gate.py`); removing or keeping a baselined block
+  is always allowed. Re-baselining requires review — the hatch is
+  unsafe-by-default, and "a new managed block appeared" is a review event
+  exactly like a new `unsafe` block in Rust. Pairs with `--deny-managed`
+  (any block fails) and `--report-managed` (the audit table).
 
 ```hy
 // fragment:

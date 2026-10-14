@@ -6,6 +6,9 @@
 // ruling's diagnostic shape ("this map is shared across tasks; wrap it in
 // `managed`, or send ownership with `move`"). The program is IDENTICAL to
 // 01 except: the shared region is wrapped in a `managed` block (plus this
+// AMENDMENT 2026-10-14 (row 14, discussion #4): the payload form is now
+// REQUIRED (fail-closed) — this program gained reason+category+ticket;
+// the bare form now rejects with HYB-E0003. Verdict unchanged.
 // comment). This pins the MINIMAL semantic diff of the escape hatch — one
 // wrapper flips the verdict and nothing else changes.
 //
@@ -64,7 +67,7 @@ fn tally(shard []string, counts map[string]int, done chan<- bool) {
 fn main() {
     words := strings.split(corpus, " ")
 
-    managed {                          // escape hatch: greppable, auditable,
+    managed("shards tallied under the runner mutex", "mutex", "CORPUS-02") { // hatch:
         counts := map[string]int{}     // counted per project (--report-managed)
 
         done := make(chan bool, n_shards)

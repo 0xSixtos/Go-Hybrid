@@ -5,6 +5,9 @@
 // PURPOSE: the `managed` rewrite of 04 — the ruling's named escape for the
 // worker-pool tripwire shape ("wrap it in `managed`"). Identical to 04
 // except: the shared region is wrapped in a `managed` block (plus this
+// AMENDMENT 2026-10-14 (row 14, discussion #4): the payload form is now
+// REQUIRED (fail-closed) — this program gained reason+category+ticket;
+// the bare form now rejects with HYB-E0003. Verdict unchanged.
 // comment). The mutex STAYS, deliberately: `managed` suppresses the A1c
 // spawn-site rejection; it does not check anything in its place — inside
 // the hatch the race story is Go's (DRF-SC), and this program is DRF
@@ -74,7 +77,7 @@ fn worker(id int, jobs <-chan string, stats *pool_stats, done chan<- bool) {
 }
 
 fn main() {
-    managed {                         // escape hatch: greppable, auditable,
+    managed("pool stats under the pool mutex (lock stays)", "mutex", "CORPUS-18") {
         jobs := make(chan string, len(seed_urls))
         stats := pool_stats{}         // counted by --report-managed
         done := make(chan bool, n_workers)

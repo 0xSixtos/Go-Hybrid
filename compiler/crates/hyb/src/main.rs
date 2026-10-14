@@ -176,6 +176,25 @@ fn cmd_check(args: &[String]) -> ExitCode {
                 result.managed.total_sites,
                 result.managed.pct()
             );
+            // Row 14 (discussion #4): the audit is a table of invariants
+            // bypassed, not a bare number.
+            if !result.managed.categories.is_empty() {
+                let cats: Vec<String> = result
+                    .managed
+                    .categories
+                    .iter()
+                    .map(|(c, n)| format!("{}: {}", c, n))
+                    .collect();
+                println!("  categories: {}", cats.join(", "));
+            }
+            for b in &result.managed.blocks {
+                let tickets = if b.tickets.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", b.tickets.join(", "))
+                };
+                println!("  block: [{}] \"{}\"{}", b.category, b.reason, tickets);
+            }
         }
         if result.diagnostics.is_empty() {
             println!("{}: OK (0 diagnostics)", file);

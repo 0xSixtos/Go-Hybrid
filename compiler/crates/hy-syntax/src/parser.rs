@@ -926,8 +926,47 @@ impl Parser {
             }
             Tok::Kw("managed") => {
                 self.bump();
+                // Row 14 (discussion #4): `managed("reason", "category",
+                // tickets...) { ... }`. The POLICY (reason required, closed
+                // category set) is the checker's — a bare block parses here
+                // with empty fields and gets coded rejects (HYB-E0003/4)
+                // from the checker, so every managed violation surfaces
+                // through one diagnostic path. The parser enforces only the
+                // payload SHAPE: string literals (computed payloads would
+                // make the audit un-greppable).
+                let mut payload: Vec<String> = Vec::new();
+                if matches!(self.cur(), Tok::Punct("(")) {
+                    self.bump();
+                    loop {
+                        match self.cur() {
+                            Tok::Punct(")") => {
+                                self.bump();
+                                break;
+                            }
+                            Tok::Punct(",") => {
+                                self.bump();
+                            }
+                            Tok::StrChunk(_) | Tok::RawStr(_) => {
+                                let (s, _) = self.parse_string_lit()?;
+                                payload.push(s);
+                            }
+                            _ => {
+                                return self.err(format!(
+                                    "managed payload takes string literals only (reason, category, tickets...); found {}",
+                                    self.describe_cur()
+                                ));
+                            }
+                        }
+                    }
+                }
                 let body = self.parse_block()?;
+                let empty = String::new();
+                let reason = payload.first().unwrap_or(&empty);
+                let category = payload.get(1).unwrap_or(&empty);
                 Ok(Stmt::Managed {
+                    reason: reason.clone(),
+                    category: category.clone(),
+                    tickets: payload[2.min(payload.len())..].to_vec(),
                     body,
                     span: self.span_from(start),
                 })
@@ -2330,14 +2369,44 @@ mod tests {
 
     #[test]
     fn managed_block() {
-        // corpus 02/18: managed { … }
-        let f = parse_src("fn main() { managed { counts := map[string]int{} } }");
+        // corpus 02/18: managed("reason", "category") { … } — row 14 payload
+        let f = parse_src(
+            "fn main() { managed(\"shared map across tasks\", \"mutex\", \"PROJ-1\") { counts := map[string]int{} } }",
+        );
         let stmt = first_stmt(&f);
-        let Stmt::Managed { body, .. } = stmt else {
+        let Stmt::Managed {
+            reason,
+            category,
+            tickets,
+            body,
+            ..
+        } = stmt
+        else {
             panic!("managed")
         };
+        assert_eq!(reason, "shared map across tasks");
+        assert_eq!(category, "mutex");
+        assert_eq!(tickets, &vec!["PROJ-1".to_string()]);
         assert_eq!(body.stmts.len(), 1);
         assert!(matches!(&body.stmts[0], Stmt::Local(_)));
+    }
+
+    #[test]
+    fn managed_bare_block_parses_empty_payload() {
+        // row 14: the POLICY lives in the checker — a bare block parses with
+        // empty reason/category and the checker rejects it (HYB-E0003); the
+        // parser rejects only non-literal payloads (E0002 envelope).
+        let f = parse_src("fn main() { managed { x := 1 } }");
+        let stmt = first_stmt(&f);
+        let Stmt::Managed { reason, category, .. } = stmt else {
+            panic!("managed")
+        };
+        assert!(reason.is_empty() && category.is_empty());
+        // `()` and reason-only payloads parse too (the checker codes them)
+        parse_src("fn main() { managed() { x := 1 } }");
+        parse_src("fn main() { managed(\"only reason\") { x := 1 } }");
+        // computed payload rejected at parse level (literals only)
+        assert!(parse_file("t.hy", "fn main() { managed(reason, \"mutex\") { x := 1 } }").is_err());
     }
 
     #[test]

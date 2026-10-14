@@ -45,10 +45,10 @@ mod sendability;
 mod shape;
 mod walk;
 
-use hy_diag::{Diagnostic, ManagedReport, Severity};
+use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
 
 use hy_syntax::{Decl, Expr, File, FnDecl, ForKind, SelectArmKind, Stmt};
-use model::{Binding, Checker, FnState, TypeShape};
+use model::{Binding, Checker, FnState, MANAGED_CATEGORIES, TypeShape};
 
 /// The result of checking one file.
 #[derive(Debug, Default)]
@@ -119,6 +119,14 @@ pub fn check_file(file: &File) -> CheckResult {
             managed_blocks: ck.managed_blocks,
             sites_via_managed: ck.sites_via_managed,
             total_sites: ck.total_sites,
+            categories: {
+                let mut m = std::collections::BTreeMap::new();
+                for b in &ck.managed_audit {
+                    *m.entry(b.category.clone()).or_insert(0usize) += 1;
+                }
+                m
+            },
+            blocks: ck.managed_audit.clone(),
         },
     }
 }
@@ -210,8 +218,63 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         let stmt: &Stmt = stmt;
         let idx = *idx;
         let managed = flat.in_managed(idx);
-        if matches!(stmt, Stmt::Managed { .. }) {
+        if let Stmt::Managed {
+            reason,
+            category,
+            tickets,
+            span,
+            ..
+        } = stmt
+        {
             ck.managed_blocks += 1; // O6.3: one per `managed` statement
+            // Row 14 (discussion #4): the payload is AUDITED here — the
+            // parser enforces the literal-list SHAPE, the checker enforces
+            // the policy (fail-closed: a bare block cannot pass silently).
+            if reason.trim().is_empty() {
+                ck.diags.push(
+                    Diagnostic::error(
+                        "HYB-E0003",
+                        ck.path.clone(),
+                        *span,
+                        "managed block has no reason — the escape hatch must say what it bypasses and why (HYB-E0003)",
+                    )
+                    .with_notes(vec![
+                        "a bare `managed { ... }` is a reject, not a lint — the hatch must be review-visible (discussion #4)"
+                            .to_string(),
+                    ]),
+                );
+            }
+            if category.is_empty() {
+                ck.diags.push(
+                    Diagnostic::error(
+                        "HYB-E0003",
+                        ck.path.clone(),
+                        *span,
+                        "managed block has no category — name the invariant being bypassed (HYB-E0003)",
+                    )
+
+                );
+            } else if !MANAGED_CATEGORIES.contains(&category.as_str()) {
+                ck.diags.push(
+                    Diagnostic::error(
+                        "HYB-E0004",
+                        ck.path.clone(),
+                        *span,
+                        format!("unknown managed category `\"{}\"` (HYB-E0004)", category),
+                    )
+                    .with_notes(vec![
+                        format!(
+                            "valid categories: {} — the category tells reviewers WHICH invariant the block bypasses; `other` requires the reason to carry the specifics",
+                            MANAGED_CATEGORIES.join(", ")
+                        ),
+                    ]),
+                );
+            }
+            ck.managed_audit.push(ManagedBlockAudit {
+                reason: reason.clone(),
+                category: category.clone(),
+                tickets: tickets.clone(),
+            });
         }
 
         // A1b/A7: use-after-move on this statement's own uses (checked
@@ -643,7 +706,7 @@ mod tests {
         let r = check(
             "fn tally(counts map[string]int) { counts[\"a\"]++ }\n\
              fn main() {\n\
-               managed {\n\
+               managed(\"counters merged under the test's own mutex\", \"mutex\", \"PROJ-42\") {\n\
                  counts := map[string]int{}\n\
                  task tally(counts)\n\
                }\n\
@@ -659,6 +722,61 @@ mod tests {
         assert_eq!(r.managed.managed_blocks, 1);
         assert!(r.managed.sites_via_managed >= 1);
         assert!(r.managed.total_sites >= 1);
+        // row 14: the audit is a table, not a bare number
+        assert_eq!(r.managed.categories.get("mutex"), Some(&1));
+        assert_eq!(r.managed.blocks.len(), 1);
+        assert_eq!(r.managed.blocks[0].tickets, vec!["PROJ-42".to_string()]);
+        assert_eq!(r.managed.blocks[0].reason.len() > 0, true);
+    }
+
+    #[test]
+    fn managed_bare_block_rejects_e0003() {
+        // row 14 fail-closed: no payload = coded reject
+        let r = check(
+            "fn tally(counts map[string]int) { counts[\"a\"]++ }\n\
+             fn main() {\n\
+               managed {\n\
+                 counts := map[string]int{}\n\
+                 task tally(counts)\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        let codes: Vec<&str> = r.diagnostics.iter().map(|d| d.code.as_str()).collect();
+        assert!(codes.contains(&"HYB-E0003"), "{:?}", r.diagnostics);
+        // BOTH missing parts are named (reason + category)
+        assert_eq!(
+            r.diagnostics
+                .iter()
+                .filter(|d| d.code == "HYB-E0003")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn managed_unknown_category_rejects_e0004() {
+        let r = check(
+            "fn tally(counts map[string]int) { counts[\"a\"]++ }\n\
+             fn main() {\n\
+               managed(\"r\", \"misc\") {\n\
+                 counts := map[string]int{}\n\
+                 task tally(counts)\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E0004"),
+            "{:?}",
+            r.diagnostics
+        );
+        let e4 = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "HYB-E0004")
+            .unwrap();
+        assert!(e4.notes[0].contains("mutex"), "fix-it lists the set");
     }
 
     #[test]
@@ -833,7 +951,7 @@ mod tests {
         let r = check(
             "fn handle(x int) { fmt.println(x) }\n\
              fn main() {\n\
-               managed {\n\
+               managed(\"test-only handler; name shape pinned by the fixture\", \"other\") {\n\
                  task handle(nosuch)\n\
                }\n\
              }",

@@ -6,7 +6,7 @@
 //! variable, no unification, no coercion — just enough structure to answer
 //! "is this value sendable?" (O4) and "which loan rules apply?" (O7/O8/O12).
 
-use hy_diag::{Diagnostic, Span};
+use hy_diag::{Diagnostic, ManagedBlockAudit, Span};
 use hy_syntax::{Expr, File, FnDecl, TypeExpr};
 use std::collections::{HashMap, HashSet};
 
@@ -221,7 +221,21 @@ pub(crate) struct Checker<'a> {
     pub managed_blocks: usize,
     pub sites_via_managed: usize,
     pub total_sites: usize,
+    // Row 14 (discussion #4): every managed block's payload, for the audit.
+    pub managed_audit: Vec<ManagedBlockAudit>,
 }
+
+/// Row 14 (discussion #4): the CLOSED category set — the invariant a
+/// `managed` block deliberately bypasses, machine-checked so reviewers audit
+/// by class instead of by prose. An unknown category is a reject (HYB-E0004).
+pub const MANAGED_CATEGORIES: &[&str] = &[
+    "mutex",    // shared state guarded by a lock
+    "atomic",   // lock-free coordination via sync/atomic
+    "actor",    // single-owner event loop / channel-owned state
+    "finalizer",// Drop / runtime.SetFinalizer interplay
+    "interop",  // cgo / unsafe / FFI edges
+    "other",    // anything else — the reason must carry the specifics
+];
 
 impl<'a> Checker<'a> {
     pub(crate) fn new(file: &'a File) -> Self {
@@ -236,6 +250,7 @@ impl<'a> Checker<'a> {
             managed_blocks: 0,
             sites_via_managed: 0,
             total_sites: 0,
+            managed_audit: Vec::new(),
         }
     }
 

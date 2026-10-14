@@ -484,8 +484,14 @@ fn spread_argument() {
 
 #[test]
 fn managed_block_emits_marker_comment() {
-    let go = emit("fn main() {\n    managed {\n        task w(counter)\n    }\n}\n");
+    let go = emit(
+        "fn main() {\n    managed(\"shared counter under a lock\", \"mutex\", \"PROJ-9\") {\n        task w(counter)\n    }\n}\n",
+    );
     assert!(go.contains("// managed"), "audit marker greppable:\n{}", go);
+    // row 14: the marker carries the category + reason + tickets
+    assert!(go.contains("[mutex]"), "category in marker:\n{}", go);
+    assert!(go.contains("shared counter under a lock"), "reason in marker:\n{}", go);
+    assert!(go.contains("PROJ-9"), "tickets in marker:\n{}", go);
     assert!(go.contains("go w(counter)"), ":\n{}", go);
 }
 

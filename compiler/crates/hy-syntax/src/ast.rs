@@ -314,9 +314,16 @@ pub enum Stmt {
         args: Vec<CallArg>,
         span: Span,
     },
-    /// `managed { ... }` — the escape hatch (O6). Checker: sites inside are
-    /// permitted + linted; values born inside are managed-tainted.
+    /// `managed("reason", "category", tickets...) { ... }` — the escape
+    /// hatch (O6, hardened by row 14 / discussion #4). The payload is
+    /// REQUIRED and fail-closed: a bare block is HYB-E0003, an unknown
+    /// category is HYB-E0004. Checker: sites inside are permitted + linted;
+    /// values born inside are managed-tainted. The reason/category/tickets
+    /// flow into --report-managed and the emitted Go's marker comment.
     Managed {
+        reason: String,
+        category: String,
+        tickets: Vec<String>,
         body: Block,
         span: Span,
     },

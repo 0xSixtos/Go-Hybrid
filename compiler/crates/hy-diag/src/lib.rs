@@ -16,6 +16,7 @@
 //! embedded reference page, or if an `E8nnn` code carries severity `error`.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -242,11 +243,31 @@ pub struct CheckSummary {
 }
 
 /// The `--report-managed` audit data (normative tooling requirement, O6.3).
+/// Row 14 (discussion #4) hardened it: the audit is a TABLE of invariants
+/// bypassed — per-category counts + every block's reason/tickets — not a
+/// bare number.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ManagedReport {
     pub managed_blocks: usize,
     pub sites_via_managed: usize,
     pub total_sites: usize,
+    /// Managed blocks by category (the closed set: mutex, atomic, actor,
+    /// finalizer, interop, other). Empty when no blocks were seen.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub categories: BTreeMap<String, usize>,
+    /// Every managed block in source order (reason + category + tickets).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<ManagedBlockAudit>,
+}
+
+/// One managed block's audit payload (row 14): what was bypassed, why, and
+/// which review tickets own the risk.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ManagedBlockAudit {
+    pub reason: String,
+    pub category: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tickets: Vec<String>,
 }
 
 impl ManagedReport {

@@ -62,12 +62,23 @@ impl Emitter {
                 self.push(&format!("go {}({})", c, parts.join(", ")));
                 Ok(())
             }
-            Stmt::Managed { body, .. } => {
+            Stmt::Managed {
+                reason,
+                category,
+                tickets,
+                body,
+                ..
+            } => {
                 // The escape hatch emits a bare block. The audit marker stays
-                // greppable in the generated source.
-                self.push(
-                    "{ // managed (unchecked share — audited via hyb check --report-managed)",
-                );
+                // greppable in the generated source and now carries the
+                // category + reason + tickets (row 14, discussion #4) — a
+                // reviewer greps the GO output, not just the .hy input.
+                let mut marker =
+                    format!("{{ // managed [{}] {} (audited via hyb check --report-managed)", category, reason);
+                if !tickets.is_empty() {
+                    marker.push_str(&format!(" tickets: {}", tickets.join(", ")));
+                }
+                self.push(&marker);
                 self.emit_block_body(&body.stmts)?;
                 self.push("}");
                 Ok(())

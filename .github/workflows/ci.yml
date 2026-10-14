@@ -100,6 +100,16 @@ jobs:
           cd compiler && cargo build -p hyb --quiet
           cd ..
           python3 tools/corpus_harness.py --bin compiler/target/debug/hyb
+      - name: Managed-block gate (new hatch = review event, row 14)
+        # A managed block NOT in gates/managed-baseline.json fails CI;
+        # removals are always allowed. Re-baseline WITH review:
+        #   python3 tools/managed_gate.py --rebaseline <hyb> gates/managed-baseline.json <prog...>
+        run: |
+          set -e
+          cd compiler && cargo build -p hyb --quiet
+          cd ..
+          python3 tools/managed_gate.py compiler/target/debug/hyb gates/managed-baseline.json \
+            tests/checker-corpus/02-shared-map-managed.hy tests/checker-corpus/18-pool-shared-struct-managed.hy
       - name: Differential corpus loop (accept-side build+run, reject-side checker)
         run: |
           set -e
