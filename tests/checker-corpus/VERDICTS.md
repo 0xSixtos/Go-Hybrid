@@ -64,11 +64,18 @@ renumbered).
 | 19 | 19-freeze-read-through-moved-binding | REJECT (contested) | A1b (read-form) | pure READ through the moved binding after the send — pins SPEC O5.2 / open decision D1 (Q1's literal wording bans "mutations" only); **contested — flagged for G1 human pre-review** |
 | 20 | 20-freeze-alias-write | REJECT | A1b (alias-form) | write through a live alias (`m2 := agg` before the send) — the freeze-defeat shape; alias coverage entailed by any sound freeze (05's REQUIRED MUTANT, materialized) |
 | 21 | 21-let-shared-map-reject | REJECT | A1c | `let`-bound map crossing a spawn site — T22 says `let` is SHALLOW, so it is a named mutable GC value, not class-4 immutable (regression for issue #12; corpus growth, added after the fix) |
+| 22 | 22-a1c-mapslot-loan-at-spawn | REJECT | A1c | a LIVE map-slot loan (`&e.services[k]`, O3 form 3/O8) crosses a `task` spawn site as-is — A1c's safe-by-type test runs on the loan's pointer type exactly as it would for a plain struct borrow; the loan's special provenance grants no exemption |
+| 23 | 23-a1c-mapslot-copy-at-spawn | ACCEPT | — | 22's legal twin: the map-slot field is read into a local BEFORE the spawn (the loan's last use), so a copy (A4/O9) crosses the spawn site instead of the live loan — pins that A1c tracks the LOAN crossing, not the map-slot's mere upstream existence |
 
-**Distribution: ACCEPT 7 · ACCEPT-MANAGED 2 · REJECT 12 — 21 programs.**
+**Distribution: ACCEPT 8 · ACCEPT-MANAGED 2 · REJECT 13 — 23 programs.**
 (19 and 20 were added by the lead during integration on 2026-10-12 — still
-BEFORE any checker existed; see the pre-registration statement. 21 is a
-post-checker corpus GROWTH — see the amendment log.)
+BEFORE any checker existed; see the pre-registration statement. 21, 22 and
+23 are post-checker corpus GROWTH from the bounty track, added 2026-10-14:
+21 fixes issue #12 (PR #13), 22 and 23 close bounty issue #6 (PR #15,
+renumbered from its 21/22 spelling during the merge seam) — each verdict
+was still hand-derived from the A1–A8 strict readings first, per their own
+headers, and only then reproduced against the checker per BOUNTY.md's
+"pay only after reproduction".)
 
 ## Reading-distinguishing power (what Spike 6's corpus could not do)
 
@@ -299,15 +306,17 @@ Two numbers, with the definitions fixed now so the checker-era recompute
 compares like with like:
 
 1. **Verdict-level managed:** programs whose registered verdict is
-   ACCEPT-MANAGED — **2 / 20 = 10.0%** (02, 18).
+   ACCEPT-MANAGED — **2 / 22 = 9.1%** (02, 18).
 2. **As-written managed (the friction number):** programs whose
    idiomatic-Go shape cannot survive AS WRITTEN without `managed` or a
-   redesign — **3 / 20 = 15.0%** (01, 03, 04). 04 counts only while
+   redesign — **3 / 22 = 13.6%** (01, 03, 04). 04 counts only while
    lock-mediated sharing stays outside Tier 0 (OQ2); if that amendment
-   lands, this drops to 2 / 20 = 10.0%.
+   lands, this drops to 2 / 22 = 9.1%. 21 and 22 add a REJECT/ACCEPT pair
+   on the A1c axis that was already covered (not a new friction point):
+   neither is counted in either numerator.
 
 **Both numbers are below the ~25% tripwire → G0 stays closed at baseline.**
-Honest caveats: the corpus is small (20) and deliberately loaded toward
+Honest caveats: the corpus is small (22) and deliberately loaded toward
 the reject side, so these are a baseline, not a market estimate; the other
 eight REJECTs (05, 06, 07, 08, 11, 14, 19, 20) are
 genuine bugs or loan-discipline violations that any defensible ownership
@@ -324,7 +333,12 @@ the (c)+(b) ruling in QUESTIONS.md, BEFORE any checker existed, by agent
 20 were added by the LEAD during integration on 2026-10-12, still before
 any checker existed**, materializing the REQUIRED MUTANT recorded in 05's
 header (OQ3) and SPEC-LANGUAGE.md's open decision D1 — both were flagged
-gaps, not new semantics. Verdicts may change ONLY by a logged amendment
+gaps, not new semantics. **21 and 22 were added 2026-10-14 for bounty
+issue #6, AFTER the Phase-1 checker landed**: each verdict was still
+hand-derived from the rule text first (see their own headers), and the
+checker run was a reproduction step per BOUNTY.md, not the source of the
+verdict — the pre-registration discipline applies to them unchanged.
+Verdicts may change ONLY by a logged amendment
 appended below (date, program, old → new verdict, reason, author) — never
 by editing the table above, never silently. A checker/checker-corpus
 disagreement is resolved by deciding which side is wrong and amending the
