@@ -337,3 +337,20 @@ Work Log:
 Stage Summary:
 - The poll in #2 now has a concrete answer in flight: ALL FOUR listed platforms build+smoke on the fleet this run — the poll's value shifts from prioritization to RC-testing volunteers
 - Windows is the honest-risk leg (asm trampolines + cgo staticlib under mingw never ran before) — fail-fast: false records whatever happens
+
+---
+Task ID: 22 (Batch P)
+Agent: Super Z (main)
+Task: Row 4 per-callee fast-path stack budgets (+ row 6 bench wiring + row 16 found by the fleet).
+
+Work Log:
+- Fleet (release-matrix) run 2→3: fixed BSD paste (macOS), aarch64 sysroot for qemu (-L — binfmt has none, even the CLI couldn't exec), windows bridge moved to x86_64-pc-windows-gnu (msvc emits hyrt.lib; the cgo contract is -lhyrt → libhyrt.a via mingw ld); bench verdict = recorded datapoint not red build. Run 3: bench ✅ (5.30 ns MISS recorded), darwin/arm64 ✅, windows/amd64 ✅, linux/amd64 ✅ — arm64 leg led to the REAL finding: the bridge asm is amd64-ONLY (call_amd64.s excludes itself on GOARCH=arm64) → row 16 (aarch64 trampoline port) opened; the arm64 tarball ships honestly as checker+emitter (bridge-free programs), smoke runs the arm64 hyb under qemu -L
+- ROW 4 LANDED: three guard classes — SMALL (1024, Cross1S..4S, new asm, byte-identical discipline) / DEFAULT (4096, Cross1..4, UNTOUCHED — G2 evidence stays valid) / DEEP (CrossDeep1..4, the pool; CrossDeep2..4 wrappers added). Class ledger interfaces/descriptors.md grounds every curated fn
+- THE CLASSIFICATION CAUGHT A LATENT SOUNDNESS GAP: serde_json recurses on value nesting (remaining_depth=128; measured ceiling: 127 parses, 128 fails — probe on the pinned 1.0.140); pre-row-4 the json Parse rode the default 4096-guard fast path — a 127-deep parse needs an order of magnitude more stack than the guard proves → latent overflow on shallow goroutines for deep inputs. Fixed by the ledger: parse/clone/drop/serialize = DEEP (7 fns); the fix predates any external report
+- Diagnostic parity: Cross2/3/4 now count deep retries (were silent); DeepCrossCount added (the ALWAYS-deep route's oracle — DeepPathCount only sees fast-path retries)
+- Tests: overheadbench/guardclass_test.go (the (1024,4096) disagreement window: SMALL fast + DEFAULT deep at the SAME headroom; grown-stack SMALL loop frozen); jsonbinding/deepnesting_test.go (serde ceiling documented as a test; 127-deep parse/serialize/release via the DEEP routes with DeepCrossCount proof; the constrained-goroutine stress). Go suite 5 pkgs ok · gofmt clean · examples 10/10 (05 byte-exact through DEEP routes) · corpus 20/20 · differential 9/9+11/11
+- Docs: interfaces/descriptors.md (the class ledger + adding-a-fn protocol); G2.md follow-up status APPENDED (nothing rewritten); PLAN rows 4/6 closed, row 16 opened; Decision Log entry
+
+Stage Summary:
+- Row 4 = shipped: shallow-goroutine fan-in for tiny callees takes the ~3-5 ns fast path instead of the 19-42 ns deep path, with the guard-soundness argument now written down per fn
+- The batch's headline is the PROCESS: writing the class ledger forced the serde_json recursion analysis that caught the latent overflow — the claims-table discipline (Discussion #1 ask 1) working as designed inside the repo too

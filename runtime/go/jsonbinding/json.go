@@ -15,6 +15,29 @@ var (
 	ErrABI  = errors.New("serde_json: hyrt ABI handshake mismatch")
 )
 
+// Crossing CLASS ledger (row 4: per-callee stack budgets; the full rationale
+// lives in interfaces/descriptors.md). The rule: a crossing may take the
+// guarded fast path ONLY if the callee's worst-case stack use is an UPPER
+// BOUND below the guard — the guard proves headroom at ENTRY and nothing
+// after. serde_json RECURSES on value nesting (parse: remaining_depth=128;
+// clone/drop/serialize walk the tree), so every fn that can touch a nested
+// value is DEEP-class regardless of input shape; O(1) table/leaf ops are
+// SMALL-class (<= 1 KiB argued bound, guard 1024).
+//
+//   DEEP  (CrossDeep* — pooled 1 MiB guarded stack): Parse, GetArray (clone),
+//         ArrayGet (clone), Set (drop of the REPLACED value), Release (drop),
+//         ToStringPretty/valueText (serialize) — plus the cleanup goroutine's
+//         release, which runs on an arbitrary goroutine.
+//   SMALL (Cross*S — guard 1024): NewObject, NewArray, GetInt, GetString
+//         (string clone is a heap copy, not a tree walk), ArrayLen,
+//         PushString — all O(1), no recursion on the value tree.
+//
+// SOUNDNESS NOTE (found while classifying, fixed by this table): routing
+// Parse through the default 4096-guard fast path was UNSOUND for deep
+// inputs on shallow stacks — the guard proves 4096 B of headroom, but a
+// 128-deep parse can need an order of magnitude more. The stress test
+// (TestDeepNestingOnConstrainedStack) pins the fix.
+
 // Value is a Rust-owned JSON value handle. Zero id = released/moved.
 type Value struct{ h *handle }
 
@@ -24,9 +47,11 @@ func wrap(id uint64) Value {
 	h := &handle{id: id}
 	// Late release is safe (hyrt's release is idempotent + generation-
 	// checked); a MOVED value zeroes its id first, so this releases nothing.
+	// DEEP class: drop recurses on the value tree; cleanup goroutines run
+	// on arbitrary stacks.
 	runtime.AddCleanup(h, func(id uint64) {
 		if id != 0 {
-			hybridge.Cross1(FnRelease, uintptr(id))
+			hybridge.CrossDeep1(FnRelease, uintptr(id))
 		}
 	}, id)
 	return Value{h: h}
@@ -55,7 +80,8 @@ func Parse(data []byte) (Value, error) {
 		dptr = uintptr(unsafe.Pointer(&data[0]))
 	}
 	p.Pin(&id)
-	st := hybridge.Cross3(FnParse, dptr, uintptr(len(data)), uintptr(unsafe.Pointer(&id)))
+	// DEEP class: from_str recurses up to remaining_depth=128 (see ledger).
+	st := hybridge.CrossDeep3(FnParse, dptr, uintptr(len(data)), uintptr(unsafe.Pointer(&id)))
 	p.Unpin()
 	runtime.KeepAlive(&p)
 	runtime.KeepAlive(data)
@@ -68,13 +94,13 @@ func Parse(data []byte) (Value, error) {
 // NewObject / NewArray: fresh containers.
 func NewObject() Value {
 	var id uint64
-	hybridge.Cross1(FnNewObject, uintptr(unsafe.Pointer(&id)))
+	hybridge.Cross1S(FnNewObject, uintptr(unsafe.Pointer(&id))) // SMALL: table insert, O(1)
 	return wrap(id)
 }
 
 func NewArray() Value {
 	var id uint64
-	hybridge.Cross1(FnNewArray, uintptr(unsafe.Pointer(&id)))
+	hybridge.Cross1S(FnNewArray, uintptr(unsafe.Pointer(&id))) // SMALL: table insert, O(1)
 	return wrap(id)
 }
 
@@ -88,7 +114,8 @@ func (v Value) Array(key string) ([]Value, error) {
 	var arrID uint64
 	kptr, klen, pin, kb := pinCrossKey(key)
 	pin.Pin(&arrID)
-	st := hybridge.Cross4(FnGetArray, uintptr(v.h.id), kptr, klen, uintptr(unsafe.Pointer(&arrID)))
+	// DEEP class: as_array().clone() recurses on the array's contents.
+	st := hybridge.CrossDeep4(FnGetArray, uintptr(v.h.id), kptr, klen, uintptr(unsafe.Pointer(&arrID)))
 	pin.Unpin()
 	runtime.KeepAlive(pin)
 	runtime.KeepAlive(kb)
@@ -96,15 +123,17 @@ func (v Value) Array(key string) ([]Value, error) {
 		return nil, ErrJSON
 	}
 	var n uint64
-	hybridge.Cross2(FnArrayLen, uintptr(arrID), uintptr(unsafe.Pointer(&n)))
+	hybridge.Cross2S(FnArrayLen, uintptr(arrID), uintptr(unsafe.Pointer(&n))) // SMALL: len read
 	out := make([]Value, n)
 	for i := range out {
 		var eid uint64
-		hybridge.Cross3(FnArrayGet, uintptr(arrID), uintptr(i), uintptr(unsafe.Pointer(&eid)))
+		// DEEP class: elem.clone() recurses on the element's nesting.
+		hybridge.CrossDeep3(FnArrayGet, uintptr(arrID), uintptr(i), uintptr(unsafe.Pointer(&eid)))
 		out[i] = wrap(eid)
 	}
 	// The temporary array handle dies with the materialized slice.
-	hybridge.Cross1(FnRelease, uintptr(arrID))
+	// DEEP class: drop recurses on the cloned tree.
+	hybridge.CrossDeep1(FnRelease, uintptr(arrID))
 	return out, nil
 }
 
@@ -116,7 +145,7 @@ func (v Value) Int(key string) (int64, error) {
 	var n int64
 	kptr, klen, pin, kb := pinCrossKey(key)
 	pin.Pin(&n)
-	st := hybridge.Cross4(FnGetInt, uintptr(v.h.id), kptr, klen, uintptr(unsafe.Pointer(&n)))
+	st := hybridge.Cross4S(FnGetInt, uintptr(v.h.id), kptr, klen, uintptr(unsafe.Pointer(&n))) // SMALL: scalar read
 	pin.Unpin()
 	runtime.KeepAlive(pin)
 	runtime.KeepAlive(kb)
@@ -135,7 +164,8 @@ func (v Value) String(key string) (string, error) {
 	var sid uint64
 	kptr, klen, pin, kb := pinCrossKey(key)
 	pin.Pin(&sid)
-	st := hybridge.Cross4(FnGetString, uintptr(v.h.id), kptr, klen, uintptr(unsafe.Pointer(&sid)))
+	// SMALL: string clone is a heap copy, not a tree walk.
+	st := hybridge.Cross4S(FnGetString, uintptr(v.h.id), kptr, klen, uintptr(unsafe.Pointer(&sid)))
 	pin.Unpin()
 	runtime.KeepAlive(pin)
 	runtime.KeepAlive(kb)
@@ -143,7 +173,7 @@ func (v Value) String(key string) (string, error) {
 		return "", ErrJSON
 	}
 	s := valueText(sid)
-	hybridge.Cross1(FnRelease, uintptr(sid))
+	hybridge.CrossDeep1(FnRelease, uintptr(sid)) // DEEP: drop recurses on the tree
 	return s, nil
 }
 
@@ -153,7 +183,7 @@ func (v Value) PushString(s string) error {
 		return ErrJSON
 	}
 	sptr, slen, pin, sb := pinCrossKey(s)
-	st := hybridge.Cross3(FnPushString, uintptr(v.h.id), sptr, slen)
+	st := hybridge.Cross3S(FnPushString, uintptr(v.h.id), sptr, slen) // SMALL: Vec push + heap copy
 	pin.Unpin()
 	runtime.KeepAlive(pin)
 	runtime.KeepAlive(sb)
@@ -189,7 +219,9 @@ func (v Value) setHandle(key string, val Value) error {
 		return ErrJSON
 	}
 	kptr, klen, pin, kb := pinCrossKey(key)
-	st := hybridge.Cross4(FnSet, uintptr(v.h.id), kptr, klen, uintptr(val.h.id))
+	// DEEP class: insert DROPS the replaced value (if the key existed) and
+	// drop recurses on the value tree.
+	st := hybridge.CrossDeep4(FnSet, uintptr(v.h.id), kptr, klen, uintptr(val.h.id))
 	pin.Unpin()
 	runtime.KeepAlive(pin)
 	runtime.KeepAlive(kb)
@@ -207,12 +239,13 @@ func ToStringPretty(v Value) (string, error) {
 		return "", ErrJSON
 	}
 	var need uint64
-	st := hybridge.Cross4(FnToStringPretty, uintptr(v.h.id), 0, 0, uintptr(unsafe.Pointer(&need)))
+	// DEEP class: serialize walks the value tree (see ledger).
+	st := hybridge.CrossDeep4(FnToStringPretty, uintptr(v.h.id), 0, 0, uintptr(unsafe.Pointer(&need)))
 	if st == statusTryAgain && need > 0 {
 		buf := make([]byte, need)
 		var p runtime.Pinner
 		p.Pin(&buf[0])
-		st = hybridge.Cross4(FnToStringPretty, uintptr(v.h.id),
+		st = hybridge.CrossDeep4(FnToStringPretty, uintptr(v.h.id),
 			uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)), uintptr(unsafe.Pointer(&need)))
 		p.Unpin()
 		runtime.KeepAlive(&p)
@@ -234,14 +267,14 @@ func ToStringPretty(v Value) (string, error) {
 // compact form and strips the quotes it added — one documented copy).
 func valueText(id uint64) string {
 	var need uint64
-	st := hybridge.Cross4(FnToStringPretty, uintptr(id), 0, 0, uintptr(unsafe.Pointer(&need)))
+	st := hybridge.CrossDeep4(FnToStringPretty, uintptr(id), 0, 0, uintptr(unsafe.Pointer(&need))) // DEEP: serialize
 	if st != statusTryAgain || need < 2 {
 		return ""
 	}
 	buf := make([]byte, need)
 	var p runtime.Pinner
 	p.Pin(&buf[0])
-	hybridge.Cross4(FnToStringPretty, uintptr(id), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)), uintptr(unsafe.Pointer(&need)))
+	hybridge.CrossDeep4(FnToStringPretty, uintptr(id), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)), uintptr(unsafe.Pointer(&need)))
 	p.Unpin()
 	runtime.KeepAlive(&p)
 	runtime.KeepAlive(buf)

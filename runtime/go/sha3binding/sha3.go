@@ -16,7 +16,9 @@ var (
 )
 
 func init() {
-	if w := hybridge.Cross1(FnAbiWord, 0); w != abiWordExpected {
+	// SMALL class (guard 1024, row 4): the abi-word probe is a constant
+	// return — zero recursion, zero heap, a handful of bytes of frame.
+	if w := hybridge.Cross1S(FnAbiWord, 0); w != abiWordExpected {
 		panic(ErrABI.Error())
 	}
 }
@@ -38,7 +40,10 @@ func Digest256(data []byte) ([]byte, error) {
 		p.Pin(&data[0])
 	}
 	p.Pin(&out[0])
-	st := hybridge.Cross3(FnDigest256, dataPtr, uintptr(len(data)),
+	// SMALL class (guard 1024, row 4): Keccak-f[1600] absorb/squeeze is a
+	// fixed 200-byte state permutation in a loop — no recursion, no
+	// input-proportional stack (interfaces/descriptors.md sha3 rows).
+	st := hybridge.Cross3S(FnDigest256, dataPtr, uintptr(len(data)),
 		uintptr(unsafe.Pointer(&out[0])))
 	p.Unpin()
 	runtime.KeepAlive(&p)
@@ -52,9 +57,11 @@ func Digest256(data []byte) ([]byte, error) {
 
 // StreamChecksum runs `iters` SHA3-256 permutations INSIDE Rust (one
 // boundary crossing — the hot-loop shape example 10 demonstrates) and
-// returns the deterministic fold. No pointers cross; the deep-path retry
-// is entirely inside Cross2 (bounded-stack callee).
+// returns the deterministic fold. No pointers cross. SMALL class (guard
+// 1024, row 4): the callee's stack use is a CONSTANT (one permutation's
+// frame; the loop carries no growth) — bounded-stack callee, and now
+// eligible on SHALLOW stacks too.
 func StreamChecksum(iters, seed uint64) (uint64, error) {
-	v := hybridge.Cross2(FnStreamChecksum, uintptr(iters), uintptr(seed))
+	v := hybridge.Cross2S(FnStreamChecksum, uintptr(iters), uintptr(seed))
 	return v, nil
 }

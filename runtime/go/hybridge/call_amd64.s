@@ -123,6 +123,114 @@ needsdeep3:
         MOVQ    AX, ret+32(FP)
         RET
 
+// ------------------------------- small-guard fast path (row 4: per-callee budgets)
+// Identical discipline to callFastN above, but the guard is $1024 instead of
+// $4096: callees whose descriptor budget is <= 1 KiB (bounded, non-recursive,
+// measured/argued in interfaces/descriptors.md) take the fast path on
+// SHALLOWER stacks — the shallow-goroutine fan-in shape pays the deep-path
+// cost (~19-42 ns) no more. Everything else is byte-for-byte the same rules
+// (load inputs first; RBX saves SP; 16-byte alignment; restore before results).
+// The default-class trampolines are UNCHANGED so gates/G2.md's measured
+// evidence stays valid.
+
+// func callFast1S(fn unsafe.Pointer, a1 uintptr) uint64
+TEXT ·callFast1S(SB), NOSPLIT, $0-24
+        MOVQ    fn+0(FP), AX
+        MOVQ    a1+8(FP), DI
+        get_tls(BX)
+        MOVQ    g(BX), BX
+        MOVQ    OFF_g_stackguard0(BX), DX
+        MOVQ    SP, R11
+        SUBQ    DX, R11
+        CMPQ    R11, $1024
+        JLT     needsdeep1s
+        MOVQ    SP, BX
+        SUBQ    $8, SP
+        ANDQ    $-16, SP
+        CALL    AX
+        MOVQ    BX, SP
+        MOVQ    AX, ret+16(FP)
+        RET
+needsdeep1s:
+        MOVQ    $-2, AX
+        MOVQ    AX, ret+16(FP)
+        RET
+
+// func callFast2S(fn unsafe.Pointer, a1, a2 uintptr) uint64
+TEXT ·callFast2S(SB), NOSPLIT, $0-32
+        MOVQ    fn+0(FP), AX
+        MOVQ    a1+8(FP), DI
+        MOVQ    a2+16(FP), SI
+        get_tls(BX)
+        MOVQ    g(BX), BX
+        MOVQ    OFF_g_stackguard0(BX), DX
+        MOVQ    SP, R11
+        SUBQ    DX, R11
+        CMPQ    R11, $1024
+        JLT     needsdeep2s
+        MOVQ    SP, BX
+        SUBQ    $8, SP
+        ANDQ    $-16, SP
+        CALL    AX
+        MOVQ    BX, SP
+        MOVQ    AX, ret+24(FP)
+        RET
+needsdeep2s:
+        MOVQ    $-2, AX
+        MOVQ    AX, ret+24(FP)
+        RET
+
+// func callFast3S(fn unsafe.Pointer, a1, a2, a3 uintptr) uint64
+TEXT ·callFast3S(SB), NOSPLIT, $0-40
+        MOVQ    fn+0(FP), AX
+        MOVQ    a1+8(FP), DI
+        MOVQ    a2+16(FP), SI
+        MOVQ    a3+24(FP), DX
+        get_tls(BX)
+        MOVQ    g(BX), BX
+        MOVQ    OFF_g_stackguard0(BX), R11
+        MOVQ    SP, R12
+        SUBQ    R11, R12
+        CMPQ    R12, $1024
+        JLT     needsdeep3s
+        MOVQ    SP, BX
+        SUBQ    $8, SP
+        ANDQ    $-16, SP
+        CALL    AX
+        MOVQ    BX, SP
+        MOVQ    AX, ret+32(FP)
+        RET
+needsdeep3s:
+        MOVQ    $-2, AX
+        MOVQ    AX, ret+32(FP)
+        RET
+
+// func callFast4S(fn unsafe.Pointer, a1, a2, a3, a4 uintptr) uint64
+TEXT ·callFast4S(SB), NOSPLIT, $0-48
+        MOVQ    fn+0(FP), AX
+        MOVQ    a1+8(FP), DI
+        MOVQ    a2+16(FP), SI
+        MOVQ    a3+24(FP), DX
+        MOVQ    a4+32(FP), CX
+        get_tls(BX)
+        MOVQ    g(BX), BX
+        MOVQ    OFF_g_stackguard0(BX), R11
+        MOVQ    SP, R12
+        SUBQ    R11, R12
+        CMPQ    R12, $1024
+        JLT     needsdeep4s
+        MOVQ    SP, BX
+        SUBQ    $8, SP
+        ANDQ    $-16, SP
+        CALL    AX
+        MOVQ    BX, SP
+        MOVQ    AX, ret+40(FP)
+        RET
+needsdeep4s:
+        MOVQ    $-2, AX
+        MOVQ    AX, ret+40(FP)
+        RET
+
 // ------------------------------- deep path (pooled guarded mmap stack)
 
 // func callDeep1(fn unsafe.Pointer, a1 uintptr, stack uintptr) uint64
