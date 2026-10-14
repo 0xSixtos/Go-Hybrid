@@ -175,15 +175,31 @@ impl HyStr {
         let bytes = unsafe { std::slice::from_raw_parts(self.ptr, self.len) };
         std::str::from_utf8(bytes).map_err(|_| ERR_JSON)
     }
+
+    /// Win64 ABI discipline (PLAN row 17, found by the fleet windows leg):
+    /// a 16-byte `repr(C)` struct passed BY VALUE lands in two registers
+    /// under SysV (ptr+len — which the flat C shims matched by luck) but is
+    /// passed BY REFERENCE on Windows — garbage downstream. Every export
+    /// therefore takes strings as TWO u64s (ptr, len); the struct stays
+    /// internal. Two integer u64s register-pass identically on both ABIs.
+    ///
+    /// SAFETY: (ptr, len) must be a valid byte range for 'static (the
+    /// pinned-borrow protocol pins the Go side across the crossing).
+    unsafe fn from_raw(ptr: u64, len: u64) -> Self {
+        HyStr {
+            ptr: ptr as *const u8,
+            len: len as usize,
+        }
+    }
 }
 
 /// `serde_json.parse(text)` → handle. (example 05: `serde_json.parse(raw)?`)
 #[no_mangle]
-pub extern "C" fn hy_json_parse(text: HyStr, out_handle: *mut u64) -> i32 {
+pub extern "C" fn hy_json_parse(ptr: u64, len: u64, out_handle: *mut u64) -> i32 {
     if out_handle.is_null() {
         return ERR_TABLE;
     }
-    let s = match text.as_str() {
+    let s = match unsafe { HyStr::from_raw(ptr, len) }.as_str() {
         Ok(s) => s,
         Err(e) => return e,
     };
@@ -232,11 +248,11 @@ pub extern "C" fn hy_json_new_array(out_handle: *mut u64) -> i32 {
 
 /// `v.array(key)` → handle of the array at `v[key]` (must BE an array).
 #[no_mangle]
-pub extern "C" fn hy_json_get_array(v: u64, key: HyStr, out_handle: *mut u64) -> i32 {
+pub extern "C" fn hy_json_get_array(v: u64, kptr: u64, klen: u64, out_handle: *mut u64) -> i32 {
     if out_handle.is_null() {
         return ERR_TABLE;
     }
-    let k = match key.as_str() {
+    let k = match unsafe { HyStr::from_raw(kptr, klen) }.as_str() {
         Ok(k) => k,
         Err(e) => return e,
     };
@@ -256,11 +272,11 @@ pub extern "C" fn hy_json_get_array(v: u64, key: HyStr, out_handle: *mut u64) ->
 
 /// `v.int(key)` → i64 at `v[key]`.
 #[no_mangle]
-pub extern "C" fn hy_json_get_int(v: u64, key: HyStr, out: *mut i64) -> i32 {
+pub extern "C" fn hy_json_get_int(v: u64, kptr: u64, klen: u64, out: *mut i64) -> i32 {
     if out.is_null() {
         return ERR_TABLE;
     }
-    let k = match key.as_str() {
+    let k = match unsafe { HyStr::from_raw(kptr, klen) }.as_str() {
         Ok(k) => k,
         Err(e) => return e,
     };
@@ -281,11 +297,11 @@ pub extern "C" fn hy_json_get_int(v: u64, key: HyStr, out: *mut i64) -> i32 {
 /// (The binding's `String(key)` returns a Go string — copied out via
 /// `hy_json_value_text`, one pinned-borrow crossing.)
 #[no_mangle]
-pub extern "C" fn hy_json_get_string(v: u64, key: HyStr, out_handle: *mut u64) -> i32 {
+pub extern "C" fn hy_json_get_string(v: u64, kptr: u64, klen: u64, out_handle: *mut u64) -> i32 {
     if out_handle.is_null() {
         return ERR_TABLE;
     }
-    let k = match key.as_str() {
+    let k = match unsafe { HyStr::from_raw(kptr, klen) }.as_str() {
         Ok(k) => k,
         Err(e) => return e,
     };
@@ -341,8 +357,8 @@ pub extern "C" fn hy_json_array_get(arr: u64, i: u64, out_handle: *mut u64) -> i
 
 /// `arr.push_string(s)`.
 #[no_mangle]
-pub extern "C" fn hy_json_array_push_string(arr: u64, s: HyStr) -> i32 {
-    let sv = match s.as_str() {
+pub extern "C" fn hy_json_array_push_string(arr: u64, sptr: u64, slen: u64) -> i32 {
+    let sv = match unsafe { HyStr::from_raw(sptr, slen) }.as_str() {
         Ok(s) => s.to_string(),
         Err(e) => return e,
     };
@@ -355,8 +371,8 @@ pub extern "C" fn hy_json_array_push_string(arr: u64, s: HyStr) -> i32 {
 
 /// `v.set(key, value_handle)` — moves the value handle's payload into `v`.
 #[no_mangle]
-pub extern "C" fn hy_json_set(v: u64, key: HyStr, value: u64) -> i32 {
-    let k = match key.as_str() {
+pub extern "C" fn hy_json_set(v: u64, kptr: u64, klen: u64, value: u64) -> i32 {
+    let k = match unsafe { HyStr::from_raw(kptr, klen) }.as_str() {
         Ok(k) => k.to_string(),
         Err(e) => return e,
     };
