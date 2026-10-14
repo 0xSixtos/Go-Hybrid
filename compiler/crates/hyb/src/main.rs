@@ -461,11 +461,19 @@ fn generate_one(
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().map(|x| x == "go").unwrap_or(false))
+        // Generated .hy.go files join the production package. Go test files
+        // may declare a separate <package>_test package and cannot choose it.
+        .filter(|p| {
+            !p.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .ends_with("_test.go")
+        })
         .collect::<Vec<_>>();
     siblings.sort();
     if siblings.is_empty() {
         return Err(format!(
-            "{}: no .go files beside it — the emitted file must join a Go package (HYB-E9002); add any .go file with a `package <name>` clause first",
+            "{}: no non-test .go files beside it — the emitted file must join a Go package (HYB-E9002); add a non-test .go file with a `package <name>` clause first",
             hy.display()
         ));
     }
