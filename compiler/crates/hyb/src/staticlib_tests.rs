@@ -50,7 +50,7 @@ fn member(name: &str, data: &[u8]) -> Vec<u8> {
     .into_bytes();
     assert_eq!(out.len(), 60);
     out.extend_from_slice(data);
-    if data.len() % 2 != 0 {
+    if !data.len().is_multiple_of(2) {
         out.push(b'\n');
     }
     out

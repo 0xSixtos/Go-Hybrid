@@ -170,6 +170,12 @@ jobs:
           # pool, and go vet checks the whole runtime module.
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./hybridge/
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./hybridge/
+          # Darwin must also assemble on every PR; native Rust crossings and
+          # guard-page checks run on macOS in the release matrix.
+          for arch in arm64 amd64; do
+            GOOS=darwin GOARCH="$arch" CGO_ENABLED=0 go build ./hybridge/
+            GOOS=darwin GOARCH="$arch" CGO_ENABLED=0 go vet ./hybridge/
+          done
           # row 18: the workload triplet's shapes are emitted by shape.py —
           # drift between the generator and the committed programs fails CI.
           # Absolute path: this step `cd /tmp/goci` above, so a repo-relative
