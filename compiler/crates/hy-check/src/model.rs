@@ -285,15 +285,53 @@ pub(crate) fn as_addr_of(e: &Expr) -> Option<&Expr> {
     }
 }
 
-/// The direct operand of a `move x` when it is a plain binding.
+/// Strip enclosing parentheses from an expression.
+pub(crate) fn unwrap_parens(mut e: &Expr) -> &Expr {
+    while let Expr::Paren { inner, .. } = e {
+        e = inner;
+    }
+    e
+}
+
+/// The direct operand of a `move x` (or `move (x)`) when it is a plain binding.
 pub(crate) fn move_operand_ident(e: &Expr) -> Option<String> {
-    match e {
-        Expr::Move { operand, .. } => match &**operand {
+    match unwrap_parens(e) {
+        Expr::Move { operand, .. } => match unwrap_parens(operand) {
             Expr::Ident { name, .. } => Some(name.clone()),
-            // `move s.conn` (own-handle field moves, O5.4) are not tracked in
-            // Tier 0's binding-level analysis — the corpus never needs them.
+            // `move s.conn` (own-handle field moves, O5.4) are handled by
+            // `collect_move_operands` + the O5.4 move-form check (HYB-E3004).
             _ => None,
         },
         _ => None,
     }
 }
+
+/// Collect every `move <operand>` inside `e` (top-level or nested inside
+/// composite literals / parens) so nested moves freeze their binding and
+/// non-binding GC field moves trigger HYB-E3004 (O5.1 / O5.4).
+pub(crate) fn collect_move_operands<'e>(e: &'e Expr, out: &mut Vec<(&'e Expr, Span)>) {
+    match e {
+        Expr::Move { operand, span } => {
+            out.push((unwrap_parens(operand), *span));
+        }
+        Expr::Paren { inner, .. } => collect_move_operands(inner, out),
+        Expr::StructLit { fields, .. } => {
+            for f in fields {
+                collect_move_operands(&f.value, out);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                collect_move_operands(k, out);
+                collect_move_operands(v, out);
+            }
+        }
+        Expr::SliceLit { items, .. } => {
+            for item in items {
+                collect_move_operands(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+

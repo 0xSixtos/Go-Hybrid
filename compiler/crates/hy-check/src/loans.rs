@@ -317,13 +317,14 @@ impl<'a> Checker<'a> {
                     (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
                     (_, inferred) => (inferred, self.ty_of_expr(st, value)),
                 };
-                // `x := move y` — y is moved; x takes ownership (no alias)
+                // `x := move y` — y is moved; x takes ownership (no alias);
+                // non-ident moves (`x := move s.data`) trigger HYB-E3004 (O5.4).
+                self.mark_move_in_value(
+                    st,
+                    value,
+                    format!("the move-define `{}`", value.render()),
+                );
                 if move_operand_ident(value).is_some() {
-                    self.mark_move_in_value(
-                        st,
-                        value,
-                        format!("the move-define `{}`", value.render()),
-                    );
                     self.define_binding(st, name, shape, ty, immutable, managed);
                     continue;
                 }
@@ -414,6 +415,10 @@ impl<'a> Checker<'a> {
         _span: Span,
         idx: usize,
     ) {
+        for v in values {
+            self.mark_move_in_value(st, v, format!("the move-assign `{}`", v.render()));
+        }
+
         // A3: an index-assign on a loaned base path is a potential INSERT
         for t in targets {
             if matches!(t.kind, PlaceKind::Index { .. }) {
@@ -494,7 +499,7 @@ impl<'a> Checker<'a> {
                     Diagnostic::error("HYB-E3104", self.path.clone(), v.span(), msg)
                         .with_notes(notes),
                 );
-            } else if move_operand_ident(v).is_some() {
+            } else {
                 self.mark_move_in_value(st, v, format!("the move-return `{}`", v.render()));
             }
         }
