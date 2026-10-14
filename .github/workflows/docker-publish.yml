@@ -62,9 +62,10 @@ jobs:
         env:
           IMG: ${{ env.IMG }}
         run: |
-          docker tag "$IMG" "$IMG:latest"
+          REPO="${IMG%:*}"   # IMG already carries the version tag
           docker push "$IMG"
-          docker push "$IMG:latest"
+          docker tag "$IMG" "$REPO:latest"
+          docker push "$REPO:latest"
       - name: Published tags
         env:
           IMG: ${{ env.IMG }}
