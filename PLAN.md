@@ -209,3 +209,6 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 - (Batch J added none: hy_nop is hyrt-internal; overheadbench/hybridge diagnostics are repo packages)
 - kaggle CLI 2.2.4 (pypi, /home/z/.venv) — worker tier protocol — Apache-2.0 (kaggle-api)
 - (no cargo crates in the project yet; spike crates rustrt/rustbench are dependency-free stdlib-only)
+
+## Contributor validation plan (2026-10-14)
+- `hyb generate` package inference: reproduce on `8aaa231` with `app.go` (`package demo`), `app_test.go` (`package demo_test`), and `calc.hy`. Expect generation and freshness checks to succeed, then ordinary `go test` to run the generated function. Negative controls: test-only siblings must not choose a production package; conflicting non-test packages must still reject without emitting. Run the regression tests against the original source before patching, then the compiler workspace, corpus, and differential loop with pinned Rust 1.99.0 / Go 1.26.9.
