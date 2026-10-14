@@ -389,3 +389,20 @@ Stage Summary:
 - The bounty program is LIVE end to end: policy doc, label, three issues, announcement, release-notes section, radar-friendly shape
 - The last documented follow-up in the plan is CLOSED; no open plan rows remain, standing work is community replies + bounty triage only
 - One real user-facing bug found and fixed by the sweep (bare-filename generate), which is the process working: cosmetic work still ran the full suites
+
+---
+Task ID: 25 (Batch U/V close-out: fleets republished, first bounty PR triaged)
+Agent: Super Z (main)
+Task: Republish the release assets and Docker image from af86f26; triage the first bounty contribution; confirm no plan rows remain.
+
+Work Log:
+- CI green on af86f26 (push event); dispatched release-matrix (publish=true, v0.1.0) + docker-publish (v0.1.0) with required inputs after a 422 taught the input schema (sha+version[+publish])
+- BOTH fleets SUCCESS from af86f26: all four tarballs + sha256 republished (11:23Z), GHCR :v0.1.0 + :latest refreshed
+- First bounty PR arrived (tim777z, #8, closes #6): fetched the branch, ran the checker locally — the program does not parse (task-as-declaration + *y deref are not in the grammar; E0002 x2), so the harness would compare expected LOAN-ESCAPE vs actual E0002; the expressible loan-escape is already corpus 06; the SPEC's D2 marks closure-at-spawn as the open design point the PR was aiming at
+- Approved both of the contributor's CI runs (action_required gate for first-time authors), posted the full triage on the PR (kind, exact, two paths forward: D2 design input on Discussions, or an expressible corpus edge) + a triage note on issue #6 (stays open); follow-up posted after their second commit deleted the file but left the dangling VERDICTS row
+- Discussions swept: no new human replies yet (#1 at 3 comments incl. the bounty announcement)
+
+Stage Summary:
+- Release assets and Docker image now carry the Batch V fixes; the user-facing generate bug is out of the shipped artifacts
+- The bounty program processed its first submission end to end within the hour: verify locally, approve CI, kind precise triage, paths forward — the process in BOUNTY.md working as written
+- No open plan rows; standing work is community replies + bounty triage only
