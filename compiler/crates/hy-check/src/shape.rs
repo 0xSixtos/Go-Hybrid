@@ -183,7 +183,29 @@ impl<'a> Checker<'a> {
                     .first()
                     .map(|a| self.shape_of_expr(st, &a.value))
                     .unwrap_or(TypeShape::Unknown),
-                "len" | "cap" | "min" | "max" | "new" => TypeShape::Primitive,
+                "len" | "cap" | "min" | "max" => TypeShape::Primitive,
+                // `new(T)` is Go's `new`: it returns `*T` — a POINTER to
+                // zeroed, mutable storage — never a primitive copy. Typing
+                // it Primitive made it sendable-by-type (class 1), so
+                // `p := new(S); task w(p)` shared a `*S` across tasks with no
+                // diagnostic and raced (O4 class table: `*T` is a named
+                // mutable GC value, not sendable; O4.9: unresolved/unknown
+                // shapes fail closed). Type it as a pointer so it is
+                // classified as shared mutable state and rejected at every
+                // check-site. The pointee is inferred when the type argument
+                // resolves; otherwise Unknown — still a non-sendable pointer.
+                "new" => {
+                    let pointee = match args.first().map(|a| &a.value) {
+                        // `new(pool_stats)` — the argument is a type name,
+                        // not a value; name a declared struct precisely.
+                        Some(Expr::Ident { name, .. }) if self.structs.contains_key(name) => {
+                            TypeShape::Struct(Some(name.clone()))
+                        }
+                        Some(other) => self.shape_of_expr(st, other),
+                        None => TypeShape::Unknown,
+                    };
+                    TypeShape::Pointer(Box::new(pointee))
+                }
                 _ => self
                     .fns
                     .get(name.as_str())
