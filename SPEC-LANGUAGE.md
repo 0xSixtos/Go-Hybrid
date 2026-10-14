@@ -1224,6 +1224,11 @@ fmt.println("total={total}")            // expect: total=204
 (LX14; `break loop` shown above). Send clauses (`ch <- v:`) are
 sendability check-sites exactly like statement sends (C5).
 
+`default` is contextual at a select arm head (`default:`), including after
+an unbraced preceding arm. It is not an additional LX3 reserved word:
+ordinary identifier uses, such as a channel named `default`, remain legal.
+Corpus 24 pins the nonblocking fallback; parser tests pin this distinction.
+
 ### 8.4 Sendability check-sites — the complete list
 
 **C5 — Exactly two Hybrid-level check-sites gate cross-task sharing of
