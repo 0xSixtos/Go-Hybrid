@@ -1419,7 +1419,7 @@ mod tests {
     // -----------------------------------------------------------------------
     // `new(T)` returns `*T`, not a primitive (O4 / O4.9). Regression for the
     // accepted-but-unsound shape `p := new(S); task w(p)`, which shared a
-    // `*S` across tasks with zero diagnostics and raced under `go -race`.
+    // `*S` across tasks with zero diagnostics and races under `go -race`.
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1465,6 +1465,50 @@ mod tests {
         );
         assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn fc_atomic_pointer_and_value_reject_e3005_row_11() {
+        let r_ptr = check(
+            "import \"sync/atomic\"\n\
+             struct holder { data map[string]int }\n\
+             fn worker(p *atomic.pointer[holder], done chan<- bool) {\n\
+               h := p.load()\n\
+               for i in 0..10 { h.data[\"k\"] = i }\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               var p atomic.pointer[holder]\n\
+               shared := holder{data: map[string]int{\"k\": 0}}\n\
+               p.store(&shared)\n\
+               done := make(chan bool, 1)\n\
+               task worker(&p, done)\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_ptr.verdict, Verdict::Reject, "{:?}", r_ptr.diagnostics);
+        assert_eq!(first_error_rule(&r_ptr).as_deref(), Some("FC"));
+        let d = r_ptr
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "HYB-E3005")
+            .expect("atomic.pointer[T] must fail closed with HYB-E3005");
+        assert!(
+            d.notes.iter().any(|n| n.contains("GUARANTEES.md row 11")),
+            "notes must cite GUARANTEES.md row 11: {:?}",
+            d.notes
+        );
+
+        let r_val = check(
+            "import \"sync/atomic\"\n\
+             fn worker(v *atomic.value) { }\n\
+             fn main() {\n\
+               var v atomic.value\n\
+               task worker(&v)\n\
+             }",
+        );
+        assert_eq!(r_val.verdict, Verdict::Reject, "{:?}", r_val.diagnostics);
+        assert!(r_val.diagnostics.iter().any(|d| d.code == "HYB-E3005"));
     }
 }
 
