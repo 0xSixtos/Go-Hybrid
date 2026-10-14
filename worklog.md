@@ -354,3 +354,19 @@ Work Log:
 Stage Summary:
 - Row 4 = shipped: shallow-goroutine fan-in for tiny callees takes the ~3-5 ns fast path instead of the 19-42 ns deep path, with the guard-soundness argument now written down per fn
 - The batch's headline is the PROCESS: writing the class ledger forced the serde_json recursion analysis that caught the latent overflow — the claims-table discipline (Discussion #1 ask 1) working as designed inside the repo too
+
+---
+Task ID: 23 (Batch P close-out — the release matrix landed)
+Agent: Super Z (main)
+Task: Fleet debugging to green + publish all four platform assets.
+
+Work Log:
+- Runs 2-6 debugging trail, each fix real and committed: (2) BSD paste / aarch64 sysroot / windows-gnu / bench-verdict-tolerance; (3) arm64 leg exposed the DEEPER fact — the bridge asm is amd64-ONLY (call_amd64.s excludes itself on GOARCH=arm64) → row 16 opened; arm64 smoke redefined honestly (bridge-free program, hyb under qemu -L); (4) qemu-user-static ships *-static names; (5) HYB-E9001's found-but-silent rustc under qemu (empty stdout) → the pin now treats empty output as ABSENT (the pin governs rustc WHEN USED; bridge-free builds legitimately have none); (6) ALL LEGS GREEN + publish SUCCESS
+- Release now carries: linux-amd64 + darwin-arm64 + windows-amd64 (FULL: checker+emitter+bridge, rustless-smoked) + linux-arm64 (checker+emitter, honest per-asset cut note) — each with sha256
+- Release notes rewritten: the platform table with per-asset status + the row-16 pointer
+- Discussion #2 (the platform poll) answered: all four shipped; remaining value = RC-tester volunteers; aarch64 port prioritized by tester demand
+- Local baseline through every change: cargo 210/0 · go 5 pkgs ok · examples 10/10 · corpus 20/20 · differential 9/9+11/11 · gofmt clean · packaging smoke rustless PASS
+
+Stage Summary:
+- Discussion #1's install-friction ask is now FULLY answered: one command, no Rust, four platforms, sha256-verified, honest about the arm64 bridge cut
+- The release-matrix workflow is the reusable release recipe (row 6's bench rides every dispatch)
