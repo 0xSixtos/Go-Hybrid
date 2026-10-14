@@ -59,6 +59,43 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// May a value of this shape share mutable GC storage with a shallow Go
+    /// copy of it? True for reference types (map/slice/pointer), and — the
+    /// #27 gap — transitively true for a struct or array that CARRIES a
+    /// reference-typed field/element: Go copies such a value by value, but
+    /// the reference interior is shared. Used by the freeze rule's alias
+    /// tracking so `h2 := h1; task f(move h1)` freezes `h2` too.
+    ///
+    /// `Unknown` is deliberately NOT may-share: an unresolvable shape makes
+    /// no aliasing claim (the boundary rules still fail closed on it). The
+    /// depth guard is conservative (deep/recursive struct types claim
+    /// sharing) and cannot loop on Go's acyclic value types.
+    pub(crate) fn shape_may_share(&self, shape: &TypeShape) -> bool {
+        self.shape_may_share_at(shape, 0)
+    }
+
+    fn shape_may_share_at(&self, shape: &TypeShape, depth: usize) -> bool {
+        if depth > 16 {
+            return true;
+        }
+        if shape.is_reference_alias() {
+            return true;
+        }
+        match shape {
+            TypeShape::Array(elem) => self.shape_may_share_at(elem, depth + 1),
+            TypeShape::Struct(Some(name)) => self
+                .structs
+                .get(name)
+                .map(|fields| {
+                    fields.iter().any(|(_, ty)| {
+                        self.shape_may_share_at(&self.shape_of_type(ty), depth + 1)
+                    })
+                })
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
     /// Does this struct decl guard something with a `sync.*` lock? (Used for
     /// the contested-04 note: "Tier 0 does not credit locks at spawn sites".)
     pub(crate) fn struct_has_mutex_field(&self, sname: &str) -> bool {

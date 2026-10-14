@@ -381,9 +381,108 @@ impl<'a> Checker<'a> {
                 if is_view {
                     self.extend_call_loans_to_view(st, value, name, idx);
                 }
-                // alias recording: `m2 := agg` — and `alias := same(m)` (#38)
+                // may-share recording (#27): a shallow struct/array copy, a
+                // re-slice, a field/index projection, or a composite literal
+                // that embeds a live reference binding leaves `name` sharing
+                // mutable GC storage with its source — so a later `move` of
+                // either must freeze the other (O5.2).
+                self.record_may_share(st, name, value);
+                // alias recording: `m2 := agg` (single-parent link, the
+                // friendlier "frozen alias" diagnostic) — and call results
+                // that hand back argument storage (#38).
                 self.record_alias(st, name, value);
             }
+        }
+    }
+
+
+    /// Does the local binding `name` denote a value that a shallow Go copy
+    /// would share mutable GC storage with? Locals/params only (`const`
+    /// values are file-level immutables, not freeze participants).
+    fn binding_may_share(&self, st: &FnState, name: &str) -> bool {
+        st.env_lookup(name)
+            .map(|b| self.shape_may_share(&b.shape))
+            .unwrap_or(false)
+    }
+
+    /// Record may-share edges for a define/rebind `name <op> value` (#27).
+    /// Covers the four reported bypass forms: `h2 := h1` (shallow struct/
+    /// array copy), `m2 := (agg)` / `s2 := s1[:]` (parenthesized / re-sliced
+    /// RHS), `m2 := h1.m` (field/index projection), and `h := holder{m: agg}`
+    /// (composite literal capturing a live binding).
+    fn record_may_share(&self, st: &mut FnState, name: &str, value: &Expr) {
+        match unwrap_parens(value) {
+            Expr::Ident { name: src, .. } => {
+                if self.binding_may_share(st, src) {
+                    st.share_edge(name, src);
+                }
+            }
+            // `s2 := s1[:]` — the result shares s1's backing array
+            Expr::Slice { base, .. } => {
+                if let Some(root) = unwrap_parens(base).root_ident() {
+                    if self.binding_may_share(st, root) {
+                        st.share_edge(name, root);
+                    }
+                }
+            }
+            // `m2 := h1.m` / `m2 := arr[i]` — projecting a reference-bearing
+            // value out leaves it aliasing the composite it was read from
+            Expr::Field { .. } | Expr::Index { .. } => {
+                if self.shape_may_share(&self.shape_of_expr(st, unwrap_parens(value))) {
+                    if let Some(root) = value.root_ident() {
+                        if self.binding_may_share(st, root) {
+                            st.share_edge(name, root);
+                        }
+                    }
+                }
+            }
+            // composite literals that embed live reference bindings
+            Expr::StructLit { fields, .. } => {
+                for f in fields {
+                    self.record_literal_ref(st, name, &f.value);
+                }
+            }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    self.record_literal_ref(st, name, k);
+                    self.record_literal_ref(st, name, v);
+                }
+            }
+            Expr::SliceLit { items, .. } => {
+                for it in items {
+                    self.record_literal_ref(st, name, it);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Recursively collect live reference bindings embedded in a composite
+    /// literal and link them (may-share) to the freshly bound `name`.
+    fn record_literal_ref(&self, st: &mut FnState, name: &str, e: &Expr) {
+        match unwrap_parens(e) {
+            Expr::Ident { name: src, .. } => {
+                if self.binding_may_share(st, src) {
+                    st.share_edge(name, src);
+                }
+            }
+            Expr::StructLit { fields, .. } => {
+                for f in fields {
+                    self.record_literal_ref(st, name, &f.value);
+                }
+            }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    self.record_literal_ref(st, name, k);
+                    self.record_literal_ref(st, name, v);
+                }
+            }
+            Expr::SliceLit { items, .. } => {
+                for it in items {
+                    self.record_literal_ref(st, name, it);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -485,6 +584,7 @@ impl<'a> Checker<'a> {
         managed: bool,
     ) {
         st.aliases.remove(name);
+        st.share_clear(name);
         st.env_define(
             name,
             Binding {
@@ -651,7 +751,11 @@ impl<'a> Checker<'a> {
                             b.moved = None; // a fresh value re-owns the binding
                             b.non_owned_origin = non_owned;
                         }
+                        // a rebind re-owns the binding: drop the old alias and
+                        // may-share edges, then re-record from the new value (#27)
                         st.aliases.remove(name);
+                        st.share_clear(name);
+                        self.record_may_share(st, name, v);
                         // rebind may create a fresh alias — ident copies AND
                         // call results that hand back argument storage (#38)
                         self.record_alias(st, name, v);
