@@ -8,7 +8,9 @@
 package sha3binding
 
 /*
-#cgo LDFLAGS: -L${SRCDIR}/../lib -lhyrt -lpthread -ldl -lm
+#cgo LDFLAGS: -L${SRCDIR}/../lib -lhyrt
+#cgo !windows LDFLAGS: -lpthread -ldl -lm
+#cgo windows LDFLAGS: -lwinpthread
 #include <stdint.h>
 
 extern uint64_t hy_sha3_digest256(uint64_t data, uint64_t len, uint64_t out);

@@ -99,6 +99,27 @@ jobs:
             echo "arm64 $p: PASS"
           done
           echo "arm64 go runtime suite PASS (5 packages)"
+      - name: Go runtime suite on windows (row 17 regression — the bridge smoke)
+        # The Win64 trampoline port's fleet regression: call_win64.s is
+        # assembled, linked against the GNU-flavored staticlib through mingw
+        # cgo, and the full 5-package Go suite (bridge crossings included)
+        # runs NATIVELY on the windows runner. Required leg — a red suite
+        # blocks the asset, exactly like the arm64 one.
+        if: matrix.pkg-os == 'windows'
+        shell: bash
+        run: |
+          set -e
+          rm -rf /tmp/goci-win && mkdir -p /tmp/goci-win/lib
+          printf 'module hybrid.program\n\ngo 1.26\n' > /tmp/goci-win/go.mod
+          cp -r runtime/go/* /tmp/goci-win/
+          cp runtime/rust/hyrt/target/x86_64-pc-windows-gnu/release/libhyrt.a /tmp/goci-win/lib/
+          cd /tmp/goci-win
+          export CGO_ENABLED=1
+          for p in hybridge jsonbinding regexbinding sha3binding overheadbench; do
+            go test -count=1 "./$p/"
+            echo "windows $p: PASS"
+          done
+          echo "windows go runtime suite PASS (5 packages) — the Win64 bridge crossing is fleet-proven"
       - uses: actions/upload-artifact@v4
         with:
           name: hybrid-${{ inputs.version }}-${{ matrix.pkg-os }}-${{ matrix.pkg-arch }}

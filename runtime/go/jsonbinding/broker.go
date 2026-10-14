@@ -13,7 +13,9 @@
 package jsonbinding
 
 /*
-#cgo LDFLAGS: -L${SRCDIR}/../lib -lhyrt -lpthread -ldl -lm
+#cgo LDFLAGS: -L${SRCDIR}/../lib -lhyrt
+#cgo !windows LDFLAGS: -lpthread -ldl -lm
+#cgo windows LDFLAGS: -lwinpthread
 #include <stdint.h>
 
 extern uint64_t hy_json_parse(uint64_t ptr, uint64_t len, uint64_t out_handle);

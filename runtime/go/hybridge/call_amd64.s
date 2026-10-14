@@ -1,4 +1,9 @@
+//go:build amd64 && !windows
+
 // Go ABI0 -> SysV amd64 trampolines for Spike 3.
+//
+// Windows/amd64 uses the Win64 convention instead — see call_win64.s
+// (PLAN row 17). SysV stays correct for linux, darwin, and the BSDs.
 //
 // DESIGN (fixes the shared-stack collision found by TestConcurrentCrossing —
 // Spike 1's single mmap stack is NOT safe when two goroutines cross at the
