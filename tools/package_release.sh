@@ -21,14 +21,19 @@ set -eu
 VER="${1:?usage: package_release.sh <version-tag, e.g. v0.1.0>}"
 VERNUM="${VER#v}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OS="$(uname -s | tr '[:upper:]' '[:lower:]')"   # linux / darwin
-ARCH="$(uname -m)"                              # x86_64 / aarch64 / arm64
+# Cross-compile overrides (fleet release-matrix): HYB_RUST_TARGET (e.g.
+# aarch64-unknown-linux-gnu) + HYB_CC (the cross linker) + HYB_PKG_OS/ARCH.
+RUST_TARGET="${HYB_RUST_TARGET:-}"
+CROSS_CC="${HYB_CC:-}"
+PKG_OS="${HYB_PKG_OS:-$(uname -s | tr '[:upper:]' '[:lower:]')}"
+ARCH="${HYB_PKG_ARCH:-$(uname -m)}"
 case "$ARCH" in
     x86_64) ARCH=amd64 ;;
     aarch64) ARCH=arm64 ;;
+    arm64) ARCH=arm64 ;;
 esac
 DIST="$REPO_ROOT/dist"
-NAME="hybrid-${VER}-${OS}-${ARCH}"
+NAME="hybrid-${VER}-${PKG_OS}-${ARCH}"
 DIR="$DIST/hybrid-${VER}"
 
 echo "==> packaging $NAME"
@@ -39,18 +44,33 @@ command -v go >/dev/null || { echo "go not on PATH" >&2; exit 1; }
 
 # --- 1. build the staticlib CRATE-LOCALLY (env.sh's shared CARGO_TARGET_DIR
 #        redirects manual builds — the stale-archive trap, worklog session 8).
-#        The lib must land at runtime/rust/hyrt/target/release/. ---
+#        The lib must land at runtime/rust/hyrt/target/release/.
+#        Cross mode: --target $RUST_TARGET puts it under target/<triple>/ —
+#        step 3 re-lays it into the packaged tree either way. ---
 echo "==> building hyrt staticlib (crate-local)"
-( cd "$REPO_ROOT/runtime/rust/hyrt" && CARGO_BUILD_JOBS=2 cargo build --release --quiet )
+( cd "$REPO_ROOT/runtime/rust/hyrt" && \
+  if [ -n "$RUST_TARGET" ]; then \
+      CARGO_BUILD_JOBS=2 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="$CROSS_CC" \
+          cargo build --release --target "$RUST_TARGET" --quiet; \
+  else \
+      CARGO_BUILD_JOBS=2 cargo build --release --quiet; fi )
 
-# --- 2. build the CLI ---
+# --- 2. build the CLI (same target as the staticlib — the hyb BINARY must
+#        run on the target arch) ---
 echo "==> building hyb (release)"
-( cd "$REPO_ROOT/compiler" && cargo build --release -p hyb --quiet )
+( cd "$REPO_ROOT/compiler" && \
+  if [ -n "$RUST_TARGET" ]; then \
+      CARGO_BUILD_JOBS=2 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="$CROSS_CC" \
+          cargo build --release -p hyb --target "$RUST_TARGET" --quiet; \
+  else \
+      cargo build --release -p hyb --quiet; fi )
+HYB_BIN="$REPO_ROOT/compiler/target/release/hyb"
+[ -n "$RUST_TARGET" ] && HYB_BIN="$REPO_ROOT/compiler/target/$RUST_TARGET/release/hyb"
 
 # --- 3. assemble the tree ---
 rm -rf "$DIR"
 mkdir -p "$DIR"
-cp "$REPO_ROOT/compiler/target/release/hyb" "$DIR/hyb"
+cp "$HYB_BIN" "$DIR/hyb"
 cp "$REPO_ROOT/tools/RELEASE-INSTALL.md" "$DIR/INSTALL.md"
 mkdir -p "$DIR/runtime"
 cp -R "$REPO_ROOT/runtime/go" "$DIR/runtime/go"
@@ -58,8 +78,13 @@ cp -R "$REPO_ROOT/runtime/rust" "$DIR/runtime/rust"
 # strip the crate's build dir except the prebuilt staticlib, then re-lay it
 find "$DIR/runtime/rust" -type d -name target -exec rm -rf {} + 2>/dev/null || true
 mkdir -p "$DIR/runtime/rust/hyrt/target/release"
-cp "$REPO_ROOT/runtime/rust/hyrt/target/release/libhyrt.a" \
-   "$DIR/runtime/rust/hyrt/target/release/libhyrt.a"
+if [ -n "$RUST_TARGET" ]; then
+    cp "$REPO_ROOT/runtime/rust/hyrt/target/$RUST_TARGET/release/libhyrt.a" \
+       "$DIR/runtime/rust/hyrt/target/release/libhyrt.a"
+else
+    cp "$REPO_ROOT/runtime/rust/hyrt/target/release/libhyrt.a" \
+       "$DIR/runtime/rust/hyrt/target/release/libhyrt.a"
+fi
 # THE mtime contract: the shipped lib must be >= every source in the crate,
 # or ensure_staticlib() rebuilds and a Rust-less install dies on first build.
 find "$DIR/runtime/rust/hyrt" -name 'target' -prune -o -print | while read -r f; do
@@ -83,13 +108,23 @@ echo "==> smoke test from the tarball (PATH without cargo)"
 SMOKE="$(mktemp -d)"
 ( cd "$SMOKE" && tar xzf "$DIST/$NAME.tar.gz" )
 RUSTLESS_PATH="$(echo "$PATH" | tr ':' '\n' | grep -v '.cargo/bin' | paste -sd:)"
-if ( cd "$SMOKE" && PATH="$RUSTLESS_PATH" "$SMOKE/hybrid-${VER}/hyb" build \
+RUNNER=""
+# cross linux/arm64: build via GOARCH + the cross CC, execute under qemu
+# (hyb itself sets CGO_ENABLED=1 for the bridge; mirrored here so `go build`
+# cross-mode keeps cgo on — go defaults it OFF for foreign GOARCH)
+CROSS_GO_ENV=""
+if [ "$PKG_OS/$ARCH" = "linux/arm64" ] && [ -n "$RUST_TARGET" ]; then
+    CROSS_GO_ENV="GOARCH=arm64 CGO_ENABLED=1 CC=$CROSS_CC"
+    command -v qemu-aarch64 >/dev/null 2>&1 && RUNNER="qemu-aarch64 "
+fi
+if ( cd "$SMOKE" && env PATH="$RUSTLESS_PATH" $CROSS_GO_ENV \
+        "$SMOKE/hybrid-${VER}/hyb" build \
         "$REPO_ROOT/examples/01-hello/program.hy" -o "$SMOKE/hello" ) \
-    && "$SMOKE/hello" > "$SMOKE/out.txt" 2>&1 \
+    && $RUNNER"$SMOKE/hello" > "$SMOKE/out.txt" 2>&1 \
     && grep -q 'hello, Hybrid!' "$SMOKE/out.txt"; then
-    echo "    smoke PASS (rustless): $(head -1 "$SMOKE/out.txt")"
+    echo "    smoke PASS ($PKG_OS/$ARCH${RUNNER:+ under $RUNNER}): $(head -1 "$SMOKE/out.txt")"
 else
-    echo "SMOKE FAILED (rustless path)" >&2
+    echo "SMOKE FAILED ($PKG_OS/$ARCH)" >&2
     cat "$SMOKE/out.txt" 2>/dev/null >&2
     exit 1
 fi
