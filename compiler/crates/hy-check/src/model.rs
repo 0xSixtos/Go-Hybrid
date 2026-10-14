@@ -203,6 +203,10 @@ pub(crate) struct FnState {
     pub loans: Vec<Loan>,
     /// name -> last statement index that references it (Pass A result).
     pub last_use: HashMap<String, usize>,
+    /// Declared result shapes of the function being checked (rule N1's
+    /// return-site nil checks). Empty for closure bodies (fn literals
+    /// carry no result types on the AST surface yet).
+    pub result_shapes: Vec<TypeShape>,
 }
 
 impl FnState {

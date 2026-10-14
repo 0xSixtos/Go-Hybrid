@@ -1469,7 +1469,14 @@ appears **in the same paragraph** as the claim — never in a footnote.
 Hybrid-level check-sites are `task` spawn arguments and channel sends (C5).
 At each site, every argument/sent value is classified by O4's sendable
 classes; failures are `HYB-E3001` (spawn) / `HYB-E3002` (send) with the fix-it
-menu of §9.6.
+menu of §9.6. **The spawn-callee proof:** a spawn is proven only when the
+callee resolves to a declared top-level `fn` — a static call where nothing
+but the arguments crosses. A closure callee (literal or closure-typed
+binding) shares its captured environment with the new task and is rejected
+(A5, `HYB-E3001`); a callee that does not resolve (an undeclared name, a
+method value, a computed callee) is fail-closed unproven (`HYB-E3005`, rule
+FC). The explicit hatch (`managed("…", "actor")`) remains the auditable
+route for a deliberate actor-loop closure.
 
 **O4.6 — Deep sendability of composites.** A struct/slice/map literal or
 value is sendable iff **every reference-typed element/field is itself

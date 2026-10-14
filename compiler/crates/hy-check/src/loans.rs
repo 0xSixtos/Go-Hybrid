@@ -309,6 +309,24 @@ impl<'a> Checker<'a> {
             }
         } else {
             for (name, value) in l.names.iter().zip(l.values.iter()) {
+                // N1: a bare `nil` initializer under a non-nilable
+                // ascription is a compile error (HYB-E4001) — the SPEC's own
+                // example is `var s []int = nil`.
+                if let Some(t) = &l.ty {
+                    if Checker::is_nil_literal(value) {
+                        let shape = self.shape_of_type(t);
+                        if !matches!(shape, TypeShape::Unknown)
+                            && !Checker::is_nilable_shape(&shape)
+                        {
+                            self.emit_nil_type_error_text(
+                                &shape,
+                                t.render(),
+                                value.span(),
+                                &format!("the declared type of `{}`", name),
+                            );
+                        }
+                    }
+                }
                 // Ascription fills the gaps (O4.9 escape: "make the type
                 // visible to the checker"): when the initializer's shape
                 // does not resolve, the declared type decides. When inference
@@ -458,6 +476,26 @@ impl<'a> Checker<'a> {
             }
         }
 
+        // N1: `x = nil` / `s.f = nil` / `m[k] = nil` against a known
+        // non-nilable target is a compile error (HYB-E4001). An unresolvable
+        // target stays silent here — no boundary is involved; N1 fires only
+        // where the type is known.
+        for (t, v) in targets.iter().zip(values.iter()) {
+            if Checker::is_nil_literal(v) {
+                if let Some(shape) = self.place_shape(st, t) {
+                    if !matches!(shape, TypeShape::Unknown)
+                        && !Checker::is_nilable_shape(&shape)
+                    {
+                        self.emit_nil_type_error(
+                            &shape,
+                            v.span(),
+                            &format!("the assignment target `{}`", t.render()),
+                        );
+                    }
+                }
+            }
+        }
+
         // whole-binding rebind: `rows = append(rows, ...)` re-owns the value
         if op == AssignOp::Assign && values.len() == 1 {
             let shape = self.shape_of_expr(st, &values[0]);
@@ -483,11 +521,42 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The shape of an assignment place, when it resolves (drives the N1
+    /// nil checks on assignment targets).
+    fn place_shape(&self, st: &FnState, p: &Place) -> Option<TypeShape> {
+        match &p.kind {
+            PlaceKind::Ident(name) => self.lookup_binding(st, name).map(|b| b.shape.clone()),
+            PlaceKind::Field { base, name } => {
+                let base_shape = self.place_shape(st, base)?;
+                Some(self.field_shape(&base_shape, name))
+            }
+            PlaceKind::Index { base, .. } => match self.place_shape(st, base)? {
+                TypeShape::Map(_, v) => Some(*v),
+                TypeShape::Slice(e) | TypeShape::Array(e) => Some(*e),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Returns (LOAN-ESCAPE + move marking)
     // -----------------------------------------------------------------------
 
     pub(crate) fn process_return(&mut self, st: &mut FnState, values: &[Expr]) {
+        // N1: `return nil` under a non-nilable declared result is a compile
+        // error (HYB-E4001). `error` results resolve to Unknown today, so
+        // `return 0, nil` stays legal (the nil's target did not resolve).
+        if values.len() == st.result_shapes.len() && !st.result_shapes.is_empty() {
+            for (v, shape) in values.iter().zip(st.result_shapes.iter()) {
+                if Checker::is_nil_literal(v)
+                    && !matches!(shape, TypeShape::Unknown)
+                    && !Checker::is_nilable_shape(shape)
+                {
+                    self.emit_nil_type_error(shape, v.span(), "a declared result of this function");
+                }
+            }
+        }
         for v in values {
             // O2/LOAN-ESCAPE: a borrow returned from a function
             if as_addr_of(v).is_some() || contains_addr_of_in_literal(v) {

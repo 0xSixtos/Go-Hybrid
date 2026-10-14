@@ -1,7 +1,10 @@
 //! sendability.rs — rule A1c (O4 classes) at spawn/send check-sites, plus
 //! the O6 `managed` suppression and lint (HYB-E8001), the O4.9 FAIL-CLOSED
 //! boundary (HYB-E3005, rule FC — human directive 2026-10-13), the O5.4
-//! move-form check (HYB-E3004), and the spawn-callee proof (HYB-E3005).
+//! move-form check (HYB-E3004), the spawn-callee proof (O4.0: the callee
+//! must resolve to a declared top-level `fn` — closure callees share their
+//! captures with the new task, unknown callees are fail-closed), and the
+//! N1 nil rule at boundaries and known-type sites (HYB-E4001).
 //!
 //! Outcome per value (task brief, VERDICTS.md sketches):
 //!   * OK classes: primitives; string/const/immutable; chan-typed values;
@@ -18,7 +21,21 @@
 
 use crate::model::{as_addr_of, unwrap_parens, Binding, Checker, FnState, MoveKind, TypeShape};
 use hy_diag::{Diagnostic, Span};
-use hy_syntax::Expr;
+use hy_syntax::{Expr, LitKind};
+
+/// The spawn-callee proof (O4.0): what the checker concluded about the
+/// expression a `task` statement spawns.
+pub(crate) enum CalleeVerdict {
+    /// A declared top-level `fn` — a static call; nothing but the arguments
+    /// crosses into the new task.
+    Proven,
+    /// A closure (a literal, or a closure-typed binding): spawning it
+    /// shares its captured environment with the new task (A5).
+    Closure(RejectInfo),
+    /// Everything else (an unresolvable name, a method value, a computed
+    /// callee) — fail-closed unproven (O4.9).
+    Unproven(String),
+}
 
 /// The classification of one value at a check-site.
 pub(crate) enum Outcome {
@@ -349,6 +366,142 @@ impl<'a> Checker<'a> {
     }
 
     // -----------------------------------------------------------------------
+    // The spawn-callee proof (O4.0) + the N1 nil rule (HYB-E4001)
+    // -----------------------------------------------------------------------
+
+    /// Is this expression the bare `nil` literal (possibly parenthesized)?
+    pub(crate) fn is_nil_literal(e: &Expr) -> bool {
+        matches!(
+            unwrap_parens(e),
+            Expr::Lit {
+                kind: LitKind::Nil,
+                ..
+            }
+        )
+    }
+
+    /// N1: which shapes have a `nil`? Only the foreign-Go perimeter (N2 —
+    /// `ForeignOpaque`; `error` itself resolves to Unknown today, so a nil
+    /// whose target is Unknown is UNPROVEN, never silently ok).
+    pub(crate) fn is_nilable_shape(t: &TypeShape) -> bool {
+        matches!(t, TypeShape::ForeignOpaque(_))
+    }
+
+    /// The spawn-callee proof (O4.0): a spawn is only proven when the callee
+    /// resolves to a declared top-level `fn` — a static call where nothing
+    /// but the arguments crosses. A closure callee shares its captured
+    /// environment with the new task (A5 reject); an unresolvable callee is
+    /// fail-closed unproven (O4.9). Local bindings shadow the fn table.
+    fn spawn_callee_verdict(&self, st: &FnState, callee: &Expr) -> CalleeVerdict {
+        let closure_reject = |value: String| {
+            CalleeVerdict::Closure(RejectInfo {
+                value,
+                ty: "closure".to_string(),
+                notes: vec![
+                    "the spawned callee is a closure: closures capture their environment, so spawning one shares every capture with the new task (A5) — spawn a declared top-level `fn` instead".to_string(),
+                    "if the closure is the design (an actor loop, a worker body), wrap the site in `managed(\"why this bypass is safe\", \"actor\") { ... }` — the explicit, auditable hatch (HYB-E8001, counted by --report-managed)".to_string(),
+                ],
+            })
+        };
+        match unwrap_parens(callee) {
+            Expr::FnLit { .. } => closure_reject(callee.render()),
+            Expr::Ident { name, .. } => {
+                if let Some(b) = self.lookup_binding(st, name) {
+                    if matches!(b.shape, TypeShape::Closure) {
+                        return closure_reject(name.clone());
+                    }
+                    return CalleeVerdict::Unproven(format!(
+                        "the spawn callee `{}` resolved to a local binding that is not a declared top-level `fn` — the spawn-callee proof (O4.0) only covers declared fns",
+                        name
+                    ));
+                }
+                if self.fns.contains_key(name) {
+                    return CalleeVerdict::Proven;
+                }
+                CalleeVerdict::Unproven(format!(
+                    "the spawn callee `{}` did not resolve to a declared top-level `fn` — the checker cannot prove what would run in the new task",
+                    name
+                ))
+            }
+            _ => CalleeVerdict::Unproven(format!(
+                "the checker can only prove spawns of declared top-level `fn`s — `{}` is a method value or a computed callee, which the spawn-callee proof (O4.0) cannot verify",
+                callee.render()
+            )),
+        }
+    }
+
+    /// The spawn callee's parameter shapes when the callee resolves to a
+    /// declared top-level fn with matching arity (drives the N1 nil checks
+    /// on spawn arguments). None when the callee does not resolve statically.
+    pub(crate) fn spawn_param_shapes(
+        &self,
+        st: &FnState,
+        callee: &Expr,
+        argc: usize,
+    ) -> Option<Vec<TypeShape>> {
+        let name = match unwrap_parens(callee) {
+            Expr::Ident { name, .. } => name,
+            _ => return None,
+        };
+        if self.lookup_binding(st, name).is_some() {
+            return None; // shadowed by a local binding — not a static fn call
+        }
+        let f = self.fns.get(name)?;
+        if f.params.len() != argc {
+            return None;
+        }
+        Some(f.params.iter().map(|p| self.shape_of_type(&p.ty)).collect())
+    }
+
+    /// The element shape of a channel expression, when it resolves (drives
+    /// the N1 nil checks on sent values).
+    pub(crate) fn chan_elem_shape(&self, st: &FnState, chan: &Expr) -> Option<Vec<TypeShape>> {
+        match self.shape_of_expr(st, chan) {
+            TypeShape::Chan(e) => Some(vec![*e]),
+            _ => None,
+        }
+    }
+
+    /// Emit HYB-E4001: `nil` flowing into a known non-nilable type (rule N1).
+    /// `what` names the target in the message ("the assignment target `m`",
+    /// "a parameter of the spawn callee", ...). A TYPE contract, not a
+    /// sendability doubt — `managed` does not suppress it.
+    pub(crate) fn emit_nil_type_error(&mut self, target: &TypeShape, span: Span, what: &str) {
+        self.emit_nil_type_error_text(target, target.render(), span, what);
+    }
+
+    /// The same emission with a concrete type text (the declared ascription
+    /// renders `[]int`, which is friendlier than the inferred `[]primitive`).
+    pub(crate) fn emit_nil_type_error_text(
+        &mut self,
+        target: &TypeShape,
+        ty: String,
+        span: Span,
+        what: &str,
+    ) {
+        let msg = format!(
+            "`nil` is not a valid value for {} ({}): {} has no nil (N1)",
+            what, ty, ty
+        );
+        let mut notes = vec![
+            "why: nil exists only for `error` and foreign Go values (N1/N2); every Hybrid-declared type has a zero value instead (N3)".to_string(),
+        ];
+        notes.push(match target {
+            TypeShape::Map(_, _) => "fix: use an empty map literal — a zero map reads as empty and auto-allocates on first write (N5)".to_string(),
+            TypeShape::Slice(_) | TypeShape::Array(_) => "fix: use an empty slice literal (`[]T{}`) — observationally identical to Go's nil slice (N4)".to_string(),
+            TypeShape::Str => "fix: use the empty string `\"\"`".to_string(),
+            TypeShape::Primitive => "fix: use the type's zero value (`0`, `0.0`, `false`)".to_string(),
+            TypeShape::Struct(_) => "fix: use the field-wise zero literal (`Type{}`)".to_string(),
+            TypeShape::Chan(_) => "fix: declare the binding without an initializer — the zero channel is the zero value (N3)".to_string(),
+            TypeShape::Pointer(_) | TypeShape::Closure => "fix: restructure so the value is always valid, or carry absence with `option[T]`".to_string(),
+            _ => "fix: use the type's zero value (N3)".to_string(),
+        });
+        notes.push("if absence is the meaning, use `option[T]` — its zero value is `none` (N3)".to_string());
+        self.diags
+            .push(Diagnostic::error("HYB-E4001", self.path.clone(), span, msg).with_notes(notes));
+    }
+
+    // -----------------------------------------------------------------------
     // Check-site processing (A1c / O6 suppression + lint)
     // -----------------------------------------------------------------------
 
@@ -359,7 +512,11 @@ impl<'a> Checker<'a> {
     /// `code` is "HYB-E3001" (spawn) or "HYB-E3002" (send); `site_desc` is a
     /// self-describing phrase used in move notes ("the move-send
     /// `results <- move agg`"). `implicit_move` covers parsers that flag
-    /// `Send{is_move: true}` with a plain Ident value.
+    /// `Send{is_move: true}` with a plain Ident value. `spawn_callee` is the
+    /// callee expression at spawn sites (the O4.0 spawn-callee proof);
+    /// `target_shapes` are the per-value expected types when they resolve
+    /// (the callee's parameter shapes, or the channel's element shape) and
+    /// drive the N1 nil checks (HYB-E4001).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn check_site(
         &mut self,
@@ -370,6 +527,8 @@ impl<'a> Checker<'a> {
         managed: bool,
         site_desc: &str,
         implicit_move: bool,
+        spawn_callee: Option<&Expr>,
+        target_shapes: Option<&[TypeShape]>,
     ) {
         self.total_sites += 1;
 
@@ -377,8 +536,45 @@ impl<'a> Checker<'a> {
         let mut unprovens: Vec<UnprovenInfo> = Vec::new();
         let mut managed_descs: Vec<String> = Vec::new();
         let mut moves: Vec<(String, Span)> = Vec::new();
+        // N1 nil type errors (HYB-E4001) — emitted even inside `managed`:
+        // the hatch covers sendability doubts, not the null-safety contract.
+        let mut nil_rejects: Vec<(TypeShape, Span)> = Vec::new();
 
-        for v in values {
+        // The spawn-callee proof (O4.0): classify WHAT would run in the new
+        // task before looking at the arguments.
+        if let Some(callee) = spawn_callee {
+            match self.spawn_callee_verdict(st, callee) {
+                CalleeVerdict::Proven => {}
+                CalleeVerdict::Closure(info) => rejects.push(info),
+                CalleeVerdict::Unproven(reason) => {
+                    unprovens.push(UnprovenInfo {
+                        value: callee.render(),
+                        reason,
+                    });
+                }
+            }
+        }
+
+        for (vi, v) in values.iter().enumerate() {
+            // N1 (rule N): a bare `nil` is not a classifiable sendability
+            // value — it either lands on a type that HAS a nil (error,
+            // foreign; N2) or it is a type error (HYB-E4001). With no
+            // resolvable target the fail-closed rule applies (O4.9).
+            if Self::is_nil_literal(v) {
+                match target_shapes.and_then(|ts| ts.get(vi)) {
+                    Some(t) if Self::is_nilable_shape(t) => {}
+                    Some(TypeShape::Unknown) => unprovens.push(UnprovenInfo {
+                        value: "nil".to_string(),
+                        reason: "the target type of this nil did not resolve, so the checker cannot prove the nil belongs here (N1: nil exists only for `error` and foreign values)".to_string(),
+                    }),
+                    Some(t) => nil_rejects.push((t.clone(), v.span())),
+                    None => unprovens.push(UnprovenInfo {
+                        value: "nil".to_string(),
+                        reason: "the target type of this nil did not resolve (the channel's element type or the spawn callee's parameter), so the checker cannot prove the nil belongs here (N1)".to_string(),
+                    }),
+                }
+                continue;
+            }
             // class-3 owned moves first: `move x` (Expr form, top-level or
             // nested inside a composite literal / parens) and the parser's
             // flagged-Ident form (`Send{is_move: true, value: x}`).
@@ -510,6 +706,18 @@ impl<'a> Checker<'a> {
             self.diags.push(
                 Diagnostic::warning("HYB-E8001", self.path.clone(), span, msg).with_notes(notes),
             );
+        }
+
+        // N1 (rule N): nil-into-non-nilable is a TYPE error — it fires even
+        // inside a `managed` block (the hatch covers sendability doubts, not
+        // the null-safety contract).
+        let nil_what = if code == "HYB-E3001" {
+            "a parameter of the spawn callee"
+        } else {
+            "the channel's element type"
+        };
+        for (t, nspan) in nil_rejects {
+            self.emit_nil_type_error(&t, nspan, nil_what);
         }
 
         // O5.1: mark moved bindings (+ freeze live aliases)

@@ -1959,13 +1959,20 @@ impl Parser {
         self.expect_punct("(")?;
         let params = self.parse_params()?;
         self.expect_punct(")")?;
+        // SPEC EBNF: `FuncLit = "fn" [Signature] Block` — the result list is
+        // part of the surface (`fn() int {…}`, `fn(a, b int) (int, error)`).
+        let results = if self.at_punct("{") {
+            Vec::new()
+        } else {
+            self.parse_results()?
+        };
         if !self.at_punct("{") {
-            return self
-                .err("fn literal result types are outside the AST surface — expected `{` body");
+            return self.err("expected `{` to start the fn literal body");
         }
         let body = self.parse_block()?;
         Ok(Expr::FnLit {
             params,
+            results,
             body,
             span: self.span_from(start),
         })

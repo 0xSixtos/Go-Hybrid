@@ -209,6 +209,9 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         );
     }
 
+    // N1: the declared result shapes (return-site nil checks, HYB-E4001).
+    st.result_shapes = f.results.iter().map(|r| ck.shape_of_type(&r.ty)).collect();
+
     // Pass A: indices, structural extents, last-use map.
     let flat = walk::flatten(body);
     st.last_use = flat.last_use.clone();
@@ -332,11 +335,25 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
 
             Stmt::Return { values, .. } => ck.process_return(&mut st, values),
 
-            // O4.0 check-site: every task argument (HYB-E3001).
+            // O4.0 check-site: every task argument (HYB-E3001) + the
+            // spawn-callee proof: the callee must resolve to a declared
+            // top-level fn (a closure callee shares its captures with the
+            // new task; an unknown callee is fail-closed, O4.9).
             Stmt::Task { callee, args, span } => {
                 let desc = format!("the spawn `task {}(...)`", callee.render());
                 let vals: Vec<&Expr> = args.iter().map(|a| &a.value).collect();
-                ck.check_site(&mut st, *span, "HYB-E3001", &vals, managed, &desc, false);
+                let targets = ck.spawn_param_shapes(&st, callee, args.len());
+                ck.check_site(
+                    &mut st,
+                    *span,
+                    "HYB-E3001",
+                    &vals,
+                    managed,
+                    &desc,
+                    false,
+                    Some(callee),
+                    targets.as_deref(),
+                );
             }
 
             // O4.0 check-site: the sent value (HYB-E3002). The parser flags
@@ -358,7 +375,18 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     format!("the send `{} <- {}`", chan.render(), value.render())
                 };
                 let vals: Vec<&Expr> = vec![value];
-                ck.check_site(&mut st, *span, "HYB-E3002", &vals, managed, &desc, *is_move);
+                let targets = ck.chan_elem_shape(&st, chan);
+                ck.check_site(
+                    &mut st,
+                    *span,
+                    "HYB-E3002",
+                    &vals,
+                    managed,
+                    &desc,
+                    *is_move,
+                    None,
+                    targets.as_deref(),
+                );
             }
 
             // Loop variables: fresh bindings per iteration shape.
@@ -389,7 +417,18 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                             );
                             let span = chan.span().to(value.span());
                             let vals: Vec<&Expr> = vec![value];
-                            ck.check_site(&mut st, span, "HYB-E3002", &vals, managed, &desc, false);
+                            let targets = ck.chan_elem_shape(&st, chan);
+                            ck.check_site(
+                                &mut st,
+                                span,
+                                "HYB-E3002",
+                                &vals,
+                                managed,
+                                &desc,
+                                false,
+                                None,
+                                targets.as_deref(),
+                            );
                         }
                         SelectArmKind::Recv { names, chan } => {
                             // `v[, ok] := <-ch` — the value's shape is the

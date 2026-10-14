@@ -223,7 +223,7 @@ impl Emitter {
                 Ok(format!("{}{{{}}}", head, parts.join(", ")))
             }
 
-            Expr::FnLit { params, body, .. } => {
+            Expr::FnLit { params, results, body, .. } => {
                 // Conversion target (Batch E): untyped params take the
                 // TARGET's types (`http.handler(fn(w, r) {…})` — the
                 // literal's `w, r` are typed by HandlerFunc's signature).
@@ -307,7 +307,22 @@ impl Emitter {
                 self.fnlit_depth += 1;
                 let mut out = String::from("func(");
                 out.push_str(&rendered_params);
-                out.push_str(") {\n");
+                out.push_str(") ");
+                // Declared results (SPEC EBNF FuncLit = "fn" [Signature]
+                // Block): emitted verbatim so `fn() int {…}` lowers to
+                // `func() int {…}`.
+                if !results.is_empty() {
+                    let rs = results
+                        .iter()
+                        .map(|r| match &r.name {
+                            Some(n) => format!("{} {}", n, self.type_text(&r.ty)),
+                            None => self.type_text(&r.ty),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    out.push_str(&format!("({}) ", rs));
+                }
+                out.push_str("{\n");
                 // Redirect statement output into a scratch buffer: the
                 // literal renders inline, its body keeps normal indents.
                 let main_body = std::mem::take(&mut self.body);

@@ -583,6 +583,9 @@ pub enum Expr {
     /// literal (corpus 10: http.handler capture — the A5 perimeter shape)
     FnLit {
         params: Vec<Param>,
+        /// Declared results (`fn() int {…}`) — SPEC EBNF: `FuncLit =
+        /// "fn" [Signature] Block`. Empty for the untyped form.
+        results: Vec<FnResult>,
         body: Block,
         span: Span,
     },

@@ -114,7 +114,18 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
         Stmt::Task { callee, args, span } => {
             let desc = format!("the spawn `task {}(...)`", callee.render());
             let vals: Vec<&Expr> = args.iter().map(|a| &a.value).collect();
-            ck.check_site(st, *span, "HYB-E3001", &vals, managed, &desc, false);
+            let targets = ck.spawn_param_shapes(st, callee, args.len());
+            ck.check_site(
+                st,
+                *span,
+                "HYB-E3001",
+                &vals,
+                managed,
+                &desc,
+                false,
+                Some(callee),
+                targets.as_deref(),
+            );
         }
         Stmt::Send {
             chan,
@@ -132,7 +143,8 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
                 format!("the send `{} <- {}`", chan.render(), value.render())
             };
             let vals: Vec<&Expr> = vec![value];
-            ck.check_site(st, *span, "HYB-E3002", &vals, managed, &desc, *is_move);
+            let targets = ck.chan_elem_shape(st, chan);
+            ck.check_site(st, *span, "HYB-E3002", &vals, managed, &desc, *is_move, None, targets.as_deref());
         }
         Stmt::Select { arms, .. } => {
             for arm in arms {
@@ -142,7 +154,8 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
                             format!("the select-send `{} <- {}`", chan.render(), value.render());
                         let span = chan.span().to(value.span());
                         let vals: Vec<&Expr> = vec![value];
-                        ck.check_site(st, span, "HYB-E3002", &vals, managed, &desc, false);
+                        let targets = ck.chan_elem_shape(st, chan);
+                        ck.check_site(st, span, "HYB-E3002", &vals, managed, &desc, false, None, targets.as_deref());
                     }
                     SelectArmKind::Recv { names, chan } => {
                         // element shape when the channel resolves; `ok` is a
