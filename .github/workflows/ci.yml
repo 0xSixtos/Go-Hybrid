@@ -21,7 +21,8 @@ jobs:
       - name: Python syntax + self-tests
         run: |
           set -e
-          python3 -m py_compile tools/runner/runner.py tools/job.py worker/script.py
+          python3 -m py_compile tools/runner/runner.py tools/job.py worker/script.py tools/corpus_harness.py tools/test_corpus_harness.py
+          python3 -m unittest discover -s tools -p test_corpus_harness.py -v
           # runner self-test: execute a trivial inline job end-to-end
           mkdir -p /tmp/selftest && cd /tmp/selftest
           cat > job.json <<'EOF'
@@ -94,7 +95,7 @@ jobs:
           set -e
           cd compiler
           cargo test --workspace --quiet
-      - name: Checker corpus verdict agreement (20/20 + tripwire)
+      - name: Checker corpus verdict agreement (24/24 + tripwire)
         run: |
           set -e
           cd compiler && cargo build -p hyb --quiet
