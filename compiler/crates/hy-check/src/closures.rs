@@ -50,6 +50,14 @@ fn check_one_closure(
         env: st.env.clone(),
         ..FnState::default()
     };
+    for (k, b) in cst.env.iter_mut() {
+        if b.non_owned_origin.is_none() {
+            b.non_owned_origin = Some(format!(
+                "captured outer binding `{}` inside a closure (the enclosing scope retains `{}` and the closure may run multiple times)",
+                k, k
+            ));
+        }
+    }
     for p in params {
         let shape = ck.shape_of_type(&p.ty);
         cst.env.insert(
@@ -60,6 +68,10 @@ fn check_one_closure(
                 immutable: false,
                 managed_taint: false,
                 moved: None,
+                non_owned_origin: Some(format!(
+                    "closure parameter `{}` (the caller retains the argument across calls)",
+                    p.name
+                )),
             },
         );
     }
@@ -207,9 +219,27 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
             st.scope_push(); // the loop vars' scope
             match kind {
                 Iterate { vars, expr } => {
+                    let is_chan = matches!(ck.shape_of_expr(st, expr), TypeShape::Chan(_));
                     let shapes = ck.iterate_var_shapes(st, expr, vars.len());
                     for (name, shape) in vars.iter().zip(shapes) {
+                        let is_ref = shape.is_reference_alias();
                         ck.define_binding(st, name, shape, None, false, managed);
+                        if !is_chan {
+                            if is_ref {
+                                if let Some(root) = expr.root_ident() {
+                                    if ck.lookup_binding(st, root).is_some() {
+                                        st.aliases.insert(name.clone(), root.to_string());
+                                    }
+                                }
+                            }
+                            if let Some(b) = st.env_lookup_mut(name) {
+                                b.non_owned_origin = Some(format!(
+                                    "range variable `{}` iterating `{}` (the collection still holds the element)",
+                                    name,
+                                    expr.render()
+                                ));
+                            }
+                        }
                     }
                 }
                 Range { var, .. } => {

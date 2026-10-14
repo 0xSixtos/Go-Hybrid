@@ -192,6 +192,10 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 immutable: false,
                 managed_taint: false,
                 moved: None,
+                non_owned_origin: Some(format!(
+                    "method receiver `{}` (the caller retains the receiver across intra-task calls)",
+                    r.name
+                )),
             },
         );
     }
@@ -205,6 +209,10 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 immutable: false,
                 managed_taint: false,
                 moved: None,
+                non_owned_origin: Some(format!(
+                    "parameter `{}` (the caller retains the argument across intra-task calls)",
+                    p.name
+                )),
             },
         );
     }
@@ -392,9 +400,27 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             // Loop variables: fresh bindings per iteration shape.
             Stmt::For { kind, .. } => match kind {
                 ForKind::Iterate { vars, expr } => {
+                    let is_chan = matches!(ck.shape_of_expr(&st, expr), TypeShape::Chan(_));
                     let shapes = ck.iterate_var_shapes(&st, expr, vars.len());
                     for (name, shape) in vars.iter().zip(shapes) {
+                        let is_ref = shape.is_reference_alias();
                         ck.define_binding(&mut st, name, shape, None, false, managed);
+                        if !is_chan {
+                            if is_ref {
+                                if let Some(root) = expr.root_ident() {
+                                    if ck.lookup_binding(&st, root).is_some() {
+                                        st.aliases.insert(name.clone(), root.to_string());
+                                    }
+                                }
+                            }
+                            if let Some(b) = st.env_lookup_mut(name) {
+                                b.non_owned_origin = Some(format!(
+                                    "range variable `{}` iterating `{}` (the collection still holds the element)",
+                                    name,
+                                    expr.render()
+                                ));
+                            }
+                        }
                     }
                 }
                 ForKind::Range { var, .. } => {
@@ -1509,6 +1535,78 @@ mod tests {
         );
         assert_eq!(r_val.verdict, Verdict::Reject, "{:?}", r_val.diagnostics);
         assert!(r_val.diagnostics.iter().any(|d| d.code == "HYB-E3005"));
+    }
+
+    #[test]
+    fn non_owned_param_capture_and_range_moves_reject_e3004() {
+        // 1. Function parameter moved across a task boundary: caller retains `m`.
+        let r_param = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn spawn_it(m map[string]int, done chan<- bool) {\n\
+               task worker(move m, done)\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 1)\n\
+               spawn_it(m, done)\n\
+               m[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_param.verdict, Verdict::Reject, "{:?}", r_param.diagnostics);
+        assert_eq!(first_error_rule(&r_param).as_deref(), Some("A1b"));
+        assert!(r_param.diagnostics.iter().any(|d| d.code == "HYB-E3004"));
+
+        // 2.Captured outer binding moved inside a closure: enclosing scope retains `m`.
+        let r_cap = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 1)\n\
+               f := fn() {\n\
+                 task worker(move m, done)\n\
+               }\n\
+               f()\n\
+               m[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_cap.verdict, Verdict::Reject, "{:?}", r_cap.diagnostics);
+        assert_eq!(first_error_rule(&r_cap).as_deref(), Some("A1b"));
+        assert!(r_cap.diagnostics.iter().any(|d| d.code == "HYB-E3004"));
+
+        // 3. Non-channel `for k, v in mm` range variable moved: `mm` still holds the element.
+        let r_range = check(
+            "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               mm := map[string]map[string]int{\"a\": map[string]int{\"k\": 0}}\n\
+               for k, v in mm {\n\
+                 task worker(move v)\n\
+               }\n\
+               mm[\"a\"][\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r_range.verdict, Verdict::Reject, "{:?}", r_range.diagnostics);
+        assert_eq!(first_error_rule(&r_range).as_deref(), Some("A1b"));
+        assert!(r_range.diagnostics.iter().any(|d| d.code == "HYB-E3004"));
+        assert!(r_range.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // 4. Positive control: channel iteration (`for b in ch`) transfers ownership per element.
+        let r_chan = check(
+            "struct batch { rows []int }\n\
+             fn relay(in_ch <-chan batch, out_ch chan<- batch) {\n\
+               for b in in_ch {\n\
+                 out_ch <- move b\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r_chan.verdict, Verdict::Accept, "{:?}", r_chan.diagnostics);
     }
 }
 
