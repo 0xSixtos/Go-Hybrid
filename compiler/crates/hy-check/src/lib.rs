@@ -165,7 +165,11 @@ fn build_tables(ck: &mut Checker<'_>) {
                 );
             }
             Decl::Fn(f) => {
-                ck.fns.insert(f.name.clone(), f);
+                // Only top-level functions belong in `ck.fns` (methods have a
+                // receiver and must not overwrite or impersonate top-level fns).
+                if f.receiver.is_none() {
+                    ck.fns.insert(f.name.clone(), f);
+                }
             }
             Decl::Enum(_) => {}
             Decl::TypeAlias(_) => {}
