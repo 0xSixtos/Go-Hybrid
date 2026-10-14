@@ -463,7 +463,7 @@ impl<'a> Checker<'a> {
                         format!("why: {}", u.reason),
                         "the checker is fail-closed at boundaries: what it cannot prove, it will not call safe (O4.9) — a wrong silent pass here would void the Tier-0 guarantee for the whole program".to_string(),
                         "fix: ascribe the type at the declaration (`var x map[string]int = ...`) or route the value through a channel of a known sendable element type".to_string(),
-                        "if the share is genuinely guarded, wrap this site in `managed { ... }` — the explicit, auditable hatch (HYB-E8001, counted by --report-managed)".to_string(),
+                        "if the share is genuinely guarded, wrap this site in `managed(\"why this bypass is safe\", \"category\") { ... }` — the explicit, auditable hatch (HYB-E8001, counted by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)".to_string(),
                     ];
                     self.diags.push(
                         Diagnostic::error("HYB-E3005", self.path.clone(), span, msg)

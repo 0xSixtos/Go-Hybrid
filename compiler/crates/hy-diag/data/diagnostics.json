@@ -185,7 +185,7 @@
       "fixits": [
         "ascribe the type at the declaration (`var x map[string]int = ...`) so the checker can classify it",
         "route the value through a channel of a known sendable element type instead of sharing it",
-        "if the share is genuinely guarded, wrap the site in `managed { ... }` — the explicit, auditable hatch (counted by --report-managed)"
+        "if the share is genuinely guarded, wrap the site in `managed(\"why this bypass is safe\", \"category\") { ... }` — the explicit, auditable hatch (counted by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)"
       ],
       "example": "task handle(blob)          // reject: HYB-E3005 — blob's type did not resolve; the checker cannot prove it safe",
       "rule": "O4.9",
