@@ -161,6 +161,10 @@ def main():
             )
         rows.append((fname, expected, got[:2], ok, detail))
 
+    if total == 0:
+        print("error: no registered EXPECTED-VERDICT cases in corpus", file=sys.stderr)
+        return 2
+
     # ---- report ----
     print(f"{'program':<46} {'expected':<28} {'got':<28} {'ok':<4}")
     print("-" * 110)
