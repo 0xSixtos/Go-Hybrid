@@ -1428,6 +1428,7 @@ import (
         "runtime"
         "time"
 
+        "hybrid.program/hybench"
         "hybrid.program/jsonbinding"
         "hybrid.program/overheadbench"
 )
@@ -1481,6 +1482,46 @@ func descend(n int, mode int, depth int) float64 {
         return measure(n, mode)
 }
 
+// measurePct: the row-18 percentile measurement (PLAN row 18: the report's
+// ms-clock harnesses were too coarse; the mean hides tails). Timer honesty
+// at ns scale: one time.Now() per WINDOW, not per call — each sample is a
+// WINDOW MEAN (window/K ns), the quantity a fixed-rate consumer sees. 100
+// windows of K calls each; the HDR-style histogram carries p50/p90/p99.
+func measurePct(mode int, windows int, per int) *hybench.Histogram {
+        h := hybench.New()
+        for w := 0; w < windows; w++ {
+                t0 := time.Now()
+                switch mode {
+                case 0:
+                        for i := 0; i < per; i++ {
+                                sink += goNop(uint64(i))
+                        }
+                case 2:
+                        for i := 0; i < per; i++ {
+                                sink += overheadbench.Nop(uint64(i))
+                        }
+                case 3:
+                        for i := 0; i < per; i++ {
+                                v, ok := overheadbench.NopRaw(uint64(i))
+                                if !ok {
+                                        panic("fast path short headroom in pct scenario B")
+                                }
+                                sink += v
+                        }
+                }
+                h.Record(time.Since(t0).Nanoseconds() / int64(per))
+        }
+        return h
+}
+
+// pctDeep is measurePct at the grown-stack depth.
+func pctDeep(mode int, windows int, per int, depth int) *hybench.Histogram {
+        if depth > 0 {
+                return pctDeep(mode, windows, per, depth-1)
+        }
+        return measurePct(mode, windows, per)
+}
+
 func main() {
         // Warmup: trampolines, the deep-stack pool, allocator pages.
         for i := 0; i < 100000; i++ {
@@ -1511,7 +1552,9 @@ func main() {
         fmt.Printf("b-delta %.2f ns/call\n", bNop-bFloor)
 
         // Context: a REAL binding call — jsonbinding.NewObject allocates a
-        // Rust-side handle through the shipping crossing.
+        // Rust-side handle through the shipping crossing. At ~µs scale a
+        // PER-CALL timer is honest (~25 ns timer on ~900 ns call, <3%), so
+        // the percentiles here are true per-call tails.
         for i := 0; i < 1000; i++ {
                 _ = jsonbinding.NewObject()
         }
@@ -1531,6 +1574,30 @@ func main() {
         }
         runtime.GC()
         fmt.Printf("binding-newobject %.2f ns/call\n", best)
+
+        // Row 18: percentile tails. Fast paths get WINDOWED percentiles
+        // (100 windows × 10k calls — per-call timers would dominate a 3 ns
+        // crossing); the binding call gets true per-call percentiles.
+        const PW = 100
+        const PK = 10000
+        hAFloor := measurePct(0, PW, PK)
+        hANop := measurePct(2, PW, PK)
+        hBFloor := pctDeep(0, PW, PK, 200)
+        hBNop := pctDeep(2, PW, PK, 200)
+        hBRaw := pctDeep(3, PW, PK, 200)
+        hObj := hybench.New()
+        for i := 0; i < 20000; i++ {
+                t2 := time.Now()
+                v := jsonbinding.NewObject()
+                _ = v
+                hObj.Record(time.Since(t2).Nanoseconds())
+        }
+        fmt.Printf("a-floor-p50 %d\na-floor-p99 %d\n", hAFloor.P50(), hAFloor.P99())
+        fmt.Printf("a-nop-p50 %d\na-nop-p99 %d\n", hANop.P50(), hANop.P99())
+        fmt.Printf("b-floor-p50 %d\nb-floor-p99 %d\n", hBFloor.P50(), hBFloor.P99())
+        fmt.Printf("b-raw-p50 %d\nb-raw-p99 %d\n", hBRaw.P50(), hBRaw.P99())
+        fmt.Printf("b-nop-p50 %d\nb-nop-p99 %d\n", hBNop.P50(), hBNop.P99())
+        fmt.Printf("binding-newobject-p50 %d\nbinding-newobject-p99 %d\n", hObj.P50(), hObj.P99())
         fmt.Printf("sink %d\n", sink)
 }
 "#;
@@ -1547,6 +1614,21 @@ struct BenchRun {
     b_deep: u64,
     b_delta: f64,
     obj: f64,
+    // Row 18: percentile tails (windowed means for the fast paths,
+    // per-call for the binding). Zero = absent (parse failure keeps 0
+    // and the report line is skipped).
+    a_floor_p50: i64,
+    a_floor_p99: i64,
+    a_nop_p50: i64,
+    a_nop_p99: i64,
+    b_floor_p50: i64,
+    b_floor_p99: i64,
+    b_raw_p50: i64,
+    b_raw_p99: i64,
+    b_nop_p50: i64,
+    b_nop_p99: i64,
+    obj_p50: i64,
+    obj_p99: i64,
 }
 
 fn cmd_bench_overhead() -> ExitCode {
@@ -1575,7 +1657,12 @@ fn cmd_bench_overhead() -> ExitCode {
         ))
         .to_string_lossy()
         .to_string();
-    if let Err(e) = build_with_bridge(go_bin, &out, BENCH_MAIN, &["overheadbench", "jsonbinding"]) {
+    if let Err(e) = build_with_bridge(
+        go_bin,
+        &out,
+        BENCH_MAIN,
+        &["overheadbench", "jsonbinding", "hybench"],
+    ) {
         match e {
             BuildError::Tool(m) => eprintln!("error: {}", m),
             BuildError::Go(stderr) => eprintln!("error: go build failed:\n{}", stderr),
@@ -1617,6 +1704,18 @@ fn cmd_bench_overhead() -> ExitCode {
                 (Some("b-deepcount"), Some(v)) => r.b_deep = v.parse().unwrap_or(0),
                 (Some("b-delta"), Some(v)) => r.b_delta = v.parse().unwrap_or(0.0),
                 (Some("binding-newobject"), Some(v)) => r.obj = v.parse().unwrap_or(0.0),
+                (Some("a-floor-p50"), Some(v)) => r.a_floor_p50 = v.parse().unwrap_or(0),
+                (Some("a-floor-p99"), Some(v)) => r.a_floor_p99 = v.parse().unwrap_or(0),
+                (Some("a-nop-p50"), Some(v)) => r.a_nop_p50 = v.parse().unwrap_or(0),
+                (Some("a-nop-p99"), Some(v)) => r.a_nop_p99 = v.parse().unwrap_or(0),
+                (Some("b-floor-p50"), Some(v)) => r.b_floor_p50 = v.parse().unwrap_or(0),
+                (Some("b-floor-p99"), Some(v)) => r.b_floor_p99 = v.parse().unwrap_or(0),
+                (Some("b-raw-p50"), Some(v)) => r.b_raw_p50 = v.parse().unwrap_or(0),
+                (Some("b-raw-p99"), Some(v)) => r.b_raw_p99 = v.parse().unwrap_or(0),
+                (Some("b-nop-p50"), Some(v)) => r.b_nop_p50 = v.parse().unwrap_or(0),
+                (Some("b-nop-p99"), Some(v)) => r.b_nop_p99 = v.parse().unwrap_or(0),
+                (Some("binding-newobject-p50"), Some(v)) => r.obj_p50 = v.parse().unwrap_or(0),
+                (Some("binding-newobject-p99"), Some(v)) => r.obj_p99 = v.parse().unwrap_or(0),
                 _ => {}
             }
         }
@@ -1643,6 +1742,19 @@ fn cmd_bench_overhead() -> ExitCode {
     );
     println!("  binding-newobject   {:>7.2} ns/call  (context: real binding call, Rust-side handle alloc)", r.obj);
     println!("  budget              {:>7.2} ns/call  (SPEC §6 hypothesis; spike-1: 2.82 ns sandbox / 4.36 ns worker on the FIXED-stack prototype)", budget);
+    println!();
+    println!("  percentile tails (row 18 — ns resolution; fast paths are windowed means: 100 windows × 10k calls, per-call timers would dominate a 3 ns crossing; the binding is per-call):", );
+    let pct = |name: &str, p50: i64, p99: i64| {
+        if p50 > 0 {
+            println!("    {:<19} p50 {:>6} ns   p99 {:>6} ns", name, p50, p99);
+        }
+    };
+    pct("a-floor", r.a_floor_p50, r.a_floor_p99);
+    pct("a-nop", r.a_nop_p50, r.a_nop_p99);
+    pct("b-floor", r.b_floor_p50, r.b_floor_p99);
+    pct("b-raw", r.b_raw_p50, r.b_raw_p99);
+    pct("b-nop", r.b_nop_p50, r.b_nop_p99);
+    pct("binding-newobject", r.obj_p50, r.obj_p99);
     println!();
     println!("  reading: the ≤5 ns hypothesis holds on the FAST path (grown stacks) —");
     if r.b_nop <= budget {
