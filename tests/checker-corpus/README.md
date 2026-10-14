@@ -1,13 +1,16 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-Current registered corpus: **24 programs**. The original pre-checker
+Current registered corpus: **28 programs**. The original pre-checker
 registration described below started with 18 and grew to 20 during the
 2026-10-12 integration. An additive 2026-10-14 registration in VERDICTS.md
-adds cases 21–23 for select-send clauses: mutable-map rejection, a positive
+adds cases 25–27 for select-send clauses: mutable-map rejection, a positive
 string/channel control, and fail-closed rejection of an unresolved name.
-A further additive registration pins case 24, the documented default-arm
+A further additive registration pins case 28, the documented default-arm
 syntax and a nonblocking fallback that prints exactly `idle`.
 Their expected results were recorded before running the new fixtures.
+These four files were initially numbered 21–24; integration of upstream
+cases 21–24 on 2026-10-14 renumbered them to 25–28 without changing their
+expected results. The upstream verdict registrations remain preserved.
 The dated original tripwire baseline below is preserved as historical.
 
 18 pseudo-Hybrid (`.hy`) programs written BEFORE the Phase-1 checker exists,

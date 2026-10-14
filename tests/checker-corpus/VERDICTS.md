@@ -407,53 +407,64 @@ fiat here.
 
 ## Additive corpus registration — 2026-10-14: select-send clauses
 
-The historical 20-case table, distributions and baseline above are left
-unchanged. The following three cases were derived from SPEC-LANGUAGE.md
+The original registrations and subsequent upstream cases 21–24 above are
+preserved. The following three cases were derived from SPEC-LANGUAGE.md
 §8.3 C4, §8.4 C5 and §9.3 O4/O4.9 before these files were run against the
 checker. They exercise the previously unrepresented `select` SEND surface,
 not a new language rule. Each file pins one verdict; reject files also
 name the exact diagnostic code in their header. A disagreement must be
 recorded and resolved, never hidden by changing an expected result.
 
+Originally registered as 21–23, these files are now 25–27: the integration
+of upstream commit `2e79213838649557cb00310a9f79c166f8c6731c` brought its own
+cases 21–24. Only filenames and corresponding references were renumbered;
+expected verdicts, rules and diagnostic codes did not change.
+
 | # | program | verdict | rule | diagnostic | rationale |
 |---|---------|---------|------|------------|-----------|
-| 21 | 21-select-send-shared-map | REJECT | A1c | `HYB-E3002` | a named mutable map is not safe-by-type at a select-send clause |
-| 22 | 22-select-send-safe-values | ACCEPT | — | no error | string and channel values remain legal at select-send sites |
-| 23 | 23-select-send-unproven-name | REJECT | FC (O4.9) | `HYB-E3005` | an unresolved sent name is unproven, even with a known destination element type |
+| 25 | 25-select-send-shared-map | REJECT | A1c | `HYB-E3002` | a named mutable map is not safe-by-type at a select-send clause |
+| 26 | 26-select-send-safe-values | ACCEPT | — | no error | string and channel values remain legal at select-send sites |
+| 27 | 27-select-send-unproven-name | REJECT | FC (O4.9) | `HYB-E3005` | an unresolved sent name is unproven, even with a known destination element type |
 
-Registered corpus after this addition: **23 programs: ACCEPT 8 · ACCEPT-MANAGED 2 ·
-REJECT 13**. `FC` is the existing fail-closed rule from SPEC O4.9; these
-rows do not amend its meaning or renumber diagnostics. None of the new
-files contains `managed`, and all their verdicts are pinned without the
-hatch. The registered managed count remains two, so the verdict-level
-managed ratio is 2/23. The harness's static as-written managed set remains
-the historical {01, 03, 04}; its reported 3/23 counts only that set, not a
-new exhaustive friction survey of all 23 cases. The dated 20-case tripwire
-baseline above remains historical rather than a rewritten one.
+Historical registration on the earlier 20-case base produced **23
+programs: ACCEPT 8 · ACCEPT-MANAGED 2 · REJECT 13**; the recorded 23-case
+verification remains a dated result rather than a claim about this merged
+state. With the upstream 24-case base, this three-case addition gives **27
+programs: ACCEPT 9 · ACCEPT-MANAGED 2 · REJECT 16** before case 28 below.
+`FC` is the existing fail-closed rule from SPEC O4.9; these rows do not
+amend its meaning or renumber diagnostics. No new file contains `managed`.
+The harness's static as-written managed set remains the historical
+{01, 03, 04}; its ratios count only that set, not a new exhaustive friction
+survey. The dated original tripwire baseline above remains historical.
 
 ## Additive corpus registration — 2026-10-14: default fallback
 
-Case 24 was derived from SPEC-LANGUAGE.md §8.3 C4 before running this
-fixture. It pins the already documented default-arm syntax and selection
-behaviour, not a new language rule. The checker must accept the safe
-string send. At runtime the unbuffered channel has no receiver, so the
-default arm must run without blocking and print exactly `idle`.
+Case 28 (originally registered as case 24 before upstream integration) was
+derived from SPEC-LANGUAGE.md §8.3 C4 before running this fixture. It pins
+the already documented default-arm syntax and selection behaviour, not a
+new language rule. The checker must accept the safe string send. At
+runtime the unbuffered channel has no receiver, so the default arm must
+run without blocking and print exactly `idle`.
 
 | # | program | verdict | rule | diagnostic | rationale |
 |---|---------|---------|------|------------|-----------|
-| 24 | 24-default-fallback | ACCEPT | — | no error | a default arm supplies the nonblocking fallback for an unavailable, safe string send |
+| 28 | 28-default-fallback | ACCEPT | — | no error | a default arm supplies the nonblocking fallback for an unavailable, safe string send |
 
 This is an ordinary syntax/behaviour regression: the previous parser
 expected a reserved `default` token that the lexer does not emit. C4
 requires the arm syntax; LX3 leaves `default` as an ordinary identifier.
 Its previous parse rejection is not an accepted-but-unsound program.
-The expected ACCEPT verdict and output are registered before testing and
+The expected ACCEPT verdict and output were registered before testing and
 must not be changed merely to match a checker result. Contextual parser
 recognition restores documented arm syntax without reserving a new
-keyword; cases 21–23 stand alone without defaults.
+keyword; cases 25–27 stand alone without defaults.
 
-Current registered corpus: **24 programs: ACCEPT 9 · ACCEPT-MANAGED 2 ·
-REJECT 13**. The original 20-case table and dated baseline remain
-unchanged. Verdict-level managed count is 2/24; the harness's unchanged
-historical as-written set {01, 03, 04} reports 3/24, with the same
-population qualification noted above. Case 24 adds no `managed` block.
+Historical registration on the earlier base produced **24 programs:
+ACCEPT 9 · ACCEPT-MANAGED 2 · REJECT 13**. That registration and its local
+verification are retained as dated evidence; they are not the merged
+corpus total. Current registered corpus: **28 programs: ACCEPT 10 ·
+ACCEPT-MANAGED 2 · REJECT 16**. The original and upstream table entries and
+dated baseline remain unchanged. Verdict-level managed count is 2/28;
+the harness's unchanged historical as-written set {01, 03, 04} reports
+3/28, with the same population qualification noted above. Case 28 adds
+no `managed` block.
