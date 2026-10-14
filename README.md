@@ -138,6 +138,19 @@ graph ownership moves, a Rust-crate digest service, and a Hybrid package
 consumed by plain Go — every one parses, checks, emits, builds and runs
 byte-exact in CI.
 
+## Docker (CI)
+
+A pinned-toolchain image (Go 1.26.9 + release `hyb` + the prebuilt runtime —
+bridge programs included, no Rust needed at run time):
+
+```bash
+docker run --rm -v "$PWD:/work" -w /work   ghcr.io/limitlessprojects/go-hybrid:latest   hyb build ./program.hy -o /work/out && /work/out
+```
+
+Also usable as a CI `container:` — `HYB_RUNTIME_DIR` is wired. The image is
+smoke-tested (pins + bridge-free + a serde_json bridge crossing) before it
+is pushed; see `.github/workflows/docker-publish.yml`.
+
 ## Adding Hybrid to an EXISTING `go.mod` project (10 minutes)
 
 No new build system, no separate module culture — `.hy` files live beside
