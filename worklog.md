@@ -320,3 +320,20 @@ Work Log:
 Stage Summary:
 - Community state: #1 feedback (answered point-by-point) · #2 platform poll (live) · #3 go.mod design (live) · release notes match the shipped tarball
 - Lesson: GitHub Discussions writes are GraphQL-only; polls are UI-only; PATCH releases needs the numeric ID
+
+---
+Task ID: 21 (Batch O)
+Agent: Super Z (main)
+Task: Rows 11 + 6 + 15 — the release-matrix fleet dispatch, make-bench on the Actions tier, the soundness reporting path.
+
+Work Log:
+- release-matrix.yml (dispatch-only): matrix = linux-amd64 (native repro rebuild) · linux-arm64 (aarch64 cross gcc + qemu-user smoke) · darwin-arm64 (macos-14 runner, native) · windows-amd64 (mingw for cgo); every leg runs tools/package_release.sh — which refuses to ship anything that doesn't smoke-test RUSTLESS from the ACTUAL tarball; publish job uploads tarball+sha256 clobber to the v0.1.0 release
+- package_release.sh cross-mode: HYB_RUST_TARGET/HYB_CC/HYB_PKG_OS/HYB_PKG_ARCH envs; arm64 uname mapping added; CGO_ENABLED=1 mirrored into the cross smoke (go defaults cgo OFF for foreign GOARCH — found while wiring, hyb sets it internally but the smoke's env must survive go's foreign-arch default)
+- Soundness path (row 15): ISSUE_TEMPLATE/soundness.yml (P0-by-definition framing per GUARANTEES.md: minimal .hy repro + expected/actual checker output + severity claim we re-derive and publish) + config.yml linking discussions 1/2/3; `soundness` label created (b60205)
+- Row 6: bench job in the same workflow — make bench on the Actions 4-vCPU tier = the THIRD measured tier (sandbox 3.39 PASS / Kaggle worker 6.93 MISS / Actions = this run's number)
+- Local validation before dispatch: all 3 YAMLs parsed, sh -n clean, native packaging re-run → smoke PASS (linux/amd64, rustless)
+- Dispatched with publish=true at HEAD; results to be recorded in the next worklog entry
+
+Stage Summary:
+- The poll in #2 now has a concrete answer in flight: ALL FOUR listed platforms build+smoke on the fleet this run — the poll's value shifts from prioritization to RC-testing volunteers
+- Windows is the honest-risk leg (asm trampolines + cgo staticlib under mingw never ran before) — fail-fast: false records whatever happens
