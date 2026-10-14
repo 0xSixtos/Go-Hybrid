@@ -33,6 +33,7 @@ this file is the human-normative record.
 | A7 | handles passed to functions are borrow-by-default; own-transfer happens only at `return` and at consuming APIs | `HYB-E3003` (use-after-consume) |
 | A8 | top-level `?` exit contract — NOT exercised by this corpus (noted so nobody mistakes absence for coverage) | — |
 | LOAN-ESCAPE | "loans never escape functions" (Tier-0 Layer-2 text; unambiguous, but has no A-number — flagged OQ4) | `HYB-E3104` family (SPEC O2) |
+| IMMUT | T22 deep immutability: a `const` binding is frozen — no rebind, no element/index write, no field store through it; reads stay legal (the file-level form lowers to package-level state every task body reaches ambiently) | `HYB-E3006` |
 
 The code column exists so checker output, SPEC-LANGUAGE.md rules, and this
 table are joinable from day one (registry format `HYB-Exxxx`, decided
@@ -68,8 +69,9 @@ renumbered).
 | 23 | 23-a1c-mapslot-copy-at-spawn | ACCEPT | — | 22's legal twin: the map-slot field is read into a local BEFORE the spawn (the loan's last use), so a copy (A4/O9) crosses the spawn site instead of the live loan — pins that A1c tracks the LOAN crossing, not the map-slot's mere upstream existence |
 | 24 | 24-shadow-scope-map-reject | REJECT | A1c | an inner-block `m := 1` must SHADOW the outer map, never overwrite its binding — the flat env let the inner define rewrite the outer shape and the spawn passed with zero diagnostics while `go -race` reported two write/write DATA RACEs (issue #14; the env is now scope-aware) |
 | 25 | 25-o40-spawn-callee-proof | REJECT | A1c | the O4.0 spawn-callee PROOF: a closure callee (`task gap()`) crosses with its captured environment (A5, E3001) and an undeclared callee (`task mystery(1)`) is fail-closed unproven (E3005/FC) — before the fix the O4.0 site checked only the arguments and both passed silently (adoption-audit finding F1; the ACCEPT/proven side is pinned in hy-check/tests/callee_and_nil.rs) |
+| 26 | 26-const-write-reject | REJECT | IMMUT | a file-level `const` slice takes an element write (W1) and a whole-binding rebind (W2) while the emitter lowers the const to a package-level `var` — two spawned tasks reach the same backing array with NOTHING crossing the spawn site, so O4 never fires and `hyb check` reported 0 diagnostics against `go run -race` evidence (issue #37; T22 deep immutability — the write rejection was the missing check; the accept side is pinned in hy-check/tests/const_write.rs) |
 
-**Distribution: ACCEPT 8 · ACCEPT-MANAGED 2 · REJECT 15 — 25 programs.**
+**Distribution: ACCEPT 8 · ACCEPT-MANAGED 2 · REJECT 16 — 26 programs.**
 (19 and 20 were added by the lead during integration on 2026-10-12 — still
 BEFORE any checker existed; see the pre-registration statement. 21, 22, 23
 and 24 are post-checker corpus GROWTH from the bounty track, added
@@ -81,7 +83,12 @@ readings first, per their own headers, and only then reproduced against
 the checker per BOUNTY.md's "pay only after reproduction". 25 is the
 adoption-audit batch (2026-10-14): the O4.0 spawn-callee proof + the N1
 nil rule emission, from the external audit's findings F1/F2 — verdict
-derived from O4.0/A5/FC first, then pinned against the fix.)
+derived from O4.0/A5/FC first, then pinned against the fix.) 26 is the
+issue-#37 soundness program (2026-10-14): verdict derived from T22's
+deep-immutability text first, then pinned against the HYB-E3006 fix —
+the report came with `hyb check` OK / `go run -race` DATA RACE evidence,
+so the hand-derived REJECT and the reproduction were one step here, in
+that order.
 
 ## Reading-distinguishing power (what Spike 6's corpus could not do)
 
@@ -361,6 +368,23 @@ artifact that is wrong, with the decision recorded.
   (`const` values) settle it: the `let` arm must not grant class 4. Fix:
   `process_local` grants the class-4 shortcut only to `LocalKind::Const`.
   Author: @Ratanlavate.
+
+- **2026-10-14 — corpus GROWTH, `26-const-write-reject` (REJECT IMMUT).**
+  Not a verdict change to an existing program: a new regression program
+  added with the fix for soundness issue #37 (P0 — data race reachable in
+  the checked subset). T22 settles the verdict by its text: `const` is the
+  only DEEP immutability in MVP, so the element write `cells[0] = ...`
+  and the rebind `cells = [5]` must both be compile errors — yet the
+  checker had no write-rejection site at all for `const` roots (bindings
+  were only protected against shape rewrites elsewhere), the emitter
+  lowered the file-level const to a package-level `var`, and two spawned
+  tasks raced with `hyb check` reporting 0 diagnostics (nothing crossed
+  the spawn site, so O4 never fired — distinct from #25/#12). Fix: new
+  `HYB-E3006` (rule T22, tier0 `IMMUT`) emitted from `process_assign` via
+  a `const_write_root` walk (Ident/Field/Index to the binding root;
+  locals-first lookup keeps shadowing `let` copies writable). Verdict
+  hand-derived from T22 first; the report's `go run -race` evidence is
+  the reproduction, not the source of the verdict.
 
 ## Open questions (flagged for SPEC-LANGUAGE.md — NOT silently decided)
 

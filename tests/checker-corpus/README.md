@@ -1,6 +1,6 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-25 pseudo-Hybrid (`.hy`) programs written BEFORE the Phase-1 checker exists,
+26 pseudo-Hybrid (`.hy`) programs written BEFORE the Phase-1 checker exists,
 per the human owner's 2026-10-12 ruling (QUESTIONS.md Q1): the adversarial
 programs are written first and treated as the spec. Coverage: the named
 tripwire cases (shared map across tasks; worker pool mutating a shared

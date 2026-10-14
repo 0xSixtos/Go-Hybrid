@@ -192,6 +192,22 @@
       "tier0_rule_id": "FC"
     },
     {
+      "code": "HYB-E3006",
+      "name": "write-to-const",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "cannot write to a `const` binding",
+      "summary": "`const` is a compile-time constant and the only DEEP immutability in MVP (SPEC-LANGUAGE T22): no rebind of the binding, no element/index write, no field store through it. A file-level `const` lowers to package-level state that every task body reaches ambiently, so an accepted write would be a data race carrying zero spawn-site evidence (issue #37). Reads stay legal — deep immutability bans the write, not the value.",
+      "fixits": [
+        "make the value a `let`/`var` local and cross task boundaries with a proof (owned `move`, channel send, or `managed`)",
+        "keep the `const` and write to a local copy inside the task",
+        "if the state must be shared and updated, guard the access with `managed(\"why this is safe\", \"mutex\"|\"atomic\"|\"actor\") { ... }` — the explicit, auditable hatch (categories: mutex, atomic, actor, finalizer, interop, other)"
+      ],
+      "example": "const cells = [0]; cells[0] = cells[0] + 1   // reject: HYB-E3006 — `cells` is deeply immutable (T22)",
+      "rule": "T22",
+      "tier0_rule_id": "IMMUT"
+    },
+    {
       "code": "HYB-E3101",
       "name": "handle-loan-conflict",
       "category": "ownership-loans",
