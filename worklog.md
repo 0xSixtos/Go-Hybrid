@@ -304,3 +304,19 @@ Stage Summary:
 - Both trust blockers the reviewer named are addressed with landed artifacts (claims table + rustless one-command install), not promises
 - The tarball contract now: prebuilt staticlib wins ensure_staticlib's freshness check; packaging is a script, not an ad-hoc session
 - Queue rows 11-15 carry the rest of the reply's asks (platform matrix needs the next fleet dispatch; go.mod sample repo + managed categories get design threads in Discussions first)
+
+---
+Task ID: 20-b (Batch N community ops)
+Agent: Super Z (main)
+Task: The discussion work — reply, react, more threads, poll, release-notes refresh.
+
+Work Log:
+- Discussion #1: point-by-point reply posted linking the landed artifacts (GUARANTEES.md / install.sh / --deny-managed / rows 11-15); the reviewer's comment heart-reacted
+- New thread #2 (Ideas): platform priority — polls are NOT creatable via the GitHub API (CreateDiscussionInput rejects pollOptions) → reaction-voting pattern: one comment per option, vote by thumb
+- New thread #3 (Q&A): the go.mod integration design question (toolexec vs go:generate vs make-step, constraints, current leaning = B with --check) — the reply's sharpest ask gets a public argument before code
+- Release notes refreshed via PATCH (needs the release ID, not the `latest` alias): install section now leads with the one-command rustless installer; suite counts 206→210; What's-next points at the claims table + both threads
+- Tooling: scripts/gh_disc.py (GraphQL reply/new/react — REST rejects discussion writes), gh_list_comments.py, gh_release_update.py (sandbox-local, not in repo)
+
+Stage Summary:
+- Community state: #1 feedback (answered point-by-point) · #2 platform poll (live) · #3 go.mod design (live) · release notes match the shipped tarball
+- Lesson: GitHub Discussions writes are GraphQL-only; polls are UI-only; PATCH releases needs the numeric ID
