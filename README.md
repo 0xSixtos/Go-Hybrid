@@ -81,13 +81,17 @@ The Tier-0 checker is **fail-closed at critical boundaries** (rule FC, O4.9):
   and teach the fix: ascribe the type, route through a channel, or take the
   hatch knowingly.
 - **Nothing silently passes.** The escape hatch — `managed { ... }` — is
-  explicit, linted, greppable, and counted by `--report-managed`.
+  explicit, linted, greppable, and counted by `--report-managed`; CI can
+  forbid it entirely with `--deny-managed`.
 - Boundary statements **inside closures** are checked too; Go-API escapes
   (a closure handed to `net/http`) are outside the checked subset and
   [documented as such](SPEC-LANGUAGE.md), not hidden.
 
 The sharp version of the contract: **everything the checker accepts was
-proven; everything it can't prove is named.** The full rules with their
+proven; everything it can't prove is named.** The line-by-line claims table
+— including the primitives you should ask about (`sync.Pool`,
+`atomic.Pointer`, `context.Context`, finalizers, `unsafe`, cgo, channel
+close) — lives in [GUARANTEES.md](GUARANTEES.md); the full rules with their
 pre-registered evidence live in [SPEC-LANGUAGE.md §9](SPEC-LANGUAGE.md); the
 honest-claims paragraph (what is *not* guaranteed — e.g. a `managed` region
 is still Go's DRF-SC story with `-race` as the backstop) is binding there.
@@ -110,11 +114,18 @@ skip the cgo runtime.
 
 ## Quick start
 
+One command, **no Rust toolchain** (the bridge staticlib ships prebuilt):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/limitlessprojects/Go-Hybrid/main/install.sh | sh
+```
+
+Prefer building from source? The pins are the contract (Go 1.26.9 / Rust 1.99.0):
+
 ```bash
 git clone https://github.com/limitlessprojects/Go-Hybrid.git && cd Go-Hybrid
-# toolchain pins: Go 1.26.9, Rust 1.99.0 (see tools/env.sh)
 make examples     # all ten target programs, byte-exact vs expected.txt
-make test-quick   # 206 compiler tests + checker corpus (20/20) + differential (9/9 + 11/11)
+make test-quick   # 210 compiler tests + checker corpus (20/20) + differential (9/9 + 11/11)
 make bench        # G2 call-overhead bench on the LIVE bridge
 
 hyb build examples/01-hello/program.hy -o hello && ./hello

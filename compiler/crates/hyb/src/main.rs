@@ -54,7 +54,7 @@ fn main() -> ExitCode {
             eprintln!("hyb — the Hybrid compiler CLI (MVP-0)");
             eprintln!();
             eprintln!("usage:");
-            eprintln!("  hyb check <file.hy> [--json] [--report-managed]");
+            eprintln!("  hyb check <file.hy> [--json] [--report-managed] [--deny-managed]");
             eprintln!("  hyb explain <HYB-Exxxx | Exxxx | xxxx | machine-name>");
             eprintln!("  hyb build <file.hy> -o <bin-path> [--emit-go]");
             eprintln!("  hyb bench-overhead");
@@ -93,8 +93,9 @@ fn cmd_check(args: &[String]) -> ExitCode {
     let file = args.iter().find(|a| !a.starts_with('-')).cloned();
     let json = args.iter().any(|a| a == "--json");
     let report_managed = args.iter().any(|a| a == "--report-managed");
+    let deny_managed = args.iter().any(|a| a == "--deny-managed");
     let Some(file) = file else {
-        eprintln!("usage: hyb check <file.hy> [--json] [--report-managed]");
+        eprintln!("usage: hyb check <file.hy> [--json] [--report-managed] [--deny-managed]");
         return ExitCode::from(2);
     };
 
@@ -182,6 +183,24 @@ fn cmd_check(args: &[String]) -> ExitCode {
         if result.diagnostics.is_empty() {
             println!("{}: OK (0 diagnostics)", file);
         }
+    }
+
+    // CI policy gate (--deny-managed): any managed block fails the check.
+    // Pairs with --report-managed (count) the way `unsafe` pairs with audit
+    // tooling — the hatch stays greppable, auditable, countable, AND now
+    // optionally forbidden. Discussion #1 (ssmurfgg04-gif) ask.
+    if deny_managed && result.managed.managed_blocks > 0 {
+        let msg = format!(
+            "deny-managed: {} managed block(s) present — check failed by policy (--deny-managed); \
+             audit the block(s) or remove them (HYB-E8001 counts them under --report-managed)",
+            result.managed.managed_blocks
+        );
+        if json {
+            eprintln!("{}", msg);
+        } else {
+            println!("{}", msg);
+        }
+        return ExitCode::FAILURE;
     }
 
     if errors > 0 {

@@ -282,3 +282,25 @@ Work Log:
 
 Stage Summary:
 - Customer feedback batch fully landed: fail-closed checker (O4.9/O4.10) · two parser crash bugs fixed · v0.1.0 released with a smoke-tested artifact · Discussions + feedback thread live · README repositioned · sanitizers+fuzzing fleet-green vs the release SHA · worker-tier bench measured and recorded.
+
+---
+Task ID: 20 (Batch N)
+Agent: Super Z (main)
+Task: Merge Discussion #1's first reply into the plan + kill the install-friction trust blocker; reply to the community; post more questions.
+
+Work Log:
+- Fresh sandbox recovery: go1.26.9 + rust 1.99.0 re-pinned; clippy/rustfmt components added
+- Discussion #1 reply analyzed (ssmurfgg04-gif, 4 asks: evidence, install, adoption framing, hatch hardening) — all four merged this batch
+- GUARANTEES.md: line-by-line claims table over exactly the reply's primitive list (sync.Pool / atomic.Pointer / context.Context / finalizers / unsafe / cgo / channel-close), every row cites SPEC rule + corpus evidence, `no claim` where true, §9.2 quote-shape as normative header, soundness-bug protocol (P0, published severity/status, corpus regression before fix)
+- --deny-managed landed in hyb check (policy gate: any managed block fails; JSON stdout purity kept — notice on stderr); 4 integration tests over corpus 02/15 (compiler/crates/hyb/tests/deny_managed.rs, CARGO_BIN_EXE + corpus paths with THREE ups from crates/hyb); hyb Cargo.toml gains serde_json dev-dep (envelope parse assertion)
+- INSTALL FRICTION FINDING: v0.1.0's tarball shipped NO prebuilt staticlib — INSTALL.md told users to install Rust 1.99.0 (the exact pitch-death the reply predicted). Fixed: tools/package_release.sh (reproducible packaging: crate-local hyrt build for the mtime-freshness contract, hyb release, tarball+sha256, smoke test from the ACTUAL tarball with cargo REMOVED from PATH — PASS rustless); install.sh (one command: platform detect, latest-release resolve via API, sha256 verify, extract to ~/.hybrid, baked `hyb` launcher wiring HYB_RUNTIME_DIR, verify via `hyb explain E0002` — never `--help`, exit 2 by design); tools/RELEASE-INSTALL.md = the Rust-free install notes shipped in the tarball
+- Repackaged + re-uploaded v0.1.0 assets (tarball now 7.9 MB with prebuilt libhyrt.a + .sha256 asset)
+- PLAN.md: queue rows 11-15 opened (multi-platform matrix, Docker, sample-repo-vs-go.mod design, managed reason+categories phase 2, soundness ledger+bounty); Batch N Decision Log entry; fixed a concatenated Decision Log line (two 2026-10-14 entries on one line)
+- README: Quick start leads with the one-command install (no Rust toolchain); guarantee section cites GUARANTEES.md + --deny-managed; -race wording audit: no parity claims found
+- STATUS.md rewritten (community-review state)
+- Suite: cargo test --workspace 210/0 (+4 deny-managed) · corpus 20/20 (tripwire quiet) · differential 9/9+11/11 FULL AGREEMENT · examples 10/10 · gofmt clean · go vet+build+test 5 pkgs ok · clippy 0 (--all-targets; fixed 2 pre-existing doc-list warnings in hy-syntax/tests/parse_all.rs) · fmt clean
+
+Stage Summary:
+- Both trust blockers the reviewer named are addressed with landed artifacts (claims table + rustless one-command install), not promises
+- The tarball contract now: prebuilt staticlib wins ensure_staticlib's freshness check; packaging is a script, not an ad-hoc session
+- Queue rows 11-15 carry the rest of the reply's asks (platform matrix needs the next fleet dispatch; go.mod sample repo + managed categories get design threads in Discussions first)

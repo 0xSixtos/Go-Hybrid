@@ -2,6 +2,7 @@
 //!   * tests/checker-corpus/*.hy            (20 programs — the checker corpus)
 //!   * spikes/spike6-ownership/work/*.hy    (10 programs — Tier-0 rewrites)
 //!   * examples/01,02,03/program.hy         (MVP-0 target programs)
+//!
 //! plus the stretch examples 04–10 (same surface as the spikes; must parse
 //! or fail cleanly — here we assert they parse too).
 
