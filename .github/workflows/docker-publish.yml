@@ -28,13 +28,17 @@ jobs:
         with:
           ref: ${{ inputs.sha }}
       - name: Build image
-        run: docker build -t ghcr.io/${{ github.repository }}:${{ inputs.version }} .
+        # GHCR requires lowercase repository names (Go-Hybrid → go-hybrid)
+        run: |
+          IMG="ghcr.io/${GITHUB_REPOSITORY,,}:${{ inputs.version }}"
+          echo "IMG=$IMG" >> "$GITHUB_ENV"
+          docker build -t "$IMG" .
       - name: Smoke from the IMAGE (pins + bridge-free + bridge program)
         # Every container mounts the checkout at /work — binaries built in
         # one container run in the next (each docker run is a fresh fs).
         run: |
           set -e
-          IMG="ghcr.io/${{ github.repository }}:${{ inputs.version }}"
+          IMG="${{ env.IMG }}"
           # (a) toolchain pins inside the image + the CLI answers
           docker run --rm "$IMG" sh -c 'go version | grep -q go1.26.9 && hyb explain E0002 >/dev/null && echo pins-ok'
           # (b) bridge-free program: build + run inside the image
@@ -55,10 +59,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Push (versioned + latest)
+        env:
+          IMG: ${{ env.IMG }}
         run: |
-          IMG="ghcr.io/${{ github.repository }}"
           docker tag "$IMG:${{ inputs.version }}" "$IMG:latest"
           docker push "$IMG:${{ inputs.version }}"
           docker push "$IMG:latest"
       - name: Published tags
-        run: echo "ghcr.io/${{ github.repository }}:${{ inputs.version }} and :latest are live"
+        env:
+          IMG: ${{ env.IMG }}
+        run: echo "$IMG:${{ inputs.version }} and $IMG:latest are live"
