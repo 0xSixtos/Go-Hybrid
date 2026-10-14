@@ -29,16 +29,13 @@ fn go_bin() -> &'static str {
 }
 
 /// The cargo binary for the bridge's hyrt build: HYB_CARGO_BIN override,
-/// else PATH, else the rustup default location (~/.cargo/bin).
+/// else PATH. (No absolute fallback: the rustless install contract — the
+/// release smoke strips cargo from PATH — would be silently defeated by a
+/// ~/.cargo/bin fallback rebuilding a fresh lib the shipped tarball already
+/// carries. If freshness ever fails without cargo, fail LOUDLY instead.)
 fn cargo_bin() -> String {
     if let Ok(c) = std::env::var("HYB_CARGO_BIN") {
         return c;
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        let p = std::path::PathBuf::from(home).join(".cargo/bin/cargo");
-        if p.is_file() {
-            return p.to_string_lossy().to_string();
-        }
     }
     "cargo".to_string()
 }
@@ -491,45 +488,172 @@ fn cmd_build_package(
 /// Build (or reuse) the hyrt staticlib; returns its path.
 fn ensure_staticlib(rt: &std::path::Path) -> Result<std::path::PathBuf, BuildError> {
     let crate_dir = rt.join("rust/hyrt");
-    let src_lib = match std::env::var("CARGO_TARGET_DIR") {
-        Ok(t) => std::path::PathBuf::from(t).join("release/libhyrt.a"),
-        Err(_) => crate_dir.join("target/release/libhyrt.a"),
-    };
-    let fresh = std::fs::metadata(&src_lib).is_ok()
-        && newest_mtime(&crate_dir)
-            .map(|src_t| {
-                std::fs::metadata(&src_lib)
-                    .and_then(|l| l.modified())
-                    .ok()
-                    .map(|lib_t| lib_t >= src_t)
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
-    if !fresh {
-        let mut cargo = Command::new(cargo_bin());
-        cargo
-            .args(["build", "--release", "-j2"])
-            .current_dir(&crate_dir)
-            .env("CARGO_BUILD_JOBS", "2");
-        if let Ok(t) = std::env::var("CARGO_TARGET_DIR") {
-            cargo.env("CARGO_TARGET_DIR", t);
-        }
-        let out = cargo
-            .output()
-            .map_err(|e| BuildError::Tool(format!("running cargo build (hyrt): {}", e)))?;
-        if !out.status.success() {
-            return Err(BuildError::Tool(format!(
-                "cargo build (hyrt) failed:\n{}{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            )));
-        }
+    // Candidate staticlibs — the freshest ARCH-MATCHING fresh one wins.
+    // (Row 16 lesson: the bridge smoke on the arm64 fleet leg caught hyb
+    // happily linking a foreign-arch libhyrt.a. Candidates cover the dev
+    // shared-target flow (CARGO_TARGET_DIR), cross --target subdirs, and
+    // the crate-local layout the shipped tarball re-lays the prebuilt lib
+    // into (target/release/libhyrt.a — the one end users hit).)
+    let mut cands: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(t) = std::env::var("CARGO_TARGET_DIR") {
+        let t = std::path::PathBuf::from(t);
+        cands.push(t.join("release/libhyrt.a"));
+        push_sibling_libs(&t, &mut cands);
     }
+    let local_target = crate_dir.join("target");
+    cands.push(local_target.join("release/libhyrt.a"));
+    push_sibling_libs(&local_target, &mut cands);
+    cands.sort();
+    cands.dedup();
+    let src_mtime = newest_mtime(&crate_dir);
+    if std::env::var("HYB_DEBUG_LIB").is_ok() {
+        eprintln!(
+            "[hyb-debug] runtime={} crate_dir={} newest_src_mtime={:?}",
+            rt.display(),
+            crate_dir.display(),
+            src_mtime
+        );
+    }
+    let src_lib = cands
+        .into_iter()
+        .filter(|p| lib_arch_matches(p))
+        .filter(|p| match (&src_mtime, std::fs::metadata(p)) {
+            (Some(src_t), Ok(md)) => md.modified().ok().map(|l| l >= *src_t).unwrap_or(false),
+            _ => false,
+        })
+        .max_by_key(|p| {
+            std::fs::metadata(p)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+        });
+    if std::env::var("HYB_DEBUG_LIB").is_ok() {
+        eprintln!("[hyb-debug] chosen staticlib: {:?}", src_lib.as_ref().map(|p| p.display().to_string()));
+    }
+    let src_lib = match src_lib {
+        Some(p) => p,
+        None => {
+            // No fresh arch-matching lib — rebuild native (the dev flow; the
+            // release tarball never lands here because packaging touches the
+            // shipped lib's mtime past every source's).
+            let rebuilt = crate_dir.join("target/release/libhyrt.a");
+            let mut cargo = Command::new(cargo_bin());
+            cargo
+                .args(["build", "--release", "-j2"])
+                .current_dir(&crate_dir)
+                .env("CARGO_BUILD_JOBS", "2");
+            if let Ok(t) = std::env::var("CARGO_TARGET_DIR") {
+                cargo.env("CARGO_TARGET_DIR", t);
+            }
+            let out = cargo
+                .output()
+                .map_err(|e| BuildError::Tool(format!("running cargo build (hyrt): {}", e)))?;
+            if !out.status.success() {
+                return Err(BuildError::Tool(format!(
+                    "cargo build (hyrt) failed:\n{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                )));
+            }
+            rebuilt
+        }
+    };
     Ok(src_lib)
 }
 
-/// The runtime directory: HYB_RUNTIME_DIR override, else the repo-relative
-/// default (the compiler crate sits at <repo>/compiler/crates/hyb).
+/// Push <dir>/<subdir>/release/libhyrt.a for every subdir (cargo's per-triple
+/// layout: target/<triple>/release/... when the crate was built with --target).
+fn push_sibling_libs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            if e.path().is_dir() && e.file_name() != "release" {
+                out.push(e.path().join("release/libhyrt.a"));
+            }
+        }
+    }
+}
+
+/// Does the file at `p` contain an ELF image whose e_machine matches the
+/// arch hyb itself was compiled for? (x86-64 = 62, aarch64 = 183; the u16
+/// e_machine sits little-endian at offset 0x12 of the ELF header.)
+///
+/// `libhyrt.a` is an ar ARCHIVE — its first bytes are `!<arch>`, not ELF,
+/// and Rust's symbol-index member can be hundreds of KiB (the naive "scan
+/// the head of the file" approach misses the first object). So the archive
+/// structure is walked properly: member headers are 60 bytes (name 16, size
+/// 10 at offset 48, magic "`\n"), the symbol table (/) and long-name table
+/// (//) are skipped, and the first DATA member's ELF header decides. Raw
+/// ELF (a .o) is checked directly. Anything else — text, truncated files,
+/// non-ELF first member — is rejected: a stale file or a foreign-arch
+/// archive must never be linked by accident.
+fn lib_arch_matches(p: &std::path::Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    fn machine_matches(m: u16) -> bool {
+        match std::env::consts::ARCH {
+            "x86_64" => m == 62,
+            "aarch64" => m == 183,
+            // Unknown host arch: accept ELF64 but never a mismatched known one.
+            _ => m == 62 || m == 183,
+        }
+    }
+    let Ok(mut f) = std::fs::File::open(p) else {
+        return false;
+    };
+    let mut magic = [0u8; 8];
+    if f.read_exact(&mut magic).is_err() {
+        return false;
+    }
+    if &magic != b"!<arch>\n" {
+        // Not an ar archive — a raw ELF image may start here.
+        let mut hdr = [0u8; 20];
+        if f.seek(SeekFrom::Start(0)).is_err() {
+            return false;
+        }
+        if f.read_exact(&mut hdr).is_err() || &hdr[0..4] != b"\x7fELF" {
+            return false;
+        }
+        return machine_matches(u16::from_le_bytes([hdr[18], hdr[19]]));
+    }
+    loop {
+        let mut m = [0u8; 60];
+        if f.read_exact(&mut m).is_err() || &m[58..60] != b"`\n" {
+            return false;
+        }
+        let name = String::from_utf8_lossy(&m[0..16]).trim_end().to_string();
+        let size: u64 = match std::str::from_utf8(&m[48..58])
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+        {
+            Some(s) => s,
+            None => return false,
+        };
+        if name == "/" || name == "//" || name.starts_with("__.SYMDEF") {
+            // symbol index / long-name table: skip (data 16-byte aligned)
+            let skip = size + (size & 1);
+            if f.seek(SeekFrom::Current(skip as i64)).is_err() {
+                return false;
+            }
+            continue;
+        }
+        // First data member: its object header decides the archive's arch.
+        let mut hdr = [0u8; 20];
+        if f.read_exact(&mut hdr).is_err() || &hdr[0..4] != b"\x7fELF" {
+            return false;
+        }
+        return machine_matches(u16::from_le_bytes([hdr[18], hdr[19]]));
+    }
+}
+
+/// The runtime directory: HYB_RUNTIME_DIR override, then the TARBALL layout
+/// (runtime/ next to the running hyb — a release artifact is self-contained),
+/// else the repo-relative dev default (the compiler crate sits at
+/// <repo>/compiler/crates/hyb).
+///
+/// Order matters (row 16 lesson): the CARGO_MANIFEST_DIR fallback points at
+/// the BUILD machine's repo — for a shipped binary it usually does not exist
+/// (today's users need the install.sh launcher for exactly this reason), and
+/// when it does exist (fleet smokes run on the checkout that built hyb) it
+/// can hold a FOREIGN-ARCH staticlib. Resolving the executable's own
+/// directory first makes the tarball the source of truth for its own binary.
 fn runtime_dir() -> Result<std::path::PathBuf, BuildError> {
     if let Ok(d) = std::env::var("HYB_RUNTIME_DIR") {
         let p = std::path::PathBuf::from(&d);
@@ -540,6 +664,14 @@ fn runtime_dir() -> Result<std::path::PathBuf, BuildError> {
             "HYB_RUNTIME_DIR={} is not a directory",
             d
         )));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let p = dir.join("runtime");
+            if p.is_dir() {
+                return Ok(p);
+            }
+        }
     }
     let manifest = env!("CARGO_MANIFEST_DIR");
     // <repo>/compiler/crates/hyb → <repo>/runtime (three ups).
@@ -593,60 +725,22 @@ fn build_with_bridge(
     std::fs::create_dir_all(ws.join("lib"))
         .map_err(|e| BuildError::Tool(format!("creating workspace {}: {}", ws.display(), e)))?;
 
-    let run = |mut c: Command, what: &str| -> Result<String, BuildError> {
-        let out = c
-            .output()
-            .map_err(|e| BuildError::Tool(format!("running {}: {}", what, e)))?;
-        if out.status.success() {
-            Ok(String::from_utf8_lossy(&out.stdout).to_string())
-        } else {
-            Err(BuildError::Tool(format!(
-                "{} failed:\n{}{}",
-                what,
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            )))
-        }
-    };
-
-    // 1. The hyrt staticlib (skip when fresh — mtime of the newest source).
+    // 1. The hyrt staticlib — via ensure_staticlib (fresh + ARCH-MATCHED).
+    //    (Row 16 lesson: this path used to duplicate the logic naively — it
+    //    cargo-rebuilt NATIVELY on every build (the ws lib never pre-exists)
+    //    and copied whatever cargo produced: a foreign-arch lib under cross
+    //    builds, found via cargo_bin()'s old ~/.cargo fallback even in the
+    //    rustless smoke. The bridge smoke on the arm64 fleet leg caught it.)
     let lib = ws.join("lib/libhyrt.a");
-    let crate_dir = rt.join("rust/hyrt");
-    let lib_fresh = std::fs::metadata(&lib).is_ok()
-        && newest_mtime(&crate_dir)
-            .map(|src_t| {
-                std::fs::metadata(&lib)
-                    .and_then(|l| l.modified())
-                    .ok()
-                    .map(|lib_t| lib_t >= src_t)
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
-    if !lib_fresh {
-        let mut cargo = Command::new(cargo_bin());
-        cargo
-            .args(["build", "--release", "-j2"])
-            .current_dir(&crate_dir)
-            .env("CARGO_BUILD_JOBS", "2");
-        if let Ok(t) = std::env::var("CARGO_TARGET_DIR") {
-            cargo.env("CARGO_TARGET_DIR", t);
-        }
-        run(cargo, "cargo build (hyrt)")?;
-        // Copy the staticlib out of the cargo target dir (respect the env
-        // override; default is the crate-local target/).
-        let src_lib = match std::env::var("CARGO_TARGET_DIR") {
-            Ok(t) => std::path::PathBuf::from(t).join("release/libhyrt.a"),
-            Err(_) => crate_dir.join("target/release/libhyrt.a"),
-        };
-        std::fs::copy(&src_lib, &lib).map_err(|e| {
-            BuildError::Tool(format!(
-                "copying {} → {}: {}",
-                src_lib.display(),
-                lib.display(),
-                e
-            ))
-        })?;
-    }
+    let src_lib = ensure_staticlib(&rt)?;
+    std::fs::copy(&src_lib, &lib).map_err(|e| {
+        BuildError::Tool(format!(
+            "copying {} → {}: {}",
+            src_lib.display(),
+            lib.display(),
+            e
+        ))
+    })?;
 
     // 2. Workspace assembly.
     std::fs::write(ws.join("go.mod"), "module hybrid.program\n\ngo 1.26\n")
@@ -1032,5 +1126,101 @@ fn cmd_bench_overhead() -> ExitCode {
             r.b_nop, budget
         );
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// lib_arch_matches must accept a matching-arch ELF and reject a
+    /// foreign-arch one, garbage, and short files (row 16: the bridge smoke
+    /// caught hyb linking a foreign-arch libhyrt.a — the matcher is the
+    /// regression guard).
+    #[test]
+    fn lib_arch_matches_rejects_foreign_elf() {
+        let dir = std::env::temp_dir().join(format!("hyb-archtest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Minimal 20-byte ELF headers: magic + e_machine (LE u16 at 0x12).
+        let mut x86 = vec![0x7fu8, b'E', b'L', b'F'];
+        x86.extend(std::iter::repeat(0u8).take(14));
+        x86.extend_from_slice(&62u16.to_le_bytes()); // EM_X86_64
+        let mut arm = x86.clone();
+        arm[18] = 183u8; // EM_AARCH64
+        let mut arm_hi = arm.clone();
+        arm_hi[19] = 0u8; // wrong high byte -> machine 183 != 0x00b7? 183 = 0xb7, so hi must be 0; arm above already has 0? no: to_le_bytes set [18]=0xb7,[19]=0 — fix arm_hi to a WRONG machine (999)
+        arm_hi[18] = 0xe7u8;
+        arm_hi[19] = 0x03u8; // e_machine = 999 (unknown arch) — host arch never matches
+        let garbage: Vec<u8> = vec![0xde, 0xad, 0xbe, 0xef, 0, 0, 0, 0, 0, 0];
+        for (name, bytes, want_x86, want_arm) in [
+            ("x86.a", &x86, true, false),
+            ("arm.a", &arm, false, true),
+            ("junk.a", &arm_hi, false, false),
+            ("garbage.a", &garbage, false, false),
+        ] {
+            let p = dir.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            let got = lib_arch_matches(&p);
+            let expected = if std::env::consts::ARCH == "x86_64" { want_x86 } else { want_arm };
+            assert_eq!(got, expected, "case {} (host {})", name, std::env::consts::ARCH);
+        }
+        // ar-archive shape: real libhyrt.a starts with "!<arch>" and carries
+        // a big symbol-index member ("/") first — the walker must skip it and
+        // decide on the first DATA member (row 16 regression).
+        let member = |name: &[u8], size: usize, data: &[u8]| -> Vec<u8> {
+            // ar pads every field with SPACES (a NUL-padded name is not
+            // parseable — trim_end only strips whitespace, matching real ar)
+            let mut h = vec![b' '; 16];
+            h[..name.len()].copy_from_slice(name);
+            h.extend_from_slice(b"0           "); // mtime
+            h.extend_from_slice(b"0     "); // uid
+            h.extend_from_slice(b"0     "); // gid
+            h.extend_from_slice(b"0       "); // mode
+            h.extend_from_slice(format!("{:010}", size).as_bytes());
+            h.extend_from_slice(b"`\n");
+            let mut v = h;
+            v.extend_from_slice(data);
+            if size % 2 == 1 {
+                v.push(b'\n'); // ar pads data to even offsets
+            }
+            v
+        };
+        let mut ar_x86 = b"!<arch>\n".to_vec();
+        ar_x86.extend(member(b"/", 312132, &vec![0u8; 312132])); // symbol index (skipped)
+        ar_x86.extend(member(b"x86.o/", x86.len(), &x86)); // first data member
+        let p = dir.join("ar-x86.a");
+        std::fs::write(&p, &ar_x86).unwrap();
+        assert_eq!(
+            lib_arch_matches(&p),
+            std::env::consts::ARCH == "x86_64",
+            "ar-wrapped x86 member (behind a symbol index)"
+        );
+        // ar archive whose first data member is foreign-arch must be rejected
+        let mut ar_arm = b"!<arch>\n".to_vec();
+        ar_arm.extend(member(b"arm.o/", arm.len(), &arm));
+        let p = dir.join("ar-arm.a");
+        std::fs::write(&p, &ar_arm).unwrap();
+        assert_eq!(
+            lib_arch_matches(&p),
+            std::env::consts::ARCH == "aarch64",
+            "ar-wrapped arm member"
+        );
+        // short file (< 20 bytes) must be rejected, not panic
+        let p = dir.join("short.a");
+        std::fs::write(&p, b"\x7fELF").unwrap();
+        assert!(!lib_arch_matches(&p));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The real shipped staticlib (if present) must match the host arch hyb
+    /// was built for — the tarball-contract sanity check.
+    #[test]
+    fn real_staticlib_matches_host_arch_when_present() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../runtime/rust/hyrt/target/release/libhyrt.a");
+        if !p.exists() {
+            return; // no lib built in this checkout — nothing to assert
+        }
+        assert!(lib_arch_matches(&p), "shipped libhyrt.a arch != host arch");
     }
 }

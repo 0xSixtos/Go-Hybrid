@@ -132,10 +132,14 @@ done
 IFS="$OLDIFS"
 # cross linux/arm64: run the arm64 hyb under qemu (binfmt has NO sysroot —
 # the -L flag is mandatory or even the CLI can't exec), build via GOARCH +
-# the cross CC, execute under qemu. The smoke program (01-hello) imports no
-# rust/ crate, so the bridge asm (call_amd64.s — amd64-ONLY until the
-# aarch64 trampoline port, PLAN row 16) is never linked; bridge programs on
-# arm64 are a documented cut, not a hidden one.
+# the cross CC, execute under qemu. Since the aarch64 bridge port (PLAN row
+# 16: call_arm64.s) the asset is FULL — so the smoke has TWO legs:
+#   (a) bridge-free CLI smoke (01-hello), and
+#   (b) a BRIDGE smoke (05-json-imports rust/serde_json): the emitted cgo
+#       build links the tarball's prebuilt ARM64 libhyrt.a, assembles
+#       call_arm64.s (GOARCH=arm64 selects it), and the run drives real
+#       trampoline crossings (fast + pooled-deep paths) under qemu.
+#       A linux/arm64 asset whose bridge smoke fails must not ship.
 CROSS_GO_ENV=""
 if [ "$PKG_OS/$ARCH" = "linux/arm64" ] && [ -n "$RUST_TARGET" ]; then
     CROSS_GO_ENV="GOARCH=arm64 CGO_ENABLED=1 CC=$CROSS_CC"
@@ -159,6 +163,25 @@ else
     echo "SMOKE FAILED ($PKG_OS/$ARCH)" >&2
     cat "$SMOKE/out.txt" 2>/dev/null >&2
     exit 1
+fi
+
+# --- 5b. bridge smoke (linux/arm64 FULL asset — row 16) ---
+# Same tarball, same rustless PATH: a rust/serde_json-importing program
+# must build (cgo links the prebuilt arm64 staticlib; call_arm64.s assembles)
+# and RUN correctly under qemu. Skipped on every other platform.
+if [ "$PKG_OS/$ARCH" = "linux/arm64" ] && [ -n "$RUST_TARGET" ]; then
+    echo "==> bridge smoke from the tarball (serde_json crossing under qemu)"
+    if ( cd "$SMOKE" && env PATH="$RUSTLESS_PATH" $CROSS_GO_ENV $QEMU_RUNNER \
+            "$SMOKE/hybrid-${VER}/$HYB_OUT_NAME" build \
+            "$REPO_ROOT/examples/05-json-transform/program.hy" -o "$SMOKE/json" ) \
+        && $QEMU_RUNNER "$SMOKE/json" > "$SMOKE/json.txt" 2>&1 \
+        && grep -q '"ada"' "$SMOKE/json.txt"; then
+        echo "    bridge smoke PASS (arm64 trampolines exercised): $(tr '\n' ' ' < "$SMOKE/json.txt" | tr -s ' ')"
+    else
+        echo "BRIDGE SMOKE FAILED (linux/arm64 — the asset is FULL only if this passes)" >&2
+        cat "$SMOKE/json.txt" 2>/dev/null >&2
+        exit 1
+    fi
 fi
 rm -rf "$SMOKE"
 

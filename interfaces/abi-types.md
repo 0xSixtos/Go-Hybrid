@@ -94,5 +94,14 @@ by type rules: the Rust signature sees `&[T]` with no `'static`).
   Go-syscall-like state to release the P? measured next).
 - Pin-amortization protocol for loops (pin once, many calls) needs a spelled-out
   generator pattern + test.
-- arm64: LR-clobber risk flagged in rust2go research; port when the amd64 path
-  is locked.
+- arm64: PORTED (PLAN row 16, 2026-10-14). call_arm64.s mirrors the amd64
+  discipline with three arch-specific simplifications (g is R28 — no TLS
+  dance; BL pushes no return address — no SP surgery on the fast path; the
+  deep path stashes the old SP in a scratch slot on the pooled stack — no
+  callee-saved register borrowed). The amd64 LR-clobber concern does not
+  apply: the assembler's own prologue/epilogue (declared frame > 0) saves and
+  restores R30 around the BL. Offsets: g.stackguard0 = 16 extracted from an
+  arm64-built binary (tools/extract_offsets.py) and cross-checked against the
+  toolchain's own arm64 stacksplit (2*PtrSize). Fleet regression: the full
+  5-package Go suite runs under qemu in the release-matrix arm64 leg, and the
+  tarball smoke now includes a serde_json bridge crossing.
