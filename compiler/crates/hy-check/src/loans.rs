@@ -24,7 +24,7 @@ use crate::model::{
 use crate::shape::receiver_type_name;
 use crate::walk::{self, CallRef};
 use hy_diag::{Diagnostic, Span};
-use hy_syntax::{AssignOp, Expr, LocalDecl, Place, PlaceKind};
+use hy_syntax::{AssignOp, Expr, LocalDecl, LocalKind, Place, PlaceKind};
 
 // ---------------------------------------------------------------------------
 // Call resolution + A2/A7 processing
@@ -281,8 +281,13 @@ impl<'a> Checker<'a> {
             }
         }
 
-        // bindings
-        let immutable = l.kind.is_immutable();
+        // bindings. T22 (SPEC-LANGUAGE.md): only `const` is DEEPLY
+        // immutable and therefore class-4 sendable; `let` is SHALLOW
+        // (interior mutation through an alias is still possible), so a
+        // `let`-bound reference value must NOT receive the class-4
+        // immutability shortcut in sendability.rs. Primitives, strings,
+        // atomics and channels stay sendable via `is_sendable_by_type`.
+        let immutable = matches!(l.kind, LocalKind::Const);
         if l.values.is_empty() {
             // `var hits atomic.int64` / `var got []int` — shape from the
             // ascription (there is no initializer to infer from).
