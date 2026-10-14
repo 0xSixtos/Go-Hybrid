@@ -406,3 +406,21 @@ Stage Summary:
 - Release assets and Docker image now carry the Batch V fixes; the user-facing generate bug is out of the shipped artifacts
 - The bounty program processed its first submission end to end within the hour: verify locally, approve CI, kind precise triage, paths forward — the process in BOUNTY.md working as written
 - No open plan rows; standing work is community replies + bounty triage only
+
+---
+Task ID: 26 (the bounty pays for the first time: #10 + #11 merged, #8 triaged)
+Agent: Super Z (main)
+Task: Triage the three bounty PRs that arrived within hours of the announcement; merge the valid ones with credit; keep the discipline.
+
+Work Log:
+- PR #10 (ocakciomursel-pixel, issue #9): the E3004 registry entry documents `jobs <- move s.data` as a reject but the checker enforced only the top-level ident form — a GC field move or a move nested in a composite literal crossed a boundary unproven. Contributor reported AND fixed it (unwrap_parens + collect_move_operands, O5.4 move-form check, 2 regression tests). Verified in a worktree: cargo 216/0, corpus 20/20, differential FULL (one unexplained transient disagreement, then clean x4 + a fully captured clean run), examples 10/10
+- PR #11 (muhammet424342, issue #7): the E3005 fix-it still taught the retired bare `managed { ... }` form; now names managed("reason", "category") with the closed category list (sendability note + diagnostics.json fixit + regression test). Verified: cargo 216/0, corpus, differential, examples, gate all green
+- Both PRs' Actions runs approved through the action_required gate and green; merged #11 then #10 with credit in the merge messages
+- Merged main re-verified: cargo 222/0 (+5 community tests), one merge-seam warning (unused import in freeze.rs) fixed, clippy 0, corpus 20/20, differential FULL, examples 10/10, gate PASS
+- PR #8 (tim777z): triaged honestly — aims at the documented D2 open point (closure captures at task spawn) but the shape is not expressible in today's grammar and the file fails parsing; the expressible loan-escape is already corpus 06; no payout, two concrete paths forward posted; both CI runs approved so the contributor sees real results
+- Hall of Fame updated (both landings), PLAN Decision Log entry written, STATUS updated, thank-you comments posted on issues #7 and #9
+
+Stage Summary:
+- The bounty program works end to end on real traffic: announcement to merged soundness fix in one session, with the verify-first discipline held throughout
+- The checker is strictly stronger now: the documented-but-unenforced E3004 case is enforced, and no diagnostic teaches retired syntax
+- Standing work remains exactly: community replies as they arrive + bounty triage

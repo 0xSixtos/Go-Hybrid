@@ -117,6 +117,8 @@ AI-assisted hunting is welcome, with honest rules that keep the queue alive:
 
 | Who | What | When |
 |-----|------|------|
+| [ocakciomursel-pixel](https://github.com/ocakciomursel-pixel) | **First soundness landing** (PR #10, issue #9): reported and fixed the unenforced E3004 case — `move s.data` and nested `move` forms at spawn/send boundaries slipped through unproven; two regression tests pin the registry's own example | 2026-10 |
+| [muhammet424342](https://github.com/muhammet424342) | First wording landing (PR #11, issue #7): the HYB-E3005 fix-it taught the retired bare `managed { ... }` form; it now names the real `managed("reason", "category")` hatch with the closed category list | 2026-10 |
 | [ssmurfgg04-gif](https://github.com/ssmurfgg04-gif) | First community review: four substantive asks that shaped [GUARANTEES.md](GUARANTEES.md), the one-command install, and the `--deny-managed` hatch | 2026-10 |
 
 Valid bug reports and merged improvements land here. Be next.

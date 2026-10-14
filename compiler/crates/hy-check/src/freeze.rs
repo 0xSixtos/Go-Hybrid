@@ -6,7 +6,7 @@
 //! read form, 20 the alias-write form), is HYB-E3003 with tier0_rule A1b
 //! (moves) or A7 (consuming APIs, via `.with_rule("A7")`).
 
-use crate::model::{move_operand_ident, Checker, FnState, MoveInfo, MoveKind};
+use crate::model::{Checker, FnState, MoveInfo, MoveKind};
 use crate::walk::Use;
 use hy_diag::Diagnostic;
 use hy_syntax::Expr;
