@@ -83,14 +83,52 @@ fn check_one_closure(
 /// moves inside the closure mark the closure-local view (a closure can run
 /// more than once — the enclosing function's env is untouched).
 fn check_body_boundaries(ck: &mut Checker<'_>, st: &mut FnState, block: &Block, managed: bool) {
+    let is_root = st.scopes.is_empty();
+    if is_root {
+        st.scope_push();
+    }
     for stmt in &block.stmts {
         check_stmt_boundaries(ck, st, stmt, managed);
+    }
+    if is_root {
+        st.scope_pop();
     }
 }
 
 fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, managed: bool) {
+    // Check uses on every statement in the closure BEFORE any new defines or
+    // move transfers on this statement take effect (#29).
+    let mut uses = Vec::new();
+    crate::walk::own_uses(stmt, &mut uses);
+    if !managed {
+        for u in &uses {
+            if u.via_move && !st.scopes.iter().any(|s| s.contains_key(&u.name)) {
+                if let Some(b) = st.env.get_mut(&u.name) {
+                    if b.moved.is_none()
+                        && !b.shape.is_sendable_by_type()
+                        && !b.immutable
+                        && !b.managed_taint
+                    {
+                        b.moved = Some(crate::model::MoveInfo {
+                            span: u.span,
+                            kind: crate::model::MoveKind::Moved,
+                            desc: format!(
+                                "closure capture of `{}` (the enclosing scope retains `{}`)",
+                                u.name, u.name
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    ck.check_uses(st, &uses);
+
     match stmt {
         Stmt::Local(l) => {
+            for v in &l.values {
+                ck.mark_move_in_value(st, v, format!("the move-define `{}`", v.render()));
+            }
             // T22 (issue #12 parity with the flat pass): only `const` is
             // DEEPLY immutable; `let` is a SHALLOW immutable binding, so it
             // must NOT take the class-4 sendability shortcut.
@@ -273,6 +311,16 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
             check_body_boundaries(ck, st, block, managed);
             st.scope_pop();
         }
+        Stmt::Assign { values, .. } => {
+            for v in values {
+                ck.mark_move_in_value(st, v, format!("the move-assign `{}`", v.render()));
+            }
+        }
+        Stmt::Return { values, .. } => {
+            for v in values {
+                ck.mark_move_in_value(st, v, format!("the move-return `{}`", v.render()));
+            }
+        }
         _ => {}
     }
 }
@@ -372,6 +420,7 @@ fn collect_stmt<'a>(stmt: &'a Stmt, out: &mut Vec<(&'a [hy_syntax::Param], &'a B
                     SelectArmKind::Recv { chan, .. } => collect_expr(chan, out),
                     SelectArmKind::Default => {}
                 }
+                collect_block(&arm.body, out);
             }
         }
     }
