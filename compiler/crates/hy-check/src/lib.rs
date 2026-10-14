@@ -275,7 +275,13 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         *span,
                         "managed block has no category — name the invariant being bypassed (HYB-E0003)",
                     )
-
+                    .with_notes(vec![
+                        "the category tells reviewers WHICH invariant the block bypasses and feeds `--report-managed`; without it the hatch cannot be audited".to_string(),
+                        format!(
+                            "fix: pass a category as the second argument, e.g. `managed(\"why this is safe\", \"mutex\") {{ ... }}`; valid categories: {}",
+                            MANAGED_CATEGORIES.join(", ")
+                        ),
+                    ]),
                 );
             } else if !MANAGED_CATEGORIES.contains(&category.as_str()) {
                 ck.diags.push(
@@ -283,7 +289,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         "HYB-E0004",
                         ck.path.clone(),
                         *span,
-                        format!("unknown managed category `\"{}\"` (HYB-E0004)", category),
+                        format!("unknown managed category `\"{}\"` — use one of the listed categories, or `\"other\"` with the specifics in the reason (HYB-E0004)", category),
                     )
                     .with_notes(vec![
                         format!(
