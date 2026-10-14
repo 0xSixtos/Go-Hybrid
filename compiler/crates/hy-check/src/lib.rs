@@ -183,12 +183,23 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     // environment seed: receiver + params
     let mut st = FnState::default();
     if let Some(r) = &f.receiver {
-        let shape = ck.shape_of_type(&r.ty);
+        let base_shape = ck.shape_of_type(&r.ty);
+        let (shape, ty) = if r.is_pointer {
+            (
+                TypeShape::Pointer(Box::new(base_shape)),
+                Some(hy_syntax::TypeExpr::Pointer {
+                    to: Box::new(r.ty.clone()),
+                    span: r.ty.span(),
+                }),
+            )
+        } else {
+            (base_shape, Some(r.ty.clone()))
+        };
         st.env.insert(
             r.name.clone(),
             Binding {
                 shape,
-                ty: Some(r.ty.clone()),
+                ty,
                 immutable: false,
                 managed_taint: false,
                 moved: None,
@@ -1607,6 +1618,147 @@ mod tests {
              }",
         );
         assert_eq!(r_chan.verdict, Verdict::Accept, "{:?}", r_chan.diagnostics);
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-value unpack (`n, m = make_pair()` / `n, m := make_pair()`),
+    // parallel assignment aliases (`m2, x = m, 1`), and pointer-receiver
+    // method aliases (`fn (s *state) run() { p := s; ... }`).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn multival_assign_does_not_overwrite_map_with_first_result_shape_e3001() {
+        // Regression: `n, m = make_pair()` had `values.len() == 1` and
+        // `targets.len() == 2`, and `process_assign` assigned
+        // `shape_of_expr(&values[0])` (`f.results.first()` = Primitive) to
+        // EVERY target, turning `m` (`map[string]int`) into a Primitive and
+        // accepting `task worker(m, done)` with 0 diagnostics.
+        let r = check(
+            "fn make_pair() (int, map[string]int) {\n\
+               return 1, map[string]int{\"k\": 0}\n\
+             }\n\
+             fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               var n int\n\
+               var m map[string]int\n\
+               n, m = make_pair()\n\
+               done := make(chan bool, 1)\n\
+               task worker(m, done)\n\
+               fmt.println(n)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1c"));
+        assert_eq!(r.diagnostics[0].code, "HYB-E3001");
+        assert!(r.diagnostics[0].message.contains("map[string]int"));
+    }
+
+    #[test]
+    fn multival_define_resolves_declared_fn_results() {
+        // `n, m := make_pair()` resolves each binding from its corresponding
+        // declared function result: `n` (int) is sendable (Accept), while
+        // `m` (map[string]int) is rejected under A1c (`HYB-E3001`).
+        let r_reject = check(
+            "fn make_pair() (int, map[string]int) {\n\
+               return 1, map[string]int{\"k\": 0}\n\
+             }\n\
+             fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               n, m := make_pair()\n\
+               fmt.println(n)\n\
+               task worker(m)\n\
+             }",
+        );
+        assert_eq!(
+            r_reject.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_reject.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_reject).as_deref(), Some("A1c"));
+        assert_eq!(r_reject.diagnostics[0].code, "HYB-E3001");
+
+        let r_accept = check(
+            "fn make_pair() (int, string) {\n\
+               return 1, \"ok\"\n\
+             }\n\
+             fn worker(n int, s string) { fmt.println(n, s) }\n\
+             fn main() {\n\
+               n, s := make_pair()\n\
+               task worker(n, s)\n\
+             }",
+        );
+        assert_eq!(
+            r_accept.verdict,
+            Verdict::Accept,
+            "{:?}",
+            r_accept.diagnostics
+        );
+    }
+
+    #[test]
+    fn parallel_assign_records_reference_alias_for_freeze_e3003() {
+        // Regression: `m2, x = m, 1` had `values.len() == 2` and skipped the
+        // `values.len() == 1` guard in `process_assign`, so `m2 -> m` was
+        // never recorded in `st.aliases` and `m2["k"] = 2` after `move m`
+        // passed with 0 diagnostics.
+        let r = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               var m2 map[string]int\n\
+               var x int\n\
+               m2, x = m, 1\n\
+               done := make(chan bool, 1)\n\
+               task worker(move m, done)\n\
+               m2[\"k\"] = 2\n\
+               fmt.println(x)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        assert_eq!(r.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn pointer_receiver_method_preserves_pointer_shape_and_freezes_alias_e3003() {
+        // Regression: `parse_receiver` strips `*` into `r.is_pointer = true`
+        // and stores the base type in `r.ty`, but `check_fn` ignored
+        // `r.is_pointer` and gave `s` `TypeShape::Struct` instead of
+        // `TypeShape::Pointer(Struct)`. As a result, `p := s` inside
+        // `fn (s *state) run(...)` was not recorded as a reference alias and
+        // `p.m["k"] = 2` after `task worker(move s, done)` passed with 0
+        // diagnostics.
+        let r = check(
+            "struct state { m map[string]int }\n\
+             fn worker(s *state, done chan<- bool) {\n\
+               s.m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn (s *state) run(done chan<- bool) {\n\
+               p := s\n\
+               task worker(move s, done)\n\
+               p.m[\"k\"] = 2\n\
+             }\n\
+             fn main() {\n\
+               st := state{m: map[string]int{\"k\": 0}}\n\
+               done := make(chan bool, 1)\n\
+               st.run(done)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        // The E3004 (receiver `s` is not exclusively owned, so `move s` is
+        // invalid outright — the non-owned-move guard) now fires at the move
+        // site BEFORE the alias story can; the alias freeze (E3003) remains
+        // the diagnosis for the owned-binding variant of this shape.
+        assert_eq!(r.diagnostics[0].code, "HYB-E3004");
     }
 }
 

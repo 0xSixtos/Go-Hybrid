@@ -113,13 +113,19 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
                     ck.define_binding(st, name, shape, ty, immutable, managed);
                 }
             } else {
-                // multi-name define from one value (`v, ok := m[k]`)
-                let shapes = match l.values.first() {
-                    Some(v) => ck.multi_value_shapes(st, v, l.names.len()),
-                    None => vec![TypeShape::Unknown; l.names.len()],
+                // multi-name define from one value (`v, ok := m[k]`, `a, b := f()`)
+                let (shapes, tys) = match l.values.first() {
+                    Some(v) => (
+                        ck.multi_value_shapes(st, v, l.names.len()),
+                        ck.multi_value_tys(st, v, l.names.len()),
+                    ),
+                    None => (
+                        vec![TypeShape::Unknown; l.names.len()],
+                        vec![None; l.names.len()],
+                    ),
                 };
-                for (name, shape) in l.names.iter().zip(shapes) {
-                    ck.define_binding(st, name, shape, None, immutable, managed);
+                for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
+                    ck.define_binding(st, name, shape, ty, immutable, managed);
                 }
             }
         }

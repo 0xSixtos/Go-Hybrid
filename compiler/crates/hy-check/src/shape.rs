@@ -325,31 +325,101 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Shapes for a multi-name define from one value (`v, ok := m[k]`).
+    /// Shapes for a multi-name define/assign from one value (`v, ok := m[k]`,
+    /// `v, ok := <-ch`, `a, b := f()`, `a, b = f()?`).
     pub(crate) fn multi_value_shapes(
         &self,
         st: &FnState,
         value: &Expr,
         n_names: usize,
     ) -> Vec<TypeShape> {
+        let v = crate::model::unwrap_parens(value);
         if n_names == 2 {
-            if let Expr::Index { base, .. } = value {
-                if let TypeShape::Map(_, v) = self.shape_of_expr(st, base) {
-                    return vec![*v, TypeShape::Primitive]; // v, ok := m[k]
+            if let Expr::Index { base, .. } = v {
+                if let TypeShape::Map(_, val) = self.shape_of_expr(st, base) {
+                    return vec![*val, TypeShape::Primitive]; // v, ok := m[k]
                 }
             }
             // `v, ok := <-ch` — the value is the channel's element; `ok` is
             // the receive-ok flag (a bool)
-            if let Expr::Receive { chan, .. } = value {
+            if let Expr::Receive { chan, .. } = v {
                 let elem = match self.shape_of_expr(st, chan) {
                     TypeShape::Chan(e) => *e,
                     _ => TypeShape::Unknown,
                 };
                 return vec![elem, TypeShape::Primitive];
             }
-            // `a, b := f()` and other multi-value forms: permissive
+        }
+        let (call_expr, is_try) = match v {
+            Expr::Try { operand, .. } => (crate::model::unwrap_parens(operand), true),
+            other => (other, false),
+        };
+        if let Expr::Call { callee, .. } = call_expr {
+            if let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) {
+                if self.lookup_binding(st, name).is_none() {
+                    if let Some(f) = self.fns.get(name.as_str()) {
+                        let avail = if is_try {
+                            f.results.len().saturating_sub(1)
+                        } else {
+                            f.results.len()
+                        };
+                        if avail == n_names {
+                            return f
+                                .results
+                                .iter()
+                                .take(n_names)
+                                .map(|r| self.shape_of_type(&r.ty))
+                                .collect();
+                        }
+                    }
+                }
+            }
         }
         vec![TypeShape::Unknown; n_names]
+    }
+
+    /// As-written source types for a multi-name define/assign from one value
+    /// (`a, b := f()`, `a, b = f()?`, `v, ok := m[k]`), when directly available.
+    pub(crate) fn multi_value_tys(
+        &self,
+        st: &FnState,
+        value: &Expr,
+        n_names: usize,
+    ) -> Vec<Option<TypeExpr>> {
+        let v = crate::model::unwrap_parens(value);
+        if n_names == 2 {
+            if let Expr::Index { base, .. } = v {
+                if let Some(TypeExpr::Map { value: val_ty, .. }) = self.ty_of_expr(st, base) {
+                    return vec![Some(*val_ty), None];
+                }
+            }
+        }
+        let (call_expr, is_try) = match v {
+            Expr::Try { operand, .. } => (crate::model::unwrap_parens(operand), true),
+            other => (other, false),
+        };
+        if let Expr::Call { callee, .. } = call_expr {
+            if let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) {
+                if self.lookup_binding(st, name).is_none() {
+                    if let Some(f) = self.fns.get(name.as_str()) {
+                        let avail = if is_try {
+                            f.results.len().saturating_sub(1)
+                        } else {
+                            f.results.len()
+                        };
+                        if avail == n_names {
+                            return f
+                                .results
+                                .iter()
+                                .take(n_names)
+                                .map(|r| Some(r.ty.clone()))
+                                .collect();
+                        }
+                    }
+                }
+            }
+        }
+        vec![None; n_names]
     }
 }
 

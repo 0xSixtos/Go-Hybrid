@@ -304,8 +304,13 @@ impl<'a> Checker<'a> {
         if l.values.len() == 1 && l.names.len() > 1 {
             // multi-value define from one expression
             let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
-            for (name, shape) in l.names.iter().zip(shapes) {
-                self.define_binding(st, name, shape, None, immutable, managed);
+            let tys = self.multi_value_tys(st, &l.values[0], l.names.len());
+            for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
+                let (shape, ty) = match (&l.ty, shape) {
+                    (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
+                    (_, s) => (s, ty.or_else(|| l.ty.clone())),
+                };
+                self.define_binding(st, name, shape, ty, immutable, managed);
             }
         } else {
             for (name, value) in l.names.iter().zip(l.values.iter()) {
@@ -467,9 +472,8 @@ impl<'a> Checker<'a> {
         }
 
         // A6: a borrow stored into a struct field
-        if values.len() == 1 {
-            let v = &values[0];
-            for t in targets {
+        if values.len() == 1 && targets.len() == 1 || values.len() == targets.len() {
+            for (t, v) in targets.iter().zip(values.iter()) {
                 if matches!(t.kind, PlaceKind::Field { .. }) {
                     let is_borrow = as_addr_of(v).is_some()
                         || matches!(self.shape_of_expr(st, v), TypeShape::BorrowHandle(_));
@@ -511,34 +515,78 @@ impl<'a> Checker<'a> {
             }
         }
 
-        // whole-binding rebind: `rows = append(rows, ...)` re-owns the value
-        if op == AssignOp::Assign && values.len() == 1 {
-            let shape = self.shape_of_expr(st, &values[0]);
-            let ty = self.ty_of_expr(st, &values[0]);
-            let rhs_non_owned = match &values[0] {
-                Expr::Ident { name: src, .. } => self
-                    .lookup_binding(st, src)
-                    .and_then(|b| b.non_owned_origin.clone()),
-                other => move_operand_ident(other)
-                    .and_then(|src| self.lookup_binding(st, &src))
-                    .and_then(|b| b.non_owned_origin.clone()),
-            };
-            for t in targets {
-                if let PlaceKind::Ident(name) = &t.kind {
-                    if let Some(b) = st.env_lookup_mut(name) {
-                        b.shape = shape.clone();
-                        b.ty = ty.clone();
-                        b.moved = None; // a fresh value re-owns the binding
-                        b.non_owned_origin = rhs_non_owned.clone();
-                    }
-                    // rebind may create a fresh alias
-                    st.aliases.remove(name);
-                    if let Expr::Ident { name: src, .. } = &values[0] {
-                        if let Some(b) = self.lookup_binding(st, src) {
-                            if b.shape.is_reference_alias() {
-                                st.aliases.insert(name.clone(), src.clone());
+        // whole-binding rebind: `rows = append(rows, ...)`, parallel
+        // `m2, x = m, 1`, and multi-value unpack `n, m = make_pair()`.
+        if op == AssignOp::Assign {
+            if values.len() == targets.len() {
+                // Evaluate all RHS shapes, types, and alias sources before
+                // mutating target bindings so parallel swaps/rebinds read the
+                // pre-assignment environment.
+                type RhsInfo = (TypeShape, Option<hy_syntax::TypeExpr>, Option<String>, Option<String>);
+                let rhs_info: Vec<RhsInfo> =
+                    values
+                        .iter()
+                        .map(|v| {
+                            let shape = self.shape_of_expr(st, v);
+                            let ty = self.ty_of_expr(st, v);
+                            let non_owned = match crate::model::unwrap_parens(v) {
+                                Expr::Ident { name: src, .. } => self
+                                    .lookup_binding(st, src)
+                                    .and_then(|b| b.non_owned_origin.clone()),
+                                other => move_operand_ident(other)
+                                    .and_then(|src| self.lookup_binding(st, &src))
+                                    .and_then(|b| b.non_owned_origin.clone()),
+                            };
+                            let alias_src = if move_operand_ident(v).is_some() {
+                                None
+                            } else if let Expr::Ident { name: src, .. } =
+                                crate::model::unwrap_parens(v)
+                            {
+                                self.lookup_binding(st, src)
+                                    .filter(|b| b.shape.is_reference_alias())
+                                    .map(|_| src.clone())
+                            } else {
+                                None
+                            };
+                            (shape, ty, alias_src, non_owned)
+                        })
+                        .collect();
+
+                for (t, (shape, ty, alias_src, non_owned)) in targets.iter().zip(rhs_info) {
+                    if let PlaceKind::Ident(name) = &t.kind {
+                        if let Some(b) = st.env_lookup_mut(name) {
+                            if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
+                                b.shape = shape;
+                            }
+                            if ty.is_some() || b.ty.is_none() {
+                                b.ty = ty;
+                            }
+                            b.moved = None; // a fresh value re-owns the binding
+                            b.non_owned_origin = non_owned;
+                        }
+                        st.aliases.remove(name);
+                        if let Some(src) = alias_src {
+                            if src != *name {
+                                st.aliases.insert(name.clone(), src);
                             }
                         }
+                    }
+                }
+            } else if values.len() == 1 && targets.len() > 1 {
+                let shapes = self.multi_value_shapes(st, &values[0], targets.len());
+                let tys = self.multi_value_tys(st, &values[0], targets.len());
+                for ((t, shape), ty) in targets.iter().zip(shapes).zip(tys) {
+                    if let PlaceKind::Ident(name) = &t.kind {
+                        if let Some(b) = st.env_lookup_mut(name) {
+                            if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
+                                b.shape = shape;
+                            }
+                            if ty.is_some() || b.ty.is_none() {
+                                b.ty = ty;
+                            }
+                            b.moved = None;
+                        }
+                        st.aliases.remove(name);
                     }
                 }
             }
