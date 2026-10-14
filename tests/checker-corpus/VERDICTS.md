@@ -66,16 +66,18 @@ renumbered).
 | 21 | 21-let-shared-map-reject | REJECT | A1c | `let`-bound map crossing a spawn site — T22 says `let` is SHALLOW, so it is a named mutable GC value, not class-4 immutable (regression for issue #12; corpus growth, added after the fix) |
 | 22 | 22-a1c-mapslot-loan-at-spawn | REJECT | A1c | a LIVE map-slot loan (`&e.services[k]`, O3 form 3/O8) crosses a `task` spawn site as-is — A1c's safe-by-type test runs on the loan's pointer type exactly as it would for a plain struct borrow; the loan's special provenance grants no exemption |
 | 23 | 23-a1c-mapslot-copy-at-spawn | ACCEPT | — | 22's legal twin: the map-slot field is read into a local BEFORE the spawn (the loan's last use), so a copy (A4/O9) crosses the spawn site instead of the live loan — pins that A1c tracks the LOAN crossing, not the map-slot's mere upstream existence |
+| 24 | 24-shadow-scope-map-reject | REJECT | A1c | an inner-block `m := 1` must SHADOW the outer map, never overwrite its binding — the flat env let the inner define rewrite the outer shape and the spawn passed with zero diagnostics while `go -race` reported two write/write DATA RACEs (issue #14; the env is now scope-aware) |
 
-**Distribution: ACCEPT 8 · ACCEPT-MANAGED 2 · REJECT 13 — 23 programs.**
+**Distribution: ACCEPT 8 · ACCEPT-MANAGED 2 · REJECT 14 — 24 programs.**
 (19 and 20 were added by the lead during integration on 2026-10-12 — still
-BEFORE any checker existed; see the pre-registration statement. 21, 22 and
-23 are post-checker corpus GROWTH from the bounty track, added 2026-10-14:
-21 fixes issue #12 (PR #13), 22 and 23 close bounty issue #6 (PR #15,
-renumbered from its 21/22 spelling during the merge seam) — each verdict
-was still hand-derived from the A1–A8 strict readings first, per their own
-headers, and only then reproduced against the checker per BOUNTY.md's
-"pay only after reproduction".)
+BEFORE any checker existed; see the pre-registration statement. 21, 22, 23
+and 24 are post-checker corpus GROWTH from the bounty track, added
+2026-10-14: 21 fixes issue #12 (PR #13), 22 and 23 close bounty issue #6
+(PR #15, renumbered from its 21/22 spelling during the merge seam), and 24
+fixes issue #14 (the lead's fix; reported by LubuSeb with a negative
+control) — each verdict was still hand-derived from the A1–A8 strict
+readings first, per their own headers, and only then reproduced against
+the checker per BOUNTY.md's "pay only after reproduction".)
 
 ## Reading-distinguishing power (what Spike 6's corpus could not do)
 

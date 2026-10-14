@@ -395,8 +395,8 @@ impl<'a> Checker<'a> {
         managed: bool,
     ) {
         st.aliases.remove(name);
-        st.env.insert(
-            name.to_string(),
+        st.env_define(
+            name,
             Binding {
                 shape,
                 ty,
@@ -464,7 +464,7 @@ impl<'a> Checker<'a> {
             let ty = self.ty_of_expr(st, &values[0]);
             for t in targets {
                 if let PlaceKind::Ident(name) = &t.kind {
-                    if let Some(b) = st.env.get_mut(name) {
+                    if let Some(b) = st.env_lookup_mut(name) {
                         b.shape = shape.clone();
                         b.ty = ty.clone();
                         b.moved = None; // a fresh value re-owns the binding

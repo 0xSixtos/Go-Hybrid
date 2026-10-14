@@ -190,13 +190,64 @@ pub(crate) struct Loan {
 /// Per-function mutable state (environment, aliases, live loans).
 #[derive(Debug, Default)]
 pub(crate) struct FnState {
+    /// The function's BASE scope: receiver, params, and top-level defines.
     pub env: HashMap<String, Binding>,
+    /// Block scopes, innermost last (issue #14): a define inside a nested
+    /// block lands in the top layer and DIES at block exit, so an inner
+    /// `m := 1` can no longer overwrite the outer `m`'s binding and launder
+    /// a shared map past a spawn site. Lookup resolves innermost-first.
+    pub scopes: Vec<HashMap<String, Binding>>,
     /// alias name -> target binding name (binding-level only — enough for the
     /// 20-program corpus; documented limitation).
     pub aliases: HashMap<String, String>,
     pub loans: Vec<Loan>,
     /// name -> last statement index that references it (Pass A result).
     pub last_use: HashMap<String, usize>,
+}
+
+impl FnState {
+    /// Enter a block scope (walk.rs's Push events).
+    pub(crate) fn scope_push(&mut self) {
+        self.scopes.push(HashMap::new());
+    }
+
+    /// Exit the innermost block scope (walk.rs's Pop events).
+    pub(crate) fn scope_pop(&mut self) {
+        self.scopes.pop();
+    }
+
+    /// Innermost-first binding lookup (scopes, then the base env).
+    pub(crate) fn env_lookup(&self, name: &str) -> Option<&Binding> {
+        for layer in self.scopes.iter().rev() {
+            if let Some(b) = layer.get(name) {
+                return Some(b);
+            }
+        }
+        self.env.get(name)
+    }
+
+    /// Mutable lookup, same resolution order (moves, rebinds, freezes must
+    /// hit the binding a use at this depth actually refers to).
+    pub(crate) fn env_lookup_mut(&mut self, name: &str) -> Option<&mut Binding> {
+        for layer in self.scopes.iter_mut().rev() {
+            if layer.contains_key(name) {
+                return layer.get_mut(name);
+            }
+        }
+        self.env.get_mut(name)
+    }
+
+    /// Define a binding at the CURRENT depth: the top block scope when one
+    /// is open, else the base env. A shadowed outer entry stays intact in
+    /// its own layer — the fix for issue #14 (a flat env let the inner
+    /// define overwrite the outer map's shape and launder it past a spawn).
+    pub(crate) fn env_define(&mut self, name: &str, b: Binding) {
+        if let Some(top) = self.scopes.last_mut() {
+            top.insert(name.to_string(), b);
+        } else {
+            self.env.insert(name.to_string(), b);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -254,9 +305,10 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Binding lookup: locals first, then file-level consts.
+    /// Binding lookup: locals first (innermost scope wins), then file-level
+    /// consts.
     pub(crate) fn lookup_binding<'b>(&'b self, st: &'b FnState, name: &str) -> Option<&'b Binding> {
-        st.env.get(name).or_else(|| self.consts.get(name))
+        st.env_lookup(name).or_else(|| self.consts.get(name))
     }
 
     /// The type string for diagnostics: the source type when we have it,

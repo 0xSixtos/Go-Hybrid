@@ -217,6 +217,18 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     for (stmt, idx) in &flat.stmts {
         let stmt: &Stmt = stmt;
         let idx = *idx;
+        // Issue #14: apply the statement's scope events BEFORE processing.
+        // A Push opens the block scope its defines live in; a Pop closes the
+        // scope of a construct that ended at the previous statement, which
+        // restores the outer binding (an inner `m := 1` can no longer
+        // overwrite the outer map's shape and launder it past a spawn).
+        let (push, pop) = flat.events.get(&idx).copied().unwrap_or((false, false));
+        if pop {
+            st.scope_pop();
+        }
+        if push {
+            st.scope_push();
+        }
         let managed = flat.in_managed(idx);
         if let Stmt::Managed {
             reason,
@@ -410,6 +422,12 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             _ => {}
         }
     }
+
+    // All remaining block scopes die at the end of the function (issue #14):
+    // the closure pass's capture view is the COMPLETED base env (A5) — a
+    // capture of a block-local now resolves to nothing and fails closed
+    // (HYB-E3005) at the boundary, exactly like any unresolvable name.
+    st.scopes.clear();
 
     // Closure-boundary pass (closures.rs): task/send/select-send STATEMENTS
     // inside closure bodies are concurrency boundaries in the emitted Go —
@@ -1244,6 +1262,119 @@ mod tests {
         );
         assert_eq!(r2.verdict, Verdict::Reject, "{:?}", r2.diagnostics);
         assert!(r2.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Scope-aware bindings (issue #14, LubuSeb's soundness report): an
+    // inner-block define must shadow, never overwrite. The flat env let
+    // `m := 1` inside an `if` rewrite the outer map's binding, and the
+    // later `task worker(m)` classified against the INNER int and passed
+    // with zero diagnostics while the emitted Go raced (go -race: two
+    // write/write DATA RACEs).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn shadow_scope_does_not_launder_outer_map_e3001() {
+        // The exact issue-#14 repro: the inner `m := 1` shadows the outer
+        // map; the spawn AFTER the block must still see the MAP.
+        let r = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               for i in 0..10000 { m[\"k\"] = i }\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               if true {\n\
+                 m := 1\n\
+                 fmt.println(m)\n\
+               }\n\
+               done := make(chan bool, 1)\n\
+               task worker(m, done)\n\
+               for i in 0..10000 { m[\"k\"] = i }\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1c"));
+        assert_eq!(r.diagnostics[0].code, "HYB-E3001");
+    }
+
+    #[test]
+    fn shadow_inner_primitive_is_sendable_inside_block() {
+        // The inner binding itself is a plain int: a boundary INSIDE the
+        // block classifies against it and must stay accepted (no
+        // over-rejection of legal shadowing).
+        let r = check(
+            "fn take(i int) { fmt.println(i) }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               if true {\n\
+                 m := 1\n\
+                 task take(m)\n\
+               }\n\
+               fmt.println(len(m))\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn shadow_does_not_leak_across_sibling_blocks() {
+        // Two sibling ifs each define their own m; the second block must
+        // not inherit the first's binding, and the outer map after both
+        // must still reject at the spawn.
+        let r = check(
+            "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn take(i int) { fmt.println(i) }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               if true {\n\
+                 m := 1\n\
+                 task take(m)\n\
+               }\n\
+               if true {\n\
+                 m := 2\n\
+                 task take(m)\n\
+               }\n\
+               task worker(m)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1c"));
+    }
+
+    #[test]
+    fn if_init_define_does_not_overwrite_outer_binding() {
+        // An if-init define shares Go's if-scope; after the if, the outer
+        // binding is intact and the spawn must classify against the MAP.
+        let r = check(
+            "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               if x := 1; x > 0 {\n\
+                 fmt.println(x)\n\
+               }\n\
+               task worker(m)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1c"));
+    }
+
+    #[test]
+    fn let_in_closure_pass_is_shallow_too() {
+        // The closure-boundary pass must agree with the flat pass on T22
+        // (issue #12 parity): a let-bound map captured... here, a let-bound
+        // map defined in the closure body itself is NOT class-4.
+        let r = check(
+            "fn main() {\n\
+               fn() {\n\
+                 let m = map[string]int{\"k\": 0}\n\
+                 task bump(m)\n\
+               }()\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
     }
 
     // -----------------------------------------------------------------------

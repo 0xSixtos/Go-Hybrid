@@ -151,7 +151,7 @@ impl<'a> Checker<'a> {
             }
         }
         for m in &members {
-            if let Some(b) = st.env.get_mut(m) {
+            if let Some(b) = st.env_lookup_mut(m) {
                 b.moved = Some(MoveInfo {
                     span,
                     kind,

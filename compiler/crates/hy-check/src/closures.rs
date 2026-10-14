@@ -79,7 +79,10 @@ fn check_body_boundaries(ck: &mut Checker<'_>, st: &mut FnState, block: &Block, 
 fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, managed: bool) {
     match stmt {
         Stmt::Local(l) => {
-            let immutable = l.kind == LocalKind::Let || l.kind == LocalKind::Const;
+            // T22 (issue #12 parity with the flat pass): only `const` is
+            // DEEPLY immutable; `let` is a SHALLOW immutable binding, so it
+            // must NOT take the class-4 sendability shortcut.
+            let immutable = l.kind == LocalKind::Const;
             if let Some(t) = &l.ty {
                 // ascribed: the declared type decides
                 let shape = ck.shape_of_type(t);
@@ -163,7 +166,9 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
         }
         Stmt::Managed { body, .. } => {
             ck.managed_blocks += 1; // O6.3 parity with the flat walk
+            st.scope_push();
             check_body_boundaries(ck, st, body, true);
+            st.scope_pop();
         }
         Stmt::If {
             init,
@@ -171,15 +176,22 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
             otherwise,
             ..
         } => {
+            // ONE implicit scope for the if (init vars visible through the
+            // construct, Go rule); the then/else bodies open their own.
+            st.scope_push();
             if let Some(i) = init {
                 check_stmt_boundaries(ck, st, i, managed);
             }
+            st.scope_push();
             check_body_boundaries(ck, st, then, managed);
+            st.scope_pop();
             if let Some(o) = otherwise {
                 check_stmt_boundaries(ck, st, o, managed);
             }
+            st.scope_pop();
         }
         Stmt::For { kind, body, .. } => {
+            st.scope_push(); // the loop vars' scope
             match kind {
                 Iterate { vars, expr } => {
                     let shapes = ck.iterate_var_shapes(st, expr, vars.len());
@@ -192,14 +204,23 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
                 }
                 While { .. } | Infinite => {}
             }
+            st.scope_push(); // the body's own scope
             check_body_boundaries(ck, st, body, managed);
+            st.scope_pop();
+            st.scope_pop();
         }
         Stmt::Match { arms, .. } => {
             for arm in arms {
+                st.scope_push();
                 check_body_boundaries(ck, st, &arm.body, managed);
+                st.scope_pop();
             }
         }
-        Stmt::Block { block, .. } => check_body_boundaries(ck, st, block, managed),
+        Stmt::Block { block, .. } => {
+            st.scope_push();
+            check_body_boundaries(ck, st, block, managed);
+            st.scope_pop();
+        }
         _ => {}
     }
 }

@@ -38,10 +38,29 @@ pub(crate) struct FlatInfo<'a> {
     pub managed_end: HashMap<usize, usize>,
     /// binding name -> last statement index referencing it
     pub last_use: HashMap<String, usize>,
+    /// Scope events keyed by statement index (issue #14): applied BEFORE
+    /// the statement is processed — (push, pop). A Push opens a block
+    /// scope (defines inside it die at the matching Pop); a construct's
+    /// Pop lands on the NEXT statement's index, or past the end when the
+    /// construct ends the function (that mark lands past the last statement
+    /// index and is simply never applied). Scopes follow Go's rules: one implicit
+    /// scope per if (init + cond; the then/else bodies get their own), per
+    /// for (the loop vars; the body gets its own), per managed body, and
+    /// per match/select arm body and bare block.
+    pub events: HashMap<usize, (bool, bool)>,
     next: usize,
 }
 
 impl<'a> FlatInfo<'a> {
+    fn mark(&mut self, idx: usize, push: bool, pop: bool) {
+        if !push && !pop {
+            return;
+        }
+        let e = self.events.entry(idx).or_insert((false, false));
+        e.0 |= push;
+        e.1 |= pop;
+    }
+
     /// Is statement `idx` lexically inside a `managed` block (O6.1)?
     pub(crate) fn in_managed(&self, idx: usize) -> bool {
         self.managed_end.iter().any(|(&k, &v)| k < idx && idx <= v)
@@ -88,34 +107,59 @@ fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt) {
             otherwise,
             ..
         } => {
+            // ONE implicit scope for the if (init vars stay visible through
+            // the whole construct, Go rule); the then/else bodies open their
+            // own scopes below.
+            out.mark(idx, true, false);
             if let Some(i) = init {
                 walk_one(out, i);
             }
-            walk_block(out, then);
+            scoped_block(out, then);
             if let Some(o) = otherwise {
                 walk_one(out, o);
             }
+            out.mark(out.next, false, true); // Pop at the next stmt (or trailing)
         }
         Stmt::For { body, .. } => {
-            walk_block(out, body);
+            // the loop's implicit scope (range/iterate vars) ...
+            out.mark(idx, true, false);
+            scoped_block(out, body); // ... and the body's own scope
             out.loop_end.insert(idx, out.next.saturating_sub(1));
+            out.mark(out.next, false, true);
         }
         Stmt::Managed { body, .. } => {
-            walk_block(out, body);
+            scoped_block(out, body);
             out.managed_end.insert(idx, out.next.saturating_sub(1));
         }
         Stmt::Match { arms, .. } => {
             for arm in arms {
-                walk_block(out, &arm.body);
+                scoped_block(out, &arm.body);
             }
         }
-        Stmt::Block { block, .. } => walk_block(out, block),
+        Stmt::Block { block, .. } => scoped_block(out, block),
         Stmt::Select { arms, .. } => {
             for arm in arms {
-                walk_block(out, &arm.body);
+                scoped_block(out, &arm.body);
             }
         }
         _ => {}
+    }
+}
+
+/// Walk a block's statements inside their OWN scope: Push on the first
+/// statement, Pop on the index after the last one (or trailing).
+fn scoped_block<'a>(out: &mut FlatInfo<'a>, block: &'a Block) {
+    let first = out.next;
+    let mut ran = false;
+    for s in &block.stmts {
+        if !ran {
+            out.mark(first, true, false);
+            ran = true;
+        }
+        walk_one(out, s);
+    }
+    if ran {
+        out.mark(out.next, false, true);
     }
 }
 
