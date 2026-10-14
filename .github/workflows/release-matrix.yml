@@ -77,7 +77,7 @@ jobs:
           HYB_PKG_ARCH: ${{ matrix.pkg-arch }}
           HYB_RUST_TARGET: ${{ matrix.rust-target }}
           HYB_CC: ${{ matrix.cross-cc }}
-          HYB_QEMU: ${{ matrix.rust-target == 'aarch64-unknown-linux-gnu' && 'qemu-aarch64 -L /usr/aarch64-linux-gnu' || '' }}
+          HYB_QEMU: ${{ matrix.rust-target == 'aarch64-unknown-linux-gnu' && 'qemu-aarch64-static -L /usr/aarch64-linux-gnu' || '' }}
         run: sh tools/package_release.sh "${{ inputs.version }}"
       - uses: actions/upload-artifact@v4
         with:

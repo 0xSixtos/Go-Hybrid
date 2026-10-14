@@ -140,6 +140,14 @@ CROSS_GO_ENV=""
 if [ "$PKG_OS/$ARCH" = "linux/arm64" ] && [ -n "$RUST_TARGET" ]; then
     CROSS_GO_ENV="GOARCH=arm64 CGO_ENABLED=1 CC=$CROSS_CC"
     QEMU_RUNNER="${QEMU_RUNNER:-qemu-aarch64}"
+    # qemu-user-static (the fleet's package) ships *-static names only
+    first="${QEMU_RUNNER%% *}"
+    if ! command -v "$first" >/dev/null 2>&1; then
+        rest="${QEMU_RUNNER#* }"
+        if [ "$rest" != "$first" ] && command -v "${first}-static" >/dev/null 2>&1; then
+            QEMU_RUNNER="${first}-static $rest"
+        fi
+    fi
 fi
 if ( cd "$SMOKE" && env PATH="$RUSTLESS_PATH" $CROSS_GO_ENV $QEMU_RUNNER \
         "$SMOKE/hybrid-${VER}/$HYB_OUT_NAME" build \
