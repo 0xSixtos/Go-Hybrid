@@ -67,7 +67,7 @@ jobs:
           # CI does not invoke make. A dry-run parses the whole file.
           make -n examples >/dev/null 2>&1 || { echo "MAKEFILE SYNTAX BROKEN (recipes must be TAB-indented)"; exit 1; }
           echo "hygiene OK"
-      - name: Installer launcher honours HYB_RUNTIME_DIR (offline)
+      - name: Installer runtime and checksum verification (offline)
         run: |
           set -e
           # install.sh's generated launcher must keep a caller-provided
@@ -75,6 +75,7 @@ jobs:
           # Self-contained: builds a throwaway release archive, stubs the
           # downloader, and reads back the launcher's env/argv — no network.
           python3 tests/test_install_runtime.py
+          python3 tests/test_install_checksums.py
 
   # The compiler (lands with MVP-0): pinned toolchains, full test suite,
   # corpus verdict agreement, and the walking-skeleton examples end-to-end.
