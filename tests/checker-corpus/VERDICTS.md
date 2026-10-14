@@ -68,8 +68,9 @@ renumbered).
 | 23 | 23-a1c-mapslot-copy-at-spawn | ACCEPT | — | 22's legal twin: the map-slot field is read into a local BEFORE the spawn (the loan's last use), so a copy (A4/O9) crosses the spawn site instead of the live loan — pins that A1c tracks the LOAN crossing, not the map-slot's mere upstream existence |
 | 24 | 24-shadow-scope-map-reject | REJECT | A1c | an inner-block `m := 1` must SHADOW the outer map, never overwrite its binding — the flat env let the inner define rewrite the outer shape and the spawn passed with zero diagnostics while `go -race` reported two write/write DATA RACEs (issue #14; the env is now scope-aware) |
 | 25 | 25-o40-spawn-callee-proof | REJECT | A1c | the O4.0 spawn-callee PROOF: a closure callee (`task gap()`) crosses with its captured environment (A5, E3001) and an undeclared callee (`task mystery(1)`) is fail-closed unproven (E3005/FC) — before the fix the O4.0 site checked only the arguments and both passed silently (adoption-audit finding F1; the ACCEPT/proven side is pinned in hy-check/tests/callee_and_nil.rs) |
+| 26 | 26-call-return-alias-freeze | REJECT | A1b | an alias that comes back through a function call (`alias := same(agg)`, `same` returns its map argument) is still a live alias of `agg` — the checker has no interprocedural summary proving the return is fresh, so `results <- move agg` freezes it too; the write through `alias` is use-after-move (issue #38; before the fix the call return was treated as fresh storage and the program was accepted with 0 diagnostics while `go -race` reported a DATA RACE) |
 
-**Distribution: ACCEPT 8 · ACCEPT-MANAGED 2 · REJECT 15 — 25 programs.**
+**Distribution: ACCEPT 8 · ACCEPT-MANAGED 2 · REJECT 16 — 26 programs.**
 (19 and 20 were added by the lead during integration on 2026-10-12 — still
 BEFORE any checker existed; see the pre-registration statement. 21, 22, 23
 and 24 are post-checker corpus GROWTH from the bounty track, added

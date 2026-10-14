@@ -18,8 +18,8 @@
 
 use crate::foreign::{self, CallMode};
 use crate::model::{
-    as_addr_of, move_operand_ident, Binding, Checker, FnState, Loan, LoanTarget, MoveKind,
-    TypeShape,
+    as_addr_of, move_operand_ident, unwrap_parens, Binding, Checker, FnState, Loan, LoanTarget,
+    MoveKind, TypeShape,
 };
 use crate::shape::receiver_type_name;
 use crate::walk::{self, CallRef};
@@ -362,15 +362,55 @@ impl<'a> Checker<'a> {
                 if is_view {
                     self.extend_call_loans_to_view(st, value, name, idx);
                 }
-                // alias recording: `m2 := agg` (reference-typed value)
-                if let Expr::Ident { name: src, .. } = value {
-                    if let Some(b) = self.lookup_binding(st, src) {
-                        if b.shape.is_reference_alias() {
-                            st.aliases.insert(name.clone(), src.clone());
+                // alias recording: `m2 := agg` — and `alias := same(m)` (#38)
+                self.record_alias(st, name, value);
+            }
+        }
+    }
+
+    /// Record a binding-level alias created by `name := value` (#38).
+    ///
+    /// The original check only saw a bare reference-typed `Ident` copy
+    /// (`m2 := agg`). But a CALL that returns a reference-typed value can
+    /// hand back storage owned by one of its arguments — `same(m)`,
+    /// `append(xs, v)`, and every filter/trim/identity helper do it — and
+    /// the checker has no interprocedural summary to rule that out. Record
+    /// the result as an alias of the first reference-typed argument binding,
+    /// so a later `move` of either freezes the other (O5.2). `move`-wrapped
+    /// arguments transfer ownership into the callee and are skipped.
+    fn record_alias(&self, st: &mut FnState, name: &str, value: &Expr) {
+        match unwrap_parens(value) {
+            Expr::Ident { name: src, .. } => {
+                if let Some(b) = self.lookup_binding(st, src) {
+                    if b.shape.is_reference_alias() {
+                        st.aliases.insert(name.to_string(), src.clone());
+                    }
+                }
+            }
+            Expr::Call { args, .. } => {
+                if self
+                    .shape_of_expr(st, unwrap_parens(value))
+                    .is_reference_alias()
+                {
+                    for a in args {
+                        if matches!(unwrap_parens(&a.value), Expr::Move { .. }) {
+                            continue;
+                        }
+                        if let Some(src) = a.value.root_ident() {
+                            if src == name {
+                                continue;
+                            }
+                            if let Some(b) = self.lookup_binding(st, src) {
+                                if b.shape.is_reference_alias() {
+                                    st.aliases.insert(name.to_string(), src.to_string());
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
             }
+            _ => {}
         }
     }
 
@@ -507,15 +547,9 @@ impl<'a> Checker<'a> {
                         b.ty = ty.clone();
                         b.moved = None; // a fresh value re-owns the binding
                     }
-                    // rebind may create a fresh alias
+                    // rebind may create a fresh alias (incl. `rows = append(...)`)
                     st.aliases.remove(name);
-                    if let Expr::Ident { name: src, .. } = &values[0] {
-                        if let Some(b) = self.lookup_binding(st, src) {
-                            if b.shape.is_reference_alias() {
-                                st.aliases.insert(name.clone(), src.clone());
-                            }
-                        }
-                    }
+                    self.record_alias(st, name, &values[0]);
                 }
             }
         }
