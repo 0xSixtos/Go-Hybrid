@@ -16,7 +16,7 @@ impl Module {
         fs::create_dir_all(&root).unwrap();
         let module = Self(root);
         module.write("go.mod", "module example.com/demo\n\ngo 1.26\n");
-        module.write("calc.hy", "fn add(a int, b int) int { return a + b }\n");
+        module.write("calc.hy", "pub fn add(a int, b int) int { return a + b }\n");
         module
     }
 
