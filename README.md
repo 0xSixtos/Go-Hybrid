@@ -138,6 +138,15 @@ graph ownership moves, a Rust-crate digest service, and a Hybrid package
 consumed by plain Go — every one parses, checks, emits, builds and runs
 byte-exact in CI.
 
+**Windows note:** bridge-free programs (8 of 10) build and run on Windows
+today. The Rust bridge on Windows is **not ready for adoption**: the
+trampolines encode the SysV amd64 ABI while Win64 needs its own, so
+`call_win64.s` is still to come (tracked as a roadmap row). `hyb` now
+recognizes both staticlib flavors (`libhyrt.a` from mingw builds, `hyrt.lib`
+from msvc builds) and the runtime packages compile for windows/amd64 in CI,
+so the porting groundwork is laid. Until the Win64 trampolines land and the
+release matrix runs a Windows bridge smoke, keep bridge workloads on Linux.
+
 ## Docker (CI)
 
 A pinned-toolchain image (Go 1.26.9 + release `hyb` + the prebuilt runtime —
@@ -216,10 +225,8 @@ Short, blunt answers are the most useful kind; good advice gets merged into
 the roadmap **with credit**. Q&A, ideas, and show-and-tell are open under
 [Discussions](https://github.com/limitlessprojects/Go-Hybrid/discussions).
 
-If this problem space interests you, **starring the repo genuinely helps** —
-it tells contributors someone is watching, and it's the cheapest way to
-follow the releases. No pressure either way; useful criticism is worth more
-than stars.
+Before starting, ⭐ star the repository. It helps us grow and shows
+you're committed to contributing!
 
 ## Contributing
 

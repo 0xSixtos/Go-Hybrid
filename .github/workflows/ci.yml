@@ -151,6 +151,12 @@ jobs:
           go vet ./...
           go build ./...
           go test ./...
+          # windows/amd64 compile guard — the community benchmark report
+          # (v0.1.0) found the bridge package could not even compile on
+          # Windows (the deep-stack pool lived in a _linux-only file).
+          # CGO_ENABLED=0 keeps it toolchain-light; the Win64 trampolines
+          # are a separate port (PLAN row 17).
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./hybridge/
           echo "go runtime hygiene OK"
       - name: MVP-0 examples end-to-end (parse → check → emit → go build → run)
         run: |

@@ -618,8 +618,8 @@ fn cmd_vendor_runtime(args: &[String]) -> ExitCode {
         eprintln!("error writing {}/go.mod", dst.display());
         return ExitCode::FAILURE;
     }
-    if std::fs::copy(&lib, dst.join("lib/libhyrt.a")).is_err() {
-        eprintln!("error copying the staticlib to {}/lib/libhyrt.a", dst.display());
+    if let Err(m) = install_staticlib(&lib, &dst.join("lib")) {
+        eprintln!("error installing the staticlib: {}", m);
         return ExitCode::FAILURE;
     }
     println!(
@@ -911,12 +911,8 @@ fn cmd_build_package(
     // #cgo LDFLAGS point at ${SRCDIR}/../lib.
     match ensure_staticlib(&rt) {
         Ok(lib) => {
-            let libdir = od.join("lib");
-            if let Err(e) = std::fs::create_dir_all(&libdir) {
-                return fail(format!("creating {}: {}", libdir.display(), e));
-            }
-            if let Err(e) = std::fs::copy(&lib, libdir.join("libhyrt.a")) {
-                return fail(format!("copying staticlib: {}", e));
+            if let Err(m) = install_staticlib(&lib, &od.join("lib")) {
+                return fail(m);
             }
         }
         Err(BuildError::Tool(m)) => return fail(m),
@@ -944,15 +940,9 @@ fn ensure_staticlib(rt: &std::path::Path) -> Result<std::path::PathBuf, BuildErr
     // shared-target flow (CARGO_TARGET_DIR), cross --target subdirs, and
     // the crate-local layout the shipped tarball re-lays the prebuilt lib
     // into (target/release/libhyrt.a — the one end users hit).)
-    let mut cands: Vec<std::path::PathBuf> = Vec::new();
-    if let Ok(t) = std::env::var("CARGO_TARGET_DIR") {
-        let t = std::path::PathBuf::from(t);
-        cands.push(t.join("release/libhyrt.a"));
-        push_sibling_libs(&t, &mut cands);
-    }
-    let local_target = crate_dir.join("target");
-    cands.push(local_target.join("release/libhyrt.a"));
-    push_sibling_libs(&local_target, &mut cands);
+    // Community benchmark report (v0.1.0, Windows): cargo with the msvc
+    // toolchain names the artifact hyrt.lib, so BOTH spellings are probed.
+    let mut cands = staticlib_candidates(&crate_dir);
     cands.sort();
     cands.dedup();
     let src_mtime = newest_mtime(&crate_dir);
@@ -985,7 +975,6 @@ fn ensure_staticlib(rt: &std::path::Path) -> Result<std::path::PathBuf, BuildErr
             // No fresh arch-matching lib — rebuild native (the dev flow; the
             // release tarball never lands here because packaging touches the
             // shipped lib's mtime past every source's).
-            let rebuilt = crate_dir.join("target/release/libhyrt.a");
             let mut cargo = Command::new(cargo_bin());
             cargo
                 .args(["build", "--release", "-j2"])
@@ -1004,19 +993,71 @@ fn ensure_staticlib(rt: &std::path::Path) -> Result<std::path::PathBuf, BuildErr
                     String::from_utf8_lossy(&out.stderr)
                 )));
             }
-            rebuilt
+            // Re-probe: cargo names the artifact by toolchain flavor
+            // (libhyrt.a under gnu/linux, hyrt.lib under msvc).
+            let rebuilt = staticlib_candidates(&crate_dir)
+                .into_iter()
+                .filter(|p| lib_arch_matches(p))
+                .max_by_key(|p| {
+                    std::fs::metadata(p)
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+                });
+            match rebuilt {
+                Some(p) => p,
+                None => {
+                    return Err(BuildError::Tool(
+                        "no arch-matching hyrt staticlib found after cargo build. \
+                         expected one of libhyrt.a (gnu flavor), hyrt.lib or libhyrt.lib (msvc) \
+                         under <hyrt>/target/release. on windows the bridge ALSO needs \
+                         mingw-w64 gcc for cgo; the release tarballs ship a prebuilt \
+                         mingw-flavored libhyrt.a."
+                            .to_string(),
+                    ))
+                }
+            }
         }
     };
     Ok(src_lib)
 }
 
-/// Push <dir>/<subdir>/release/libhyrt.a for every subdir (cargo's per-triple
-/// layout: target/<triple>/release/... when the crate was built with --target).
+/// Every file name the hyrt staticlib can take, per toolchain flavor:
+/// gnu/linux cargo emits libhyrt.a; msvc cargo emits hyrt.lib (and some
+/// setups libhyrt.lib). The community benchmark report (v0.1.0) hit hyb
+/// hardcoding the .a name on Windows.
+const STATICLIB_NAMES: &[&str] = &["libhyrt.a", "hyrt.lib", "libhyrt.lib"];
+
+/// All candidate paths for a built staticlib under the hyrt crate dir:
+/// <target>/release/<name> for every flavor name, plus cargo's per-triple
+/// subdirs when the crate was built with --target.
+fn staticlib_candidates(crate_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    fn push_flat(d: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for n in STATICLIB_NAMES {
+            out.push(d.join(n));
+        }
+    }
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(t) = std::env::var("CARGO_TARGET_DIR") {
+        let t = std::path::PathBuf::from(t);
+        push_flat(&t.join("release"), &mut out);
+        push_sibling_libs(&t, &mut out);
+    }
+    let local_target = crate_dir.join("target");
+    push_flat(&local_target.join("release"), &mut out);
+    push_sibling_libs(&local_target, &mut out);
+    out
+}
+
+/// Push <dir>/<subdir>/release/<name> for every subdir (cargo's per-triple
+/// layout: target/<triple>/release/... when the crate was built with --target)
+/// and every flavor name.
 fn push_sibling_libs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             if e.path().is_dir() && e.file_name() != "release" {
-                out.push(e.path().join("release/libhyrt.a"));
+                for n in STATICLIB_NAMES {
+                    out.push(e.path().join("release").join(n));
+                }
             }
         }
     }
@@ -1086,11 +1127,51 @@ fn lib_arch_matches(p: &std::path::Path) -> bool {
         }
         // First data member: its object header decides the archive's arch.
         let mut hdr = [0u8; 20];
-        if f.read_exact(&mut hdr).is_err() || &hdr[0..4] != b"\x7fELF" {
+        if f.read_exact(&mut hdr).is_err() {
             return false;
         }
-        return machine_matches(u16::from_le_bytes([hdr[18], hdr[19]]));
+        if &hdr[0..4] == b"\x7fELF" {
+            return machine_matches(u16::from_le_bytes([hdr[18], hdr[19]]));
+        }
+        // COFF (an msvc-built static .lib): the object starts with the
+        // machine type as a LE u16 at offset 0 — IMAGE_FILE_MACHINE_AMD64 =
+        // 0x8664, AARCH64 = 0xAA64. The community benchmark report (v0.1.0)
+        // hit exactly this flavor: hyb only knew ELF members and rejected
+        // every msvc lib.
+        return coff_machine_matches(u16::from_le_bytes([hdr[0], hdr[1]]));
     }
+}
+
+/// COFF machine-type counterpart of `machine_matches` (same host-arch rule).
+fn coff_machine_matches(m: u16) -> bool {
+    match std::env::consts::ARCH {
+        "x86_64" => m == 0x8664,
+        "aarch64" => m == 0xAA64,
+        // Unknown host arch: accept a known-good COFF machine, nothing else.
+        _ => m == 0x8664 || m == 0xAA64,
+    }
+}
+
+/// Lay the chosen staticlib into a target lib/ directory under the name the
+/// cgo contract links (`-lhyrt` → libhyrt.a) — and, when the source is an
+/// msvc .lib, ALSO under the .lib spellings so MS-style consumers and any
+/// mingw ld probing the no-prefix name find it. Content decides format; the
+/// aliases are the same bytes.
+pub(crate) fn install_staticlib(
+    src: &std::path::Path,
+    libdir: &std::path::Path,
+) -> Result<(), String> {
+    std::fs::create_dir_all(libdir)
+        .map_err(|e| format!("creating {}: {}", libdir.display(), e))?;
+    std::fs::copy(src, libdir.join("libhyrt.a"))
+        .map_err(|e| format!("copying staticlib: {}", e))?;
+    if src.extension().and_then(|e| e.to_str()) == Some("lib") {
+        for alias in ["hyrt.lib", "libhyrt.lib"] {
+            std::fs::copy(src, libdir.join(alias))
+                .map_err(|e| format!("copying staticlib alias {}: {}", alias, e))?;
+        }
+    }
+    Ok(())
 }
 
 /// The runtime directory: HYB_RUNTIME_DIR override, then the TARBALL layout
@@ -1672,5 +1753,78 @@ mod tests {
             return; // no lib built in this checkout — nothing to assert
         }
         assert!(lib_arch_matches(&p), "shipped libhyrt.a arch != host arch");
+    }
+
+    /// COFF members (msvc-built hyrt.lib) must be accepted for the host arch
+    /// and rejected for a foreign one — the community benchmark report
+    /// (v0.1.0) hit hyb rejecting every msvc lib (ELF-only matcher).
+    #[test]
+    fn lib_arch_matches_accepts_coff_msvc_lib() {
+        let dir = std::env::temp_dir().join(format!("hyb-cofftest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let member = |name: &[u8], size: usize, data: &[u8]| -> Vec<u8> {
+            let mut h = vec![b' '; 16];
+            h[..name.len()].copy_from_slice(name);
+            h.extend_from_slice(b"0           ");
+            h.extend_from_slice(b"0     ");
+            h.extend_from_slice(b"0     ");
+            h.extend_from_slice(b"0       ");
+            h.extend_from_slice(format!("{:010}", size).as_bytes());
+            h.extend_from_slice(b"`\n");
+            let mut v = h;
+            v.extend_from_slice(data);
+            if size % 2 == 1 {
+                v.push(b'\n');
+            }
+            v
+        };
+        // An MSVC object: machine type LE u16 at offset 0, no ELF magic.
+        // x86-64 = 0x8664, arm64 = 0xAA64 (little-endian bytes below).
+        let coff_x86 = [0x64u8, 0x86, 0x01, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let coff_arm = [0x64u8, 0xAA, 0x01, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        for (name, obj) in [("msvc-x86.lib", &coff_x86), ("msvc-arm.lib", &coff_arm)] {
+            let mut ar = b"!<arch>\n".to_vec();
+            ar.extend(member(b"/", 4, &[0u8; 4])); // MS linker symbol index (skipped)
+            ar.extend(member(b"hyrt.obj/", obj.len(), obj));
+            let p = dir.join(name);
+            std::fs::write(&p, &ar).unwrap();
+            let want = matches!(
+                (std::env::consts::ARCH, name),
+                ("x86_64", "msvc-x86.lib") | ("aarch64", "msvc-arm.lib")
+            );
+            assert_eq!(lib_arch_matches(&p), want, "case {}", name);
+        }
+        // Garbage first data member (neither ELF nor a known COFF machine)
+        // must still be rejected.
+        let mut junk = b"!<arch>\n".to_vec();
+        junk.extend(member(b"j.obj/", 4, &[0x39, 0x05, 0, 0])); // 0x0539 = unknown
+        let p = dir.join("msvc-junk.lib");
+        std::fs::write(&p, &junk).unwrap();
+        assert!(!lib_arch_matches(&p), "unknown COFF machine must be rejected");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The msvc install path must lay BOTH the cgo-contract name and the
+    /// .lib aliases; the gnu path stays single-name (no alias churn).
+    #[test]
+    fn install_staticlib_aliases_the_msvc_flavor() {
+        let dir = std::env::temp_dir().join(format!("hyb-installtest-{}", std::process::id()));
+        let libdir = dir.join("lib");
+        std::fs::create_dir_all(&dir).unwrap();
+        // MSVC flavor: source named hyrt.lib
+        let src = dir.join("hyrt.lib");
+        std::fs::write(&src, b"!<arch>\nCOFF").unwrap();
+        install_staticlib(&src, &libdir).unwrap();
+        for n in ["libhyrt.a", "hyrt.lib", "libhyrt.lib"] {
+            assert!(libdir.join(n).is_file(), "msvc flavor must lay {}", n);
+        }
+        // GNU flavor: source named libhyrt.a — no .lib aliases.
+        let libdir2 = dir.join("lib2");
+        let src2 = dir.join("libhyrt.a");
+        std::fs::write(&src2, b"!<arch>\nELF").unwrap();
+        install_staticlib(&src2, &libdir2).unwrap();
+        assert!(libdir2.join("libhyrt.a").is_file());
+        assert!(!libdir2.join("hyrt.lib").exists(), "gnu flavor must not alias");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

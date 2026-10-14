@@ -381,6 +381,30 @@ fn precedence_needs_no_parens_for_common_mixes() {
 }
 
 #[test]
+fn bit_ops_emit_verbatim_and_parenthesize_correctly() {
+    // The community benchmark report (v0.1.0) had to replace an LCG's
+    // `^` with `*+` because the parser rejected SPEC grammar ops.
+    let go = emit("fn main() {\n    a := b | c\n    d := e ^ f\n    g := h << 3\n    i := j >> 2\n    k := l & m\n    n := (o | p) & q\n}");
+    assert!(go.contains("a := b | c"), ":\n{}", go);
+    assert!(go.contains("d := e ^ f"), ":\n{}", go);
+    assert!(go.contains("g := h << 3"), ":\n{}", go);
+    assert!(go.contains("i := j >> 2"), ":\n{}", go);
+    assert!(go.contains("k := l & m"), ":\n{}", go);
+    assert!(go.contains("n := (o | p) & q"), "& tighter than |:\n{}", go);
+}
+
+#[test]
+fn compound_bit_assigns_emit() {
+    let go = emit("fn main() {\n    x |= y\n    x &= y\n    x ^= y\n    x <<= 1\n    x >>= 1\n}");
+    assert!(go.contains("x |= y"), ":\n{}", go);
+    assert!(go.contains("x &= y"), ":\n{}", go);
+    assert!(go.contains("x ^= y"), ":\n{}", go);
+    assert!(go.contains("x <<= 1"), ":\n{}", go);
+    assert!(go.contains("x >>= 1"), ":\n{}", go);
+}
+
+
+#[test]
 fn comparison_in_call_arg_parses_clean() {
     let go = emit("fn main() {\n    fmt.printf(\"%v\", 1 < 2)\n}");
     assert!(go.contains("fmt.Printf(\"%v\", 1 < 2)"), ":\n{}", go);

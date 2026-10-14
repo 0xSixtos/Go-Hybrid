@@ -108,6 +108,11 @@ const KEYWORDS: &[&str] = &[
     "use",
     "mod",
     "as",
+    // `mut` is a Rust-ism SPEC-LANGUAGE LX3 deliberately does NOT take
+    // (immutability is binding-level `let`, T22). It sat unreserved and
+    // `mut x := 3` silently emitted the word `mut` into Go — a broken
+    // build from accepted source. Reserved so it fails at parse.
+    "mut",
 ];
 
 /// Lex a whole source file. On success the token stream ends with a single
@@ -539,9 +544,12 @@ impl<'a> Lexer<'a> {
             }
             r
         };
+        // MULTI is scanned IN ORDER and matches by prefix, so the 3-char
+        // compound forms must precede their 2-char prefixes (`<<=` before
+        // `<<`, `>>=` before `>>`).
         const MULTI: &[&str] = &[
-            "...", "..=", "=>", ":=", "==", "!=", "<=", ">=", "&&", "||", "<-", "<<", ">>", "++",
-            "--", "+=", "-=", "*=", "/=", "%=", "..",
+            "...", "..=", "=>", ":=", "==", "!=", "<=", ">=", "&&", "||", "<-", "<<=", ">>=",
+            "<<", ">>", "++", "--", "+=", "-=", "*=", "/=", "%=", "|=", "&=", "^=", "..",
         ];
         for m in MULTI {
             if rest.starts_with(m) {

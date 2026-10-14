@@ -392,14 +392,19 @@ impl LocalKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssignOp {
-    Assign,    // =
-    AddAssign, // +=
-    SubAssign, // -=
-    MulAssign, // *=
-    DivAssign, // /=
-    ModAssign, // %=
-    Inc,       // ++ (values empty)
-    Dec,       // -- (values empty)
+    Assign,      // =
+    AddAssign,   // +=
+    SubAssign,   // -=
+    MulAssign,   // *=
+    DivAssign,   // /=
+    ModAssign,   // %=
+    Inc,         // ++ (values empty)
+    Dec,         // -- (values empty)
+    BitOrAssign,   // |=
+    BitAndAssign,  // &=
+    BitXorAssign,  // ^=
+    ShlAssign,     // <<=
+    ShrAssign,     // >>=
 }
 
 /// Assignable lvalue.
@@ -623,6 +628,12 @@ pub enum BinOp {
     Ge,
     And,
     Or,
+    // Bit-level ops (SPEC-LANGUAGE 1.4: AddOp `|` `^`, MulOp `&` `<<` `>>`).
+    BitOr,
+    BitXor,
+    BitAnd,
+    Shl,
+    Shr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -793,6 +804,11 @@ impl BinOp {
             BinOp::Ge => ">=",
             BinOp::And => "&&",
             BinOp::Or => "||",
+            BinOp::BitOr => "|",
+            BinOp::BitXor => "^",
+            BinOp::BitAnd => "&",
+            BinOp::Shl => "<<",
+            BinOp::Shr => ">>",
         }
     }
 }

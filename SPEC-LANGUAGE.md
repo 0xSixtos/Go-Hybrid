@@ -145,7 +145,9 @@ select  struct  task  true  type  var
 ```
 
 Reserved for future use (error to use today): `unsafe`, `go`, `func`,
-`interface`, `trait`, `where`, `use`, `mod`, `as`. Predeclared identifiers (not
+`interface`, `trait`, `where`, `use`, `mod`, `as`, `mut` (a Rust-ism this
+language deliberately does not take; immutability is binding-level `let`,
+T22). Predeclared identifiers (not
 keywords, shadowable with a lint): `nil`, `error`, `option`, `set`, `some`,
 `none`, `int`, `uint`, `byte`, `rune`, `string`, `bool`,
 `f32`, `f64`, `u8`…`u64`, `i8`…`i64`, `len`, `cap`, `append`, `delete`,

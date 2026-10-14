@@ -697,6 +697,11 @@ impl Emitter {
             AssignOp::MulAssign => "*=",
             AssignOp::DivAssign => "/=",
             AssignOp::ModAssign => "%=",
+            AssignOp::BitOrAssign => "|=",
+            AssignOp::BitAndAssign => "&=",
+            AssignOp::BitXorAssign => "^=",
+            AssignOp::ShlAssign => "<<=",
+            AssignOp::ShrAssign => ">>=",
             AssignOp::Inc => {
                 let t = self.emit_place(&targets[0])?;
                 self.push(&format!("{}++", t));

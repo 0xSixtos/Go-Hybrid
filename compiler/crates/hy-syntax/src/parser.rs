@@ -1165,6 +1165,11 @@ impl Parser {
             Tok::Punct("*=") => Some(AssignOp::MulAssign),
             Tok::Punct("/=") => Some(AssignOp::DivAssign),
             Tok::Punct("%=") => Some(AssignOp::ModAssign),
+            Tok::Punct("|=") => Some(AssignOp::BitOrAssign),
+            Tok::Punct("&=") => Some(AssignOp::BitAndAssign),
+            Tok::Punct("^=") => Some(AssignOp::BitXorAssign),
+            Tok::Punct("<<=") => Some(AssignOp::ShlAssign),
+            Tok::Punct(">>=") => Some(AssignOp::ShrAssign),
             _ => None,
         }
     }
@@ -2203,9 +2208,16 @@ fn bin_op(t: &Tok) -> Option<(BinOp, u8)> {
         Tok::Punct(">=") => Some((BinOp::Ge, 3)),
         Tok::Punct("+") => Some((BinOp::Add, 4)),
         Tok::Punct("-") => Some((BinOp::Sub, 4)),
+        // AddOp continues with the bit-ops (SPEC-LANGUAGE 1.4): `|` `^`.
+        Tok::Punct("|") => Some((BinOp::BitOr, 4)),
+        Tok::Punct("^") => Some((BinOp::BitXor, 4)),
         Tok::Punct("*") => Some((BinOp::Mul, 5)),
         Tok::Punct("/") => Some((BinOp::Div, 5)),
         Tok::Punct("%") => Some((BinOp::Mod, 5)),
+        // MulOp continues with `&` and the shifts (SPEC-LANGUAGE 1.4).
+        Tok::Punct("&") => Some((BinOp::BitAnd, 5)),
+        Tok::Punct("<<") => Some((BinOp::Shl, 5)),
+        Tok::Punct(">>") => Some((BinOp::Shr, 5)),
         _ => None,
     }
 }
@@ -3157,6 +3169,96 @@ mod tests {
             add_rhs.as_ref(),
             Expr::Binary { op: BinOp::Mul, .. }
         ));
+    }
+
+    #[test]
+    fn bit_ops_parse_per_spec_ebnf() {
+        // SPEC-LANGUAGE 1.4: AddOp = + - | ^, MulOp = * / % << >> &.
+        // The benchmark community report (v0.1.0) hit `^` and the shifts
+        // rejected at parse despite the EBNF; each op must parse.
+        for (src, want) in [
+            ("x := a | b", "BitOr"),
+            ("x := a ^ b", "BitXor"),
+            ("x := a & b", "BitAnd"),
+            ("x := a << b", "Shl"),
+            ("x := a >> b", "Shr"),
+        ] {
+            let f = parse_src(&format!("fn main() {{ {} }}", src));
+            let stmt = first_stmt(&f);
+            let Stmt::Local(LocalDecl { values, .. }) = stmt else {
+                panic!("local for {}", src)
+            };
+            let Expr::Binary { op, .. } = &values[0] else {
+                panic!("binary for {}", src)
+            };
+            assert_eq!(format!("{:?}", op), want, "src: {}", src);
+        }
+    }
+
+    #[test]
+    fn bit_ops_precedence_matches_go() {
+        // `1 | 2 ^ 3 & 4` → BitXor( BitOr(1, 2), BitAnd(3, 4) ):
+        // SPEC-LANGUAGE 1.4 puts `|` and `^` on the SAME AddOp level
+        // (left-assoc, exactly like Go), while `&` is MulOp level.
+        let f = parse_src("fn main() { x := 1 | 2 ^ 3 & 4 }");
+        let stmt = first_stmt(&f);
+        let Stmt::Local(LocalDecl { values, .. }) = stmt else {
+            panic!("local")
+        };
+        let Expr::Binary {
+            op: BinOp::BitXor,
+            lhs,
+            rhs,
+            ..
+        } = &values[0]
+        else {
+            panic!("bitxor at top, got {:?}", values[0])
+        };
+        assert!(
+            matches!(lhs.as_ref(), Expr::Binary { op: BinOp::BitOr, .. }),
+            "left of ^ is 1|2, got {:?}",
+            lhs
+        );
+        assert!(
+            matches!(rhs.as_ref(), Expr::Binary { op: BinOp::BitAnd, .. }),
+            "right of ^ is 3&4, got {:?}",
+            rhs
+        );
+    }
+
+    #[test]
+    fn compound_bit_assigns_parse() {
+        // SPEC-LANGUAGE 1.4: AssignOp = = += -= |= &= ^= <<= >>=.
+        for (src, want) in [
+            ("x |= b", "BitOrAssign"),
+            ("x &= b", "BitAndAssign"),
+            ("x ^= b", "BitXorAssign"),
+            ("x <<= b", "ShlAssign"),
+            ("x >>= b", "ShrAssign"),
+        ] {
+            let f = parse_src(&format!("fn main() {{ {} }}", src));
+            let stmt = first_stmt(&f);
+            let Stmt::Assign { op, .. } = stmt else {
+                panic!("assign for {}", src)
+            };
+            assert_eq!(format!("{:?}", op), want, "src: {}", src);
+        }
+    }
+
+    #[test]
+    fn mut_is_reserved_not_silently_emitted() {
+        // `mut x := 3` used to parse (mut as a plain identifier) and emit the
+        // word `mut` into Go — a broken build from accepted source. Now it is
+        // a clean parse error naming the keyword (SPEC-LANGUAGE LX3, T22).
+        let errs = match parse_file("t.hy", "fn main() { mut x := 3 }") {
+            Ok(_) => panic!("mut must fail at parse, not emit broken Go"),
+            Err(d) => d,
+        };
+        assert!(
+            errs.iter().any(|d| d.message.contains("`mut`")),
+            "error should name the keyword: {:?}",
+            errs
+        );
     }
 
     #[test]
