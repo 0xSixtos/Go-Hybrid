@@ -225,7 +225,10 @@ than stars.
 
 [`good first issue`](https://github.com/limitlessprojects/Go-Hybrid/labels/good%20first%20issue)
 issues are tagged. Docs, adversarial test corpora, diagnostic wording, and
-example programs are all high-leverage right now. The project follows an
+example programs are all high-leverage right now. There is a **$500 bounty
+pool** over the top 10 contributions each cycle: reproduced soundness bugs
+and useful improvements alike, with severity tiers and a Hall of Fame —
+the full rules are in [BOUNTY.md](BOUNTY.md). The project follows an
 evidence-first protocol: hypotheses are pre-registered before measurement,
 failures are reported plainly, and tests are never weakened to pass — see
 [AGENTS.md](AGENTS.md) for how the repo works.

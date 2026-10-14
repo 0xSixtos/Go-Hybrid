@@ -91,8 +91,10 @@ An accepted-but-unsound program is a **P0** by definition ([SPEC §10](SPEC.md))
 Open an issue with the smallest `.hy` program that demonstrates it; label
 it `soundness`. We commit to: publishing the bug with severity and status,
 a regression test in the corpus before the fix lands, and the fix note in
-the next release's changelog. (A formal bounty is under consideration —
-tracked in [PLAN.md](PLAN.md).)
+the next release's changelog. **There is now a formal bounty behind this
+protocol: a $500 pool over the top 10 contributions, paid only on a
+reproduced accepted-but-unsound regression** — full rules, severity tiers,
+and the Hall of Fame live in [BOUNTY.md](BOUNTY.md).
 
 ## Known limits of this document
 
