@@ -44,6 +44,29 @@ Two tracks, ranked together:
 | **Low** | Rough edges: diagnostics, docs, tooling gaps | confusing error text, missing repro hint |
 
 Tier shapes ranking: a reproduced Critical outranks a nice-to-have.
+You may propose a tier; the maintainer assigns it. Scoring exists to
+prioritize fixes, not to be gamed. How the top programs run this is
+documented in [research/bounty-study.md](research/bounty-study.md).
+
+## What does NOT qualify
+
+- Crashes that produce a **clean diagnostic** (HYB-E0002 and friends).
+  The fail-closed system doing its job is not a bug. If the diagnostic
+  text is wrong or missing a fix-it, that is the Low track.
+- Findings in **dependencies we do not own** (report them upstream, then
+  tell us what you found; if our usage amplifies them, that part is ours).
+- Style preferences, benchmarks without a correctness claim, and reports
+  about programs the checker correctly REJECTS.
+- Anything already on the known-issues list or already fixed on main.
+
+## What makes a report survive triage
+
+1. Check [GUARANTEES.md](GUARANTEES.md) and the issue tracker first.
+2. Run against **latest main**, not a release tag.
+3. Bring the smallest `.hy` file that shows it, the exact commit, and
+   what you expected vs what happened.
+Reports shaped like this get reproduced fast, and reproduction is the
+only door to a payout.
 
 ## Payment rules, plain and short
 
@@ -101,8 +124,15 @@ AI-assisted hunting is welcome, with honest rules that keep the queue alive:
 - Minimal repros only. No bulk dumps, no AI-generated fluff, no repeated
   near-duplicates.
 - Flooding or spam disqualifies the account from the current cycle.
+- If invalid volume ever floods the queue, the program **pauses** with a
+  note in Discussions rather than dying quietly or banning in bulk. We
+  would rather stop than stop being fair.
 
 ## Recognition beyond cash
+
+The full role ladder (Bug Hunter, Security Guardian, Builder, Core
+Contributor) and how to earn each is
+[CONTRIBUTOR_RECOGNITION.md](CONTRIBUTOR_RECOGNITION.md). In short:
 
 - **Hall of Fame** (below) for every valid report and merged improvement.
 - **Release notes shoutouts** for every winner.

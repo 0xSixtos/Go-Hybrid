@@ -238,7 +238,21 @@ and useful improvements alike, with severity tiers and a Hall of Fame —
 the full rules are in [BOUNTY.md](BOUNTY.md). The project follows an
 evidence-first protocol: hypotheses are pre-registered before measurement,
 failures are reported plainly, and tests are never weakened to pass — see
-[AGENTS.md](AGENTS.md) for how the repo works.
+[AGENTS.md](AGENTS.md) for how the repo works. Security reports start at
+[SECURITY.md](SECURITY.md); roles and credit live in
+[CONTRIBUTOR_RECOGNITION.md](CONTRIBUTOR_RECOGNITION.md).
+
+## Contributors
+
+<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
+<!-- prettier-ignore-start -->
+<!-- markdownlint-disable -->
+<!-- ALL-CONTRIBUTORS-LIST:END -->
+
+The All-Contributors bot keeps this table current. Ask it for credit with
+`@all-contributors please add @yourname for code` (or `bug`, `doc`,
+`security`, `test`) on your PR or issue — how each role is earned is in
+[CONTRIBUTOR_RECOGNITION.md](CONTRIBUTOR_RECOGNITION.md).
 
 ## License
 
