@@ -35,13 +35,18 @@ jobs:
         include:
           # native linux/amd64 — the reproducible rebuild of the shipped asset
           - { os: ubuntu-latest, pkg-os: linux, pkg-arch: amd64 }
-          # cross linux/arm64 (aarch64 cross-compiler + qemu for the smoke run)
+          # cross linux/arm64 (aarch64 cross-compiler + sysroot for the qemu smoke)
           - { os: ubuntu-latest, pkg-os: linux, pkg-arch: arm64,
               rust-target: aarch64-unknown-linux-gnu, cross-cc: aarch64-linux-gnu-gcc }
           # native macOS/arm64 (Apple Silicon runner)
           - { os: macos-14, pkg-os: darwin, pkg-arch: arm64 }
-          # native windows/amd64 (cgo needs mingw)
-          - { os: windows-latest, pkg-os: windows, pkg-arch: amd64 }
+          # native windows/amd64 — the STATICLIB must be GNU-flavored (cargo
+          # msvc emits hyrt.lib; the cgo contract is -lhyrt -> libhyrt.a via
+          # mingw ld), so BOTH the bridge and the hyb CLI build under
+          # x86_64-pc-windows-gnu (consistent CRT; the script re-lays the
+          # staticlib into the packaged libhyrt.a path either way)
+          - { os: windows-latest, pkg-os: windows, pkg-arch: amd64,
+              rust-target: x86_64-pc-windows-gnu, cross-cc: gcc }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
@@ -59,17 +64,20 @@ jobs:
         if: matrix.rust-target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-aarch64-linux-gnu qemu-user-static
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu libc6-arm64-cross qemu-user-static
           rustup target add aarch64-unknown-linux-gnu
-      - name: cgo compiler (windows)
-        if: runner.os == 'Windows'
-        run: choco install mingw -y --no-progress
+      - name: cgo compiler + GNU bridge target (windows)
+        if: matrix.rust-target == 'x86_64-pc-windows-gnu'
+        run: |
+          choco install mingw -y --no-progress
+          rustup target add x86_64-pc-windows-gnu
       - name: Package (build + rustless smoke from the tarball)
         env:
           HYB_PKG_OS: ${{ matrix.pkg-os }}
           HYB_PKG_ARCH: ${{ matrix.pkg-arch }}
           HYB_RUST_TARGET: ${{ matrix.rust-target }}
           HYB_CC: ${{ matrix.cross-cc }}
+          HYB_QEMU: ${{ matrix.rust-target == 'aarch64-unknown-linux-gnu' && 'qemu-aarch64 -L /usr/aarch64-linux-gnu' || '' }}
         run: sh tools/package_release.sh "${{ inputs.version }}"
       - uses: actions/upload-artifact@v4
         with:
@@ -96,9 +104,27 @@ jobs:
           rustup toolchain install 1.99.0 --profile minimal
           rustup default 1.99.0
       - name: make bench (G2 call-overhead on the Actions tier)
+        # The bench's exit code distinguishes PASS/MISS by design; on a new
+        # tier a MISS is a RECORDABLE datapoint, not a red build. A verdict
+        # line in the output = the bench ran and measured; anything else is a
+        # real failure (build error etc.). The full log ships as an artifact.
         run: |
+          set +e
           make bench 2>&1 | tee bench-actions.txt
-          echo "--- recorded for the row-3/4 ledger: Actions tier number above ---"
+          rc=${PIPESTATUS[0]}
+          set -e
+          if grep -q 'VERDICT' bench-actions.txt; then
+            echo "bench produced a verdict (rc=$rc) — the datapoint is the deliverable (row 6)"
+            exit 0
+          fi
+          echo "bench produced NO verdict — real failure (rc=$rc)" >&2
+          exit 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-actions-tier
+          path: bench-actions.txt
+          if-no-files-found: ignore
 
   publish:
     needs: [build]

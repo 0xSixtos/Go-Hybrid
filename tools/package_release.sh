@@ -22,9 +22,12 @@ VER="${1:?usage: package_release.sh <version-tag, e.g. v0.1.0>}"
 VERNUM="${VER#v}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Cross-compile overrides (fleet release-matrix): HYB_RUST_TARGET (e.g.
-# aarch64-unknown-linux-gnu) + HYB_CC (the cross linker) + HYB_PKG_OS/ARCH.
+# aarch64-unknown-linux-gnu / x86_64-pc-windows-gnu) + HYB_CC (the cross
+# linker) + HYB_PKG_OS/ARCH + HYB_QEMU (the runner prefix for a foreign-arch
+# smoke, e.g. "qemu-aarch64 -L /usr/aarch64-linux-gnu").
 RUST_TARGET="${HYB_RUST_TARGET:-}"
 CROSS_CC="${HYB_CC:-}"
+QEMU_RUNNER="${HYB_QEMU:-}"
 PKG_OS="${HYB_PKG_OS:-$(uname -s | tr '[:upper:]' '[:lower:]')}"
 ARCH="${HYB_PKG_ARCH:-$(uname -m)}"
 case "$ARCH" in
@@ -35,6 +38,14 @@ esac
 DIST="$REPO_ROOT/dist"
 NAME="hybrid-${VER}-${PKG_OS}-${ARCH}"
 DIR="$DIST/hybrid-${VER}"
+# cargo's per-target linker env var, derived from the triple:
+# aarch64-unknown-linux-gnu -> CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
+if [ -n "$RUST_TARGET" ]; then
+    TARGET_VAR="CARGO_TARGET_$(echo "$RUST_TARGET" | tr 'a-z-' 'A-Z_')_LINKER"
+    CROSS_ENV="$TARGET_VAR=$CROSS_CC"
+else
+    CROSS_ENV=""
+fi
 
 echo "==> packaging $NAME"
 
@@ -50,8 +61,7 @@ command -v go >/dev/null || { echo "go not on PATH" >&2; exit 1; }
 echo "==> building hyrt staticlib (crate-local)"
 ( cd "$REPO_ROOT/runtime/rust/hyrt" && \
   if [ -n "$RUST_TARGET" ]; then \
-      CARGO_BUILD_JOBS=2 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="$CROSS_CC" \
-          cargo build --release --target "$RUST_TARGET" --quiet; \
+      env CARGO_BUILD_JOBS=2 $CROSS_ENV cargo build --release --target "$RUST_TARGET" --quiet; \
   else \
       CARGO_BUILD_JOBS=2 cargo build --release --quiet; fi )
 
@@ -60,17 +70,23 @@ echo "==> building hyrt staticlib (crate-local)"
 echo "==> building hyb (release)"
 ( cd "$REPO_ROOT/compiler" && \
   if [ -n "$RUST_TARGET" ]; then \
-      CARGO_BUILD_JOBS=2 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="$CROSS_CC" \
-          cargo build --release -p hyb --target "$RUST_TARGET" --quiet; \
+      env CARGO_BUILD_JOBS=2 $CROSS_ENV cargo build --release -p hyb --target "$RUST_TARGET" --quiet; \
   else \
       cargo build --release -p hyb --quiet; fi )
 HYB_BIN="$REPO_ROOT/compiler/target/release/hyb"
-[ -n "$RUST_TARGET" ] && HYB_BIN="$REPO_ROOT/compiler/target/$RUST_TARGET/release/hyb"
+if [ -n "$RUST_TARGET" ]; then
+    HYB_BIN="$REPO_ROOT/compiler/target/$RUST_TARGET/release/hyb"
+fi
+# windows: cargo emits hyb.exe; the packaged name follows the OS convention
+HYB_OUT_NAME=hyb
+[ "$PKG_OS" = "windows" ] && HYB_OUT_NAME=hyb.exe
+[ -f "$HYB_BIN" ] || HYB_BIN="${HYB_BIN}.exe"
+[ -f "$HYB_BIN" ] || { echo "hyb binary not found after build" >&2; exit 1; }
 
 # --- 3. assemble the tree ---
 rm -rf "$DIR"
 mkdir -p "$DIR"
-cp "$HYB_BIN" "$DIR/hyb"
+cp "$HYB_BIN" "$DIR/$HYB_OUT_NAME"
 cp "$REPO_ROOT/tools/RELEASE-INSTALL.md" "$DIR/INSTALL.md"
 mkdir -p "$DIR/runtime"
 cp -R "$REPO_ROOT/runtime/go" "$DIR/runtime/go"
@@ -107,22 +123,27 @@ fi
 echo "==> smoke test from the tarball (PATH without cargo)"
 SMOKE="$(mktemp -d)"
 ( cd "$SMOKE" && tar xzf "$DIST/$NAME.tar.gz" )
-RUSTLESS_PATH="$(echo "$PATH" | tr ':' '\n' | grep -v '.cargo/bin' | paste -sd:)"
-RUNNER=""
+# BSD paste (macOS) can't read stdin without a file operand — filter in shell
+RUSTLESS_PATH=""
+OLDIFS="$IFS"; IFS="::"
+for p in $PATH; do
+    case "$p" in *.cargo/bin*) ;; *) RUSTLESS_PATH="${RUSTLESS_PATH:+$RUSTLESS_PATH:}$p" ;; esac
+done
+IFS="$OLDIFS"
 # cross linux/arm64: build via GOARCH + the cross CC, execute under qemu
 # (hyb itself sets CGO_ENABLED=1 for the bridge; mirrored here so `go build`
 # cross-mode keeps cgo on — go defaults it OFF for foreign GOARCH)
 CROSS_GO_ENV=""
 if [ "$PKG_OS/$ARCH" = "linux/arm64" ] && [ -n "$RUST_TARGET" ]; then
     CROSS_GO_ENV="GOARCH=arm64 CGO_ENABLED=1 CC=$CROSS_CC"
-    command -v qemu-aarch64 >/dev/null 2>&1 && RUNNER="qemu-aarch64 "
+    QEMU_RUNNER="${QEMU_RUNNER:-qemu-aarch64}"
 fi
 if ( cd "$SMOKE" && env PATH="$RUSTLESS_PATH" $CROSS_GO_ENV \
-        "$SMOKE/hybrid-${VER}/hyb" build \
+        "$SMOKE/hybrid-${VER}/$HYB_OUT_NAME" build \
         "$REPO_ROOT/examples/01-hello/program.hy" -o "$SMOKE/hello" ) \
-    && $RUNNER"$SMOKE/hello" > "$SMOKE/out.txt" 2>&1 \
+    && $QEMU_RUNNER "$SMOKE/hello" > "$SMOKE/out.txt" 2>&1 \
     && grep -q 'hello, Hybrid!' "$SMOKE/out.txt"; then
-    echo "    smoke PASS ($PKG_OS/$ARCH${RUNNER:+ under $RUNNER}): $(head -1 "$SMOKE/out.txt")"
+    echo "    smoke PASS ($PKG_OS/$ARCH${QEMU_RUNNER:+ under $QEMU_RUNNER}): $(head -1 "$SMOKE/out.txt")"
 else
     echo "SMOKE FAILED ($PKG_OS/$ARCH)" >&2
     cat "$SMOKE/out.txt" 2>/dev/null >&2
