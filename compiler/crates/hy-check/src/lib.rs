@@ -539,6 +539,139 @@ mod tests {
     }
 
     #[test]
+    fn o52_struct_and_array_carrying_reference_fields_freeze_aliases_on_move() {
+        // Shallow copy of a struct carrying a map shares the underlying map header;
+        // moving h1 must freeze h2 (issue #27).
+        let r_struct = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(h holder) { h.m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               h1 := holder{m: map[string]int{\"k\": 0}}\n\
+               h2 := h1\n\
+               task worker(move h1)\n\
+               h2.m[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(
+            r_struct.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_struct.diagnostics
+        );
+        // the alias-freeze E3003 carries no tier0_rule on the current seam
+        // (only consumed moves stamp A7) — the code is the stable contract
+        assert!(r_struct.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // Positive control: a pure value struct (no reference fields) is deep-copied
+        // by value in Go, so copying before `move` stays legal.
+        let r_value_struct = check(
+            "struct point { x int\n y int }\n\
+             fn worker(p point) { fmt.println(p.x) }\n\
+             fn main() {\n\
+               p1 := point{x: 1, y: 2}\n\
+               p2 := p1\n\
+               task worker(move p1)\n\
+               fmt.println(p2.y)\n\
+             }",
+        );
+        assert_eq!(
+            r_value_struct.verdict,
+            Verdict::Accept,
+            "{:?}",
+            r_value_struct.diagnostics
+        );
+    }
+
+    #[test]
+    fn o52_paren_slice_projection_and_composite_literal_aliases_freeze_on_move() {
+        // 1. Parenthesized alias: `m2 := (agg)`
+        let r_paren = check(
+            "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               agg := map[string]int{\"k\": 0}\n\
+               m2 := (agg)\n\
+               task worker(move agg)\n\
+               m2[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(
+            r_paren.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_paren.diagnostics
+        );
+        assert!(r_paren.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // 2. Re-sliced alias: `s2 := s1[:]`
+        let r_slice = check(
+            "fn worker(s []int) { s[0] = 1 }\n\
+             fn main() {\n\
+               s1 := []int{0, 1}\n\
+               s2 := s1[:]\n\
+               task worker(move s1)\n\
+               s2[0] = 2\n\
+             }",
+        );
+        assert_eq!(
+            r_slice.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_slice.diagnostics
+        );
+        assert!(r_slice.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // 3. Field projection of reference type: `m2 := h1.m`
+        let r_proj = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(h holder) { h.m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               h1 := holder{m: map[string]int{\"k\": 0}}\n\
+               m2 := h1.m\n\
+               task worker(move h1)\n\
+               m2[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r_proj.verdict, Verdict::Reject, "{:?}", r_proj.diagnostics);
+        assert!(r_proj.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // 4. Composite literal capturing a live mutable binding without `move`: `h := holder{m: agg}`
+        let r_comp = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(h holder) { h.m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               agg := map[string]int{\"k\": 0}\n\
+               h := holder{m: agg}\n\
+               task worker(move h)\n\
+               agg[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r_comp.verdict, Verdict::Reject, "{:?}", r_comp.diagnostics);
+        assert!(r_comp.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // 5. Composite literal capturing a field projection (`holder{m: h1.m}`)
+        let r_comp_proj = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(h holder) { h.m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               h1 := holder{m: map[string]int{\"k\": 0}}\n\
+               h2 := holder{m: h1.m}\n\
+               task worker(move h2)\n\
+               h1.m[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(
+            r_comp_proj.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_comp_proj.diagnostics
+        );
+        assert!(r_comp_proj
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3003"));
+    }
+
+    #[test]
     fn a1c_spawn_shared_map_rejects() {
         let r = check(
             "fn tally(counts map[string]int) { counts[\"a\"]++ }\n\
