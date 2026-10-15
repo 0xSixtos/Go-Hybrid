@@ -772,6 +772,17 @@ impl<'a> Checker<'a> {
         }
         if l.values.len() == 1 && l.names.len() > 1 {
             // multi-value define from one expression
+            // Issue #146: `n int, ok = <-ch` / shared ascription on a receive.
+            if let Some(t) = &l.ty {
+                let want = self.shape_of_type(t);
+                self.check_recv_elem_against_target(
+                    st,
+                    &l.values[0],
+                    &want,
+                    l.values[0].span(),
+                    &format!("receive into `{}`", l.names[0]),
+                );
+            }
             let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
             let tys = self.multi_value_tys(st, &l.values[0], l.names.len());
             for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
@@ -814,6 +825,19 @@ impl<'a> Checker<'a> {
                 // type context (the struct def / map value / slice elem) —
                 // the nested nil needs no ascription to reject (HYB-E4001).
                 self.check_composite_nils(st, value);
+                // Issue #146: typed receive `n int = <-ch` against `chan job`
+                // used to accept and then fail `go build`. Compare the
+                // ascription against the channel element when both resolve.
+                if let Some(t) = &l.ty {
+                    let want = self.shape_of_type(t);
+                    self.check_recv_elem_against_target(
+                        st,
+                        value,
+                        &want,
+                        value.span(),
+                        &format!("receive into `{}`", name),
+                    );
+                }
                 // Ascription fills the gaps (O4.9 escape: "make the type
                 // visible to the checker"): when the initializer's shape
                 // does not resolve, the declared type decides. When inference
@@ -1376,6 +1400,17 @@ impl<'a> Checker<'a> {
             // with nested nils (`j = jobT{m: nil}`) carries its own type
             // context (HYB-E4001).
             self.check_composite_nils(st, v);
+            // Issue #146: `n = <-ch` where `n` has a known type and `ch` is
+            // `chan T` with incompatible T.
+            if let Some(want) = self.place_shape(st, t) {
+                self.check_recv_elem_against_target(
+                    st,
+                    v,
+                    &want,
+                    v.span(),
+                    &format!("receive into `{}`", t.render()),
+                );
+            }
         }
 
         // whole-binding rebind: `rows = append(rows, ...)`, parallel
