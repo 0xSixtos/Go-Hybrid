@@ -129,6 +129,14 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
             for v in &l.values {
                 ck.mark_move_in_value(st, v, format!("the move-define `{}`", v.render()));
             }
+            if l.names.len() == 1 && l.values.len() == 1 {
+             if let Expr::Ident { name: rhs_name, .. } = crate::model::unwrap_parens(&l.values[0]) {
+                 if st.env.contains_key(rhs_name) || st.scopes.iter().any(|s| s.contains_key(rhs_name)) {
+                     let resolved_root = crate::freeze::resolve_alias(st, rhs_name);
+                     st.aliases.insert(l.names[0].clone(), resolved_root);
+                 }
+             }
+         }
             // T22 (issue #12 parity with the flat pass): only `const` is
             // DEEPLY immutable; `let` is a SHALLOW immutable binding, so it
             // must NOT take the class-4 sendability shortcut.
