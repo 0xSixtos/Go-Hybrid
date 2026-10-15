@@ -344,6 +344,7 @@
       "rule": "T"
     },
     {
+
       "code": "HYB-E6001",
       "name": "div-by-const-zero",
       "category": "overflow-bounds",
@@ -355,6 +356,18 @@
         "if the divisor is meant to be dynamic, bind it to a variable first — run-time division by zero is a panic, not a compile error"
       ],
       "example": "y := x / 0   // reject: HYB-E6001 — constant zero divisor; Go cannot build the emitted module",
+"code": "HYB-E6002",
+      "name": "const-overflows-fixed-width",
+      "category": "overflow-bounds",
+      "severity": "error",
+      "title": "constant overflows its declared fixed-width type",
+      "summary": "A local or file-level binding whose declared type is a fixed-width integer and whose initializer is an integer constant outside that type's range is rejected: Go refuses to compile the emitted declaration (`cannot use N as T value (overflows)`), so an accepted Hybrid program would emit unbuildable Go (issue #148). Only the constant-initializer case is in scope — a variable operand stays a runtime truncation / conversion path (SPEC-LANGUAGE X4).",
+      "fixits": [
+        "use a constant that fits the declared type (e.g. `127` for `int8`, `255` for `uint8`/`byte`)",
+        "widen the declared type (e.g. `int16` / `int`) so the constant is representable",
+        "if truncation is intentional, convert from a variable (`x := 300; y := int8(x)`) — SPEC X4 defines runtime truncation for non-constant operands"
+      ],
+      "example": "var n int8 = 300   // reject: HYB-E6002 — 300 overflows int8; Go cannot build the emitted module",
       "rule": "BUILDABLE"
     },
     {
