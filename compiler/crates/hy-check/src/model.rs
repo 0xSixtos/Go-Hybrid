@@ -266,7 +266,14 @@ impl FnState {
             for (root, mv) in inner_root_moves {
                 if let Some(br) = self.env_lookup_mut(&root) {
                     if br.moved.is_none() {
-                        br.moved = Some(mv);
+                        br.moved = Some(mv.clone());
+                    }
+                }
+                for peer in self.share_group(&root) {
+                    if let Some(bp) = self.env_lookup_mut(&peer) {
+                        if bp.moved.is_none() {
+                            bp.moved = Some(mv.clone());
+                        }
                     }
                 }
             }
@@ -556,6 +563,13 @@ pub(crate) fn collect_move_operands<'e>(e: &'e Expr, out: &mut Vec<(&'e Expr, Sp
         Expr::SliceLit { items, .. } => {
             for item in items {
                 collect_move_operands(item, out);
+            }
+        }
+        Expr::Call { callee, args, .. }
+            if matches!(unwrap_parens(callee), Expr::Ident { name, .. } if name == "some") =>
+        {
+            for arg in args {
+                collect_move_operands(&arg.value, out);
             }
         }
         _ => {}

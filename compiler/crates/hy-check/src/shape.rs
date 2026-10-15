@@ -231,7 +231,7 @@ impl<'a> Checker<'a> {
                     // the type argument; defaults Unknown (fail-closed at
                     // boundaries, O4.9). See the TECH DEBT note in foreign.rs.
                     "make" => self.make_shape(args),
-                    "append" => args
+                    "append" | "some" => args
                         .first()
                         .map(|a| self.shape_of_expr(st, &a.value))
                         .unwrap_or(TypeShape::Unknown),
@@ -382,7 +382,7 @@ impl<'a> Checker<'a> {
             Expr::Move { operand, .. }
             | Expr::Try { operand, .. }
             | Expr::Paren { inner: operand, .. } => self.ty_of_expr(st, operand),
-            Expr::Call { callee, .. } => match crate::model::unwrap_parens(callee) {
+            Expr::Call { callee, args, span } => match crate::model::unwrap_parens(callee) {
                 Expr::FnLit { results, .. } => results.first().map(|r| r.ty.clone()),
                 Expr::Ident { name, .. } => {
                     if let Some(b) = self.lookup_binding(st, name) {
@@ -390,6 +390,15 @@ impl<'a> Checker<'a> {
                             return results.first().cloned();
                         }
                         return None;
+                    }
+                    if name == "some" {
+                        return args
+                            .first()
+                            .and_then(|a| self.ty_of_expr(st, &a.value))
+                            .map(|elem_ty| TypeExpr::Option {
+                                elem: Box::new(elem_ty),
+                                span: *span,
+                            });
                     }
                     self.fns
                         .get(name.as_str())

@@ -483,10 +483,24 @@ impl<'a> Checker<'a> {
                     return true;
                 }
             }
-            Stmt::Match { arms, .. } => {
+            Stmt::Match { subject, arms, .. } => {
+                let mut sroots = Vec::new();
+                collect_ref_roots(subject, &mut sroots);
+                let subject_reaches_param = sroots.iter().any(|r| r == param);
                 for arm in arms {
                     if self.block_mutates_param(&arm.body, param, depth) {
                         return true;
+                    }
+                    if subject_reaches_param {
+                        if let hy_syntax::MatchPattern::Path {
+                            binding: Some(bname),
+                            ..
+                        } = &arm.pattern
+                        {
+                            if self.block_mutates_param(&arm.body, bname, depth) {
+                                return true;
+                            }
+                        }
                     }
                 }
             }
@@ -606,8 +620,27 @@ impl<'a> Checker<'a> {
         bound: &HashSet<String>,
     ) -> HashSet<String> {
         let mut out: HashSet<String> = HashSet::new();
+        let mut match_aliases: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
         let flat = walk::flatten(body);
         for (stmt, _idx) in &flat.stmts {
+            if let Stmt::Match { subject, arms, .. } = stmt {
+                let mut sroots = Vec::new();
+                collect_ref_roots(subject, &mut sroots);
+                sroots.retain(|r| !bound.contains(r));
+                for arm in arms {
+                    if let hy_syntax::MatchPattern::Path {
+                        binding: Some(bname),
+                        ..
+                    } = &arm.pattern
+                    {
+                        match_aliases
+                            .entry(bname.clone())
+                            .or_default()
+                            .extend(sroots.iter().cloned());
+                    }
+                }
+            }
             // index-assign targets
             if let Stmt::Assign { targets, .. } = stmt {
                 for t in targets {
@@ -715,6 +748,22 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+        }
+        for _ in 0..8 {
+            let mut added = Vec::new();
+            for r in &out {
+                if let Some(targets) = match_aliases.get(r) {
+                    for t in targets {
+                        if !bound.contains(t) && !out.contains(t) {
+                            added.push(t.clone());
+                        }
+                    }
+                }
+            }
+            if added.is_empty() {
+                break;
+            }
+            out.extend(added);
         }
         out
     }
@@ -1282,6 +1331,115 @@ impl<'a> Checker<'a> {
         );
     }
 
+    /// Bind the payload variable `name` of a `match subject { some(name): ... }`
+    /// arm in the arm's block scope (`#243`). `option[T]` lowers to
+    /// `hyb_opt_T{v: T, ok: bool}`, so `some(name)` copies `subject.v` and
+    /// shares mutable GC storage with `subject`, inherits its `non_owned_origin`
+    /// and `moved` state, and links to any `const` root of `subject`.
+    pub(crate) fn bind_match_arm(
+        &mut self,
+        st: &mut FnState,
+        name: &str,
+        subject: &Expr,
+        managed: bool,
+    ) {
+        let shape = self.shape_of_expr(st, subject);
+        let ty = match self.ty_of_expr(st, subject) {
+            Some(hy_syntax::TypeExpr::Option { elem, .. }) => Some(*elem),
+            other => other,
+        };
+
+        let mut roots = Vec::new();
+        collect_ref_roots(subject, &mut roots);
+
+        let pre_tainted = roots.iter().any(|r| {
+            self.lookup_binding(st, r)
+                .map(|b| b.managed_taint)
+                .unwrap_or(false)
+        });
+        let pre_moved = roots.iter().find_map(|r| {
+            self.lookup_binding(st, r).and_then(|b| b.moved.clone())
+        });
+        let pre_origin = if self.shape_may_share(&shape) {
+            roots.iter().find_map(|r| {
+                self.non_owned_origin_of(st, r).map(|(o, via_share)| {
+                    if via_share || (!shape.is_reference_alias() && r != name) {
+                        format!("a may-share peer of {}", o)
+                    } else {
+                        o
+                    }
+                })
+            })
+        } else {
+            None
+        };
+        let pre_const_root = roots.iter().find_map(|r| {
+            let p = Place {
+                kind: PlaceKind::Ident(r.clone()),
+                span: subject.span(),
+            };
+            self.const_write_root(st, &p)
+        });
+
+        let mut pre_share_peers: Vec<String> = Vec::new();
+        let mut pre_alias_root: Option<String> = None;
+        for r in &roots {
+            if self.binding_may_share(st, r) {
+                pre_share_peers.push(r.clone());
+                pre_share_peers.extend(st.share_group(r));
+            }
+            if pre_alias_root.is_none()
+                && self
+                    .lookup_binding(st, r)
+                    .map(|b| b.shape.is_reference_alias())
+                    .unwrap_or(false)
+            {
+                pre_alias_root = Some(crate::freeze::resolve_alias(st, r));
+            }
+        }
+
+        let self_shadows_const = pre_const_root.as_deref() == Some(name);
+        self.define_binding(
+            st,
+            name,
+            shape.clone(),
+            ty,
+            self_shadows_const,
+            managed || pre_tainted,
+        );
+
+        self.record_may_share(st, name, subject);
+        self.record_alias(st, name, subject);
+
+        for peer in &pre_share_peers {
+            if peer != name {
+                st.share_edge(name, peer);
+            }
+        }
+        if let Some(aroot) = pre_alias_root {
+            st.aliases.entry(name.to_string()).or_insert(aroot);
+        } else if pre_share_peers.iter().any(|p| p == name) {
+            st.aliases
+                .entry(name.to_string())
+                .or_insert_with(|| name.to_string());
+        }
+        if let Some(croot) = pre_const_root {
+            if croot != name {
+                st.share_edge(name, &croot);
+                st.aliases.entry(name.to_string()).or_insert(croot);
+            }
+        }
+
+        if let Some(b) = st.env_lookup_mut(name) {
+            if b.moved.is_none() {
+                b.moved = pre_moved;
+            }
+            if b.non_owned_origin.is_none() {
+                b.non_owned_origin = pre_origin;
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Assignments (A3 inserts, A6 field stores, whole-binding rebinds)
     // -----------------------------------------------------------------------
@@ -1614,26 +1772,127 @@ impl<'a> Checker<'a> {
         let Expr::FnLit { params, body, .. } = crate::model::unwrap_parens(flit) else {
             return;
         };
+        let mut cst = st.clone();
         let mut here = declared.clone();
-        here.extend(params.iter().map(|p| p.name.clone()));
-        let flat = walk::flatten(body);
-        for (s, _) in &flat.stmts {
-            if let Stmt::Local(l) = s {
-                here.extend(l.names.iter().cloned());
-            }
+        for p in params {
+            here.insert(p.name.clone());
+            cst.aliases.remove(&p.name);
+            cst.share_clear(&p.name);
         }
+        let flat = walk::flatten(body);
         for (stmt, _idx) in &flat.stmts {
-            // write sites: rebinds, element/index writes, field stores,
-            // compound assigns (`+=`) — every Assign target root.
-            if let Stmt::Assign { targets, .. } = stmt {
-                for t in targets {
-                    if here.contains(t.root()) {
-                        continue;
-                    }
-                    if let Some(name) = self.const_write_root(st, t) {
-                        self.emit_const_write_error(&name, t.span);
+            match stmt {
+                Stmt::Local(l) => {
+                    if l.kind == hy_syntax::LocalKind::Const {
+                        for name in &l.names {
+                            here.remove(name);
+                            self.define_binding(
+                                &mut cst,
+                                name,
+                                TypeShape::Unknown,
+                                l.ty.clone(),
+                                true,
+                                false,
+                            );
+                        }
+                    } else if l.names.len() == l.values.len() {
+                        for (name, val) in l.names.iter().zip(l.values.iter()) {
+                            let mut roots = Vec::new();
+                            collect_ref_roots(val, &mut roots);
+                            let croot = roots.iter().find_map(|r| {
+                                if here.contains(r) {
+                                    return None;
+                                }
+                                let p = Place {
+                                    kind: PlaceKind::Ident(r.clone()),
+                                    span: val.span(),
+                                };
+                                self.const_write_root(&cst, &p)
+                            });
+                            if let Some(cr) = croot {
+                                here.remove(name);
+                                if name == &cr {
+                                    self.define_binding(
+                                        &mut cst,
+                                        name,
+                                        TypeShape::Unknown,
+                                        None,
+                                        true,
+                                        false,
+                                    );
+                                } else {
+                                    cst.aliases.insert(name.clone(), cr.clone());
+                                    cst.share_edge(name, &cr);
+                                }
+                            } else {
+                                here.insert(name.clone());
+                                cst.aliases.remove(name);
+                                cst.share_clear(name);
+                            }
+                        }
+                    } else {
+                        for name in &l.names {
+                            here.insert(name.clone());
+                            cst.aliases.remove(name);
+                            cst.share_clear(name);
+                        }
                     }
                 }
+                Stmt::Match { subject, arms, .. } => {
+                    let mut roots = Vec::new();
+                    collect_ref_roots(subject, &mut roots);
+                    let croot = roots.iter().find_map(|r| {
+                        if here.contains(r) {
+                            return None;
+                        }
+                        let p = Place {
+                            kind: PlaceKind::Ident(r.clone()),
+                            span: subject.span(),
+                        };
+                        self.const_write_root(&cst, &p)
+                    });
+                    for arm in arms {
+                        if let hy_syntax::MatchPattern::Path {
+                            binding: Some(bname),
+                            ..
+                        } = &arm.pattern
+                        {
+                            if let Some(cr) = &croot {
+                                here.remove(bname);
+                                if bname == cr {
+                                    self.define_binding(
+                                        &mut cst,
+                                        bname,
+                                        TypeShape::Unknown,
+                                        None,
+                                        true,
+                                        false,
+                                    );
+                                } else {
+                                    cst.aliases.insert(bname.clone(), cr.clone());
+                                    cst.share_edge(bname, cr);
+                                }
+                            } else {
+                                here.insert(bname.clone());
+                                cst.aliases.remove(bname);
+                                cst.share_clear(bname);
+                            }
+                        }
+                    }
+                }
+                // write sites: rebinds, element/index writes, field stores,
+                // compound assigns (`+=`) — every Assign target root.
+                Stmt::Assign { targets, .. } => {
+                    for t in targets {
+                        if here.contains(t.root()) {
+                            continue;
+                        }
+                        if let Some(name) = self.const_write_root(&cst, t) {
+                            self.emit_const_write_error(&name, t.span);
+                        }
+                    }
+                }
+                _ => {}
             }
             // `delete(const_map, k)` is a mutation too — the direct form is
             // checked in process_call; a closure's own delete never gets
@@ -1641,7 +1900,7 @@ impl<'a> Checker<'a> {
             let mut calls = Vec::new();
             walk::own_calls(stmt, &mut calls);
             for cr in &calls {
-                self.check_delete_const(st, cr, &here);
+                self.check_delete_const(&cst, cr, &here);
             }
             // nested closures — a NESTED closure's own locals shadow only at
             // its level (flatten does not descend into FnLit bodies, so each
@@ -1649,7 +1908,7 @@ impl<'a> Checker<'a> {
             let mut nested = Vec::new();
             walk::own_fnlits(stmt, &mut nested);
             for n in nested {
-                self.scan_closure_body(st, n, &here);
+                self.scan_closure_body(&cst, n, &here);
             }
         }
     }

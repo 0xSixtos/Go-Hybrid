@@ -166,6 +166,14 @@ impl<'a> Checker<'a> {
                 self.classify_composite(st, expr, parts.into_iter())
             }
             Expr::SliceLit { items, .. } => self.classify_composite(st, expr, items.iter()),
+            Expr::Call { callee, args, .. }
+                if matches!(
+                    unwrap_parens(callee),
+                    Expr::Ident { name, .. } if name == "some" && self.lookup_binding(st, name).is_none()
+                ) =>
+            {
+                self.classify_composite(st, expr, args.iter().map(|a| &a.value))
+            }
             // field/index/slice reads: classify the read's shape, but honor
             // immutable roots (views of const values stay immutable, OQ5)
             Expr::Field { .. } | Expr::Index { .. } | Expr::Slice { .. } => {

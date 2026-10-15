@@ -330,9 +330,16 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
             st.scope_pop();
             st.scope_pop();
         }
-        Stmt::Match { arms, .. } => {
+        Stmt::Match { subject, arms, .. } => {
             for arm in arms {
                 st.scope_push();
+                if let hy_syntax::MatchPattern::Path {
+                    binding: Some(name),
+                    ..
+                } = &arm.pattern
+                {
+                    ck.bind_match_arm(st, name, subject, managed);
+                }
                 check_body_boundaries(ck, st, &arm.body, managed);
                 st.scope_pop();
             }
