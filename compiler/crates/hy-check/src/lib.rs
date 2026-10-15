@@ -40,6 +40,7 @@ mod closures;
 mod foreign;
 mod freeze;
 mod loans;
+mod const_init;
 mod model;
 mod sendability;
 mod shape;
@@ -145,6 +146,8 @@ fn build_tables(ck: &mut Checker<'_>) {
                 ck.packages.insert(root.to_string());
             }
             Decl::Const(c) => {
+                // Issue #205: `const c = get_val()` must not pass check then fail go build.
+                ck.check_const_init_is_constant(&c.name, &c.value, None);
                 let b = ck.const_binding(c);
                 ck.consts.insert(c.name.clone(), b);
             }
