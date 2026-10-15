@@ -30,6 +30,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use hy_syntax::*;
 
+mod rangebind;
 mod shapes;
 use shapes::{import_path_of, lookup_conversion, lookup_rust_crate, lookup_unbound_crate, Conversion};
 

@@ -987,7 +987,30 @@ impl Emitter {
                             }
                         }
                     }
-                    2 => format!("for {}, {} := range {} {{", vars[0], vars[1], e),
+                    2 => {
+                        // Go rejects a range binding the body never reads
+                        // (`declared and not used`), and `for _, _ :=` is
+                        // itself invalid (`no new variables on left side of
+                        // :=`) - so an unread slot lowers to `_`, and a body
+                        // that reads neither binding drops the list entirely.
+                        // Same lowering the one-variable form already uses.
+                        // Issue #139.
+                        let a = if crate::rangebind::body_reads(body, &vars[0]) {
+                            vars[0].clone()
+                        } else {
+                            "_".to_string()
+                        };
+                        let c = if crate::rangebind::body_reads(body, &vars[1]) {
+                            vars[1].clone()
+                        } else {
+                            "_".to_string()
+                        };
+                        if a == "_" && c == "_" {
+                            format!("for range {} {{", e)
+                        } else {
+                            format!("for {}, {} := range {} {{", a, c, e)
+                        }
+                    }
                     n => {
                         return Err(EmitError::unsupported(format!(
                             "for-in with {} loop variables",

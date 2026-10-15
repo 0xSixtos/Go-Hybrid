@@ -1276,3 +1276,71 @@ fn unbound_crate_import_refused_honestly() {
         msg
     );
 }
+
+// ---------------------------------------------------------------------------
+// issue #139 - an accepted `for i, v in xs` whose binding is never read used
+// to emit Go that cannot build (`declared and not used`; and
+// `no new variables on left side of :=` when neither binding is read).
+// ---------------------------------------------------------------------------
+
+fn range_src(isi: &str) -> String {
+    format!(
+        "fn main() {{\n    xs := []int{{1, 2, 3}}\n    t := 0\n    for i, v in xs {{\n        {}\n    }}\n    fmt.println(\"{{t}}\")\n}}\n",
+        isi
+    )
+}
+
+#[test]
+fn range_binding_never_read_drops_to_blank() {
+    let go = emit(&range_src("t = t + i"));
+    assert!(
+        go.contains("for i, _ := range xs {"),
+        "unread second binding must be `_`:\n{}",
+        go
+    );
+}
+
+#[test]
+fn range_binding_only_second_read_drops_first_to_blank() {
+    let go = emit(&range_src("t = t + v"));
+    assert!(
+        go.contains("for _, v := range xs {"),
+        "unread first binding must be `_`:\n{}",
+        go
+    );
+}
+
+#[test]
+fn range_binding_both_read_stays_intact() {
+    let go = emit(&range_src("t = t + i + v"));
+    assert!(
+        go.contains("for i, v := range xs {"),
+        "both bindings read must be untouched:\n{}",
+        go
+    );
+}
+
+#[test]
+fn range_binding_neither_read_drops_the_binding_list() {
+    // `for _, _ := range xs` is still invalid Go, so both-unread has to drop
+    // the binding list entirely.
+    let go = emit("fn main() {\n    xs := []int{1, 2, 3}\n    for i, v in xs {\n        fmt.println(\"x\")\n    }\n}\n");
+    assert!(
+        go.contains("for range xs {"),
+        "both bindings unread must drop the list:\n{}",
+        go
+    );
+    assert!(!go.contains("_, _"), "must not emit `_, _`:\n{}", go);
+}
+
+#[test]
+fn range_binding_mention_inside_a_closure_counts_as_read() {
+    // A mention anywhere - a closure included - must suppress the `_`, since
+    // only the conservative direction is safe.
+    let go = emit("fn main() {\n    xs := []int{1, 2, 3}\n    f := fn() {\n        fmt.println(\"x\")\n    }\n    for i, v in xs {\n        f()\n        fmt.println(\"{v}\")\n    }\n}\n");
+    assert!(
+        go.contains("for _, v := range xs {"),
+        "a closure mention is still a read:\n{}",
+        go
+    );
+}
