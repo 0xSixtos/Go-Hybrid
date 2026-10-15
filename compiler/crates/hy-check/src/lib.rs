@@ -26,6 +26,7 @@
 //!     `managed` suppression/lint (HYB-E8001).
 //!   * `freeze.rs`  — A1b/A7 (O5 freeze-after-move, O13 consume).
 //!   * `loans.rs`   — A2/A3/A6/LOAN-ESCAPE + the environment updates.
+//!   * `const_overflow.rs` — HYB-E6002: constant init outside a fixed-width declared type.
 //!   * this file    — Pass B: the per-statement driver and the verdict.
 //!
 //! Tier-0 discipline (O4.9, rule FC — human directive 2026-10-13): the
@@ -36,6 +37,7 @@
 //! every rejection teaches (O17 — fix-its come from the hy-diag registry);
 //! diagnostics are returned in source order.
 
+mod const_overflow;
 mod closures;
 mod foreign;
 mod freeze;
@@ -145,6 +147,11 @@ fn build_tables(ck: &mut Checker<'_>) {
                 ck.packages.insert(root.to_string());
             }
             Decl::Const(c) => {
+                // Issue #148: a file-level `const n int8 = 300` must not
+                // pass the checker and then fail `go build` (overflow).
+                if let Some(ty) = &c.ty {
+                    ck.check_const_overflow_init(&c.name, ty, &c.value);
+                }
                 let b = ck.const_binding(c);
                 ck.consts.insert(c.name.clone(), b);
             }

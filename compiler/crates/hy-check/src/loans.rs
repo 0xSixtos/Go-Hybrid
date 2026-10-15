@@ -320,6 +320,11 @@ impl<'a> Checker<'a> {
             }
         } else {
             for (name, value) in l.names.iter().zip(l.values.iter()) {
+                // Issue #148: constant initializer outside a fixed-width
+                // declared type → HYB-E6002 (Go would refuse to build).
+                if let Some(t) = &l.ty {
+                    self.check_const_overflow_init(name, t, value);
+                }
                 // N1: a bare `nil` initializer under a non-nilable
                 // ascription is a compile error (HYB-E4001) — the SPEC's own
                 // example is `var s []int = nil`.
