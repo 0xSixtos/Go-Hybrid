@@ -618,6 +618,35 @@ impl Emitter {
             }
         }
 
+        // --- a SPEC primitive conversion: `u8(300)` -> `uint8(300)`.
+        //     SPEC-LANGUAGE line 1991 states `b := u8(300) // expect: 44`
+        //     as an executable test-claim (§ "Examples are tests"), but the
+        //     name used to fall through to the verbatim emission below and
+        //     die in Go as `undefined: u8`. Issue #147. ---
+        if let Expr::Ident { name, .. } = callee {
+            if let Some(go) = super::shapes::go_primitive_name(name) {
+                if args.len() != 1 {
+                    return Err(EmitError::unsupported(format!(
+                        "`{}` conversion takes exactly one argument",
+                        name
+                    )));
+                }
+                // A CONSTANT operand that does not fit the target has to
+                // be folded here: Go rejects `uint8(300)` outright (the
+                // truncation Go does is only for a variable operand), yet
+                // SPEC-LANGUAGE line 1991 asserts `u8(300) == 44` as an
+                // executable test-claim. The fold computes that same
+                // two's-complement truncation at emit time.
+                if let Some(folded) =
+                    super::constconv::fold_constant(&args[0].value, name)
+                {
+                    return Ok(format!("{}({})", go, folded));
+                }
+                let a = self.emit_call_arg(&args[0])?;
+                return Ok(format!("{}({})", go, a));
+            }
+        }
+
         // --- everything else: callee(args...) ---
         // An addressable argument auto-addresses at a pointer param (Batch
         // I, corpus 09: `scale_then_register(e, …)` with `e *env` — Go's

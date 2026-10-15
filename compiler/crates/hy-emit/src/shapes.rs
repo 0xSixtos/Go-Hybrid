@@ -539,3 +539,36 @@ mod tests {
         assert_eq!(import_path_of("strconv"), "strconv");
     }
 }
+
+// ---------------------------------------------------------------------------
+// SPEC primitive spellings (issue #147)
+// ---------------------------------------------------------------------------
+
+/// The SPEC-LANGUAGE fixed-width primitive names (SPEC-LANGUAGE §402, §2030)
+/// in their Go spelling. `byte`/`rune` are already Go builtins and `int`/`uint`
+/// are word-sized in both languages, so they are not listed — a name absent
+/// here is emitted verbatim, exactly as before.
+///
+/// Deliberately NOT translated: `usize`/`isize`. SPEC-LANGUAGE §402 states
+/// "There is no `usize`/`isize` at the language level" — they have no Go
+/// equivalent, and inventing one (`u64`) would be a silent wrong-type answer.
+/// Tone: failing to build is the honest outcome for a name the language does
+/// not define.
+pub fn go_primitive_name(name: &str) -> Option<&'static str> {
+    Some(match name {
+        // unsigned (SPEC spelling -> Go spelling)
+        "u8" => "uint8",
+        "u16" => "uint16",
+        "u32" => "uint32",
+        "u64" => "uint64",
+        // signed
+        "i8" => "int8",
+        "i16" => "int16",
+        "i32" => "int32",
+        "i64" => "int64",
+        // floats
+        "f32" => "float32",
+        "f64" => "float64",
+        _ => return None,
+    })
+}
