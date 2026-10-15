@@ -57,7 +57,15 @@ run_example() {
         # budget, not a fixed number (example comment) — the runner masks
         # the milliseconds field before diffing. The checksum IS exact
         # (deterministic per pinned crate version + fold algorithm).
+        local rc
         "$bin" >"$WORK/$name.out" 2>&1
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            note "FAIL $name (run exit $rc)"
+            sed 's/^/    /' "$WORK/$name.out"
+            FAIL=1
+            return
+        fi
         sed -E 's/^1M hashes in [0-9]+ms,/1M hashes in 0ms,/' "$WORK/$name.out" >"$WORK/$name.masked"
         if diff -u "$dir/expected.txt" "$WORK/$name.masked" >"$WORK/$name.diff"; then
             note "PASS $name (digests exact; timing masked; checksum exact)"
