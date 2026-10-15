@@ -78,7 +78,7 @@ impl<'a> Checker<'a> {
         if depth > 16 {
             return true;
         }
-        if shape.is_reference_alias() {
+        if shape.is_reference_alias() || shape.is_handle() {
             return true;
         }
         match shape {
@@ -89,6 +89,45 @@ impl<'a> Checker<'a> {
                 .map(|fields| {
                     fields.iter().any(|(_, ty)| {
                         self.shape_may_share_at(&self.shape_of_type(ty), depth + 1)
+                    })
+                })
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    /// Does a value of this shape carry a boundary handle (`OwnHandle` or
+    /// `BorrowHandle`) directly or inside a composite container? Used to
+    /// distinguish handle-preserving expressions (`doc2 := same_doc(doc)`,
+    /// `h := holder{doc: doc}`, `items := doc.array("items")?`) from boundary
+    /// calls that return a fresh Layer-1 Go copy (`out := enc.finish()?`
+    /// returning `[]byte`, O9).
+    pub(crate) fn shape_carries_handle(&self, shape: &TypeShape) -> bool {
+        self.shape_carries_handle_at(shape, 0)
+    }
+
+    fn shape_carries_handle_at(&self, shape: &TypeShape, depth: usize) -> bool {
+        if depth > 16 {
+            return true;
+        }
+        if shape.is_handle() {
+            return true;
+        }
+        match shape {
+            TypeShape::Slice(e)
+            | TypeShape::Array(e)
+            | TypeShape::Pointer(e)
+            | TypeShape::Chan(e) => self.shape_carries_handle_at(e, depth + 1),
+            TypeShape::Map(k, v) => {
+                self.shape_carries_handle_at(k, depth + 1)
+                    || self.shape_carries_handle_at(v, depth + 1)
+            }
+            TypeShape::Struct(Some(name)) => self
+                .structs
+                .get(name)
+                .map(|fields| {
+                    fields.iter().any(|(_, ty)| {
+                        self.shape_carries_handle_at(&self.shape_of_type(ty), depth + 1)
                     })
                 })
                 .unwrap_or(false),
