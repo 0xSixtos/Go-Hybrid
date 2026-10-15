@@ -88,14 +88,14 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 echo "==> downloading $ASSET"
 fetch "$BASE_URL/$ASSET" "$TMP/$ASSET"
-if fetch "$BASE_URL/$ASSET.sha256" "$TMP/$ASSET.sha256" 2>/dev/null; then
-    ( cd "$TMP" && sha256sum -c "$ASSET.sha256" >/dev/null 2>&1 ) \
-        || ( cd "$TMP" && shasum -a 256 -c "$ASSET.sha256" >/dev/null 2>&1 ) \
-        || { echo "install.sh: sha256 MISMATCH — aborting (do not use the download)" >&2; exit 1; }
-    echo "==> sha256 verified"
-else
-    echo "==> note: no sha256 asset published for this release; skipping verification"
+if ! fetch "$BASE_URL/$ASSET.sha256" "$TMP/$ASSET.sha256"; then
+    echo "install.sh: could not download $ASSET.sha256 — aborting before installation; retry when the checksum asset is available" >&2
+    exit 1
 fi
+( cd "$TMP" && sha256sum -c "$ASSET.sha256" >/dev/null 2>&1 ) \
+    || ( cd "$TMP" && shasum -a 256 -c "$ASSET.sha256" >/dev/null 2>&1 ) \
+    || { echo "install.sh: sha256 MISMATCH — aborting (do not use the download)" >&2; exit 1; }
+echo "==> sha256 verified"
 
 # --- extract ---
 mkdir -p "$INSTALL_DIR"
