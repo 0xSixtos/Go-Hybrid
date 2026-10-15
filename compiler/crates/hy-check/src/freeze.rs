@@ -232,7 +232,7 @@ impl<'a> Checker<'a> {
                         kind,
                         desc: desc.clone(),
                     });
-                    st.env_define(m, frozen);
+                    st.env.insert(m.clone(), frozen);
                 }
             }
         }
