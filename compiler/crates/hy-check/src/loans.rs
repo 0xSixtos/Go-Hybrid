@@ -417,7 +417,7 @@ impl<'a> Checker<'a> {
     /// #73: a shallow copy or generic identity that returns argument
     /// storage through `f(...)` (no interprocedural summary, same argument
     /// as #38's alias recording).
-    fn record_may_share(&self, st: &mut FnState, name: &str, value: &Expr) {
+    pub(crate) fn record_may_share(&self, st: &mut FnState, name: &str, value: &Expr) {
         match unwrap_parens(value) {
             Expr::Ident { name: src, .. } => {
                 if self.binding_may_share(st, src) {
@@ -574,7 +574,7 @@ impl<'a> Checker<'a> {
     /// arguments transfer ownership into the callee and are skipped. The
     /// new binding also inherits the source's non_owned_origin (O5.1): an
     /// alias of a parameter/receiver/range variable is itself non-owned.
-    fn record_alias(&self, st: &mut FnState, name: &str, value: &Expr) {
+    pub(crate) fn record_alias(&self, st: &mut FnState, name: &str, value: &Expr) {
         match unwrap_parens(value) {
             Expr::Ident { name: src, .. } => {
                 if let Some(b) = self.lookup_binding(st, src) {

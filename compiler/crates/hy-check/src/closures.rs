@@ -141,6 +141,9 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
                 }
             } else if l.names.len() == l.values.len() {
                 for (name, value) in l.names.iter().zip(l.values.iter()) {
+                    let moved_non_owned = crate::model::move_operand_ident(value)
+                        .and_then(|src| ck.lookup_binding(st, &src))
+                        .and_then(|b| b.non_owned_origin.clone());
                     // ascription fills gaps (O4.9); inference keeps priority
                     // when it resolves (boundary handles stay precise)
                     let inferred = ck.shape_of_expr(st, value);
@@ -149,7 +152,21 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
                         (_, inferred) => (inferred, ck.ty_of_expr(st, value)),
                     };
                     ck.define_binding(st, name, shape, ty, immutable, managed);
+                    if crate::model::move_operand_ident(value).is_some() {
+                        if let Some(origin) = moved_non_owned {
+                            if let Some(b) = st.env_lookup_mut(name) {
+                                b.non_owned_origin = Some(origin);
+                            }
+                        }
+                        continue;
+                    }
+                    // issue #137: track may_share edges and aliases inside closures
+                    // so local aliases of non-owned captured bindings inherit origin
+                    // and cannot bypass O5.1 / O5.4 move restrictions.
+                    ck.record_may_share(st, name, value);
+                    ck.record_alias(st, name, value);
                 }
+                ck.record_local_borrow_aliases(st, l);
             } else {
                 // multi-name define from one value (`v, ok := m[k]`, `a, b := f()`)
                 let (shapes, tys) = match l.values.first() {
