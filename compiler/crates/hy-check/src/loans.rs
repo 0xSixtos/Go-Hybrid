@@ -453,6 +453,23 @@ impl<'a> Checker<'a> {
                     self.record_literal_ref(st, name, it);
                 }
             }
+            // #109: a closure value holds live references to every outer
+            // binding its body captures — invoking it after a `move` of a
+            // captured binding is the alias-read/alias-write form of the
+            // freeze rule. Link the closure binding to each captured
+            // reference-bearing outer binding so a later `move` of either
+            // freezes the other (O5.2), exactly like a shallow copy.
+            Expr::FnLit { params, body, .. } => {
+                let mut bound: std::collections::HashSet<String> =
+                    params.iter().map(|p| p.name.clone()).collect();
+                let mut idents = Vec::new();
+                collect_capture_idents_block(body, &mut bound, &mut idents);
+                for id in idents {
+                    if self.binding_may_share(st, &id) {
+                        st.share_edge(name, &id);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -892,6 +909,221 @@ fn contains_addr_of_in_literal(e: &Expr) -> bool {
         Expr::SliceLit { items, .. } => items.iter().any(contains_addr_of_in_literal),
         Expr::Paren { inner, .. } => contains_addr_of_in_literal(inner),
         _ => false, // do not look through calls/indices — literal contents only
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #109: closure-capture ident collection (may-share edges at definition)
+// ---------------------------------------------------------------------------
+
+/// All identifier uses inside a closure body that may resolve to an
+/// enclosing binding. `bound` holds names shadowed by the closure's own
+/// parameters (and nested closures'), so those idents are not captures.
+/// Locals defined inside the body are deliberately NOT excluded: a name
+/// that also exists outside resolves to the outer binding on other paths,
+/// and an extra may-share edge is conservative in the safe direction.
+fn collect_capture_idents_block(
+    block: &hy_syntax::Block,
+    bound: &mut std::collections::HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    for s in &block.stmts {
+        collect_capture_idents_stmt(s, bound, out);
+    }
+}
+
+fn collect_capture_idents_stmt(
+    stmt: &hy_syntax::Stmt,
+    bound: &mut std::collections::HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    match stmt {
+        hy_syntax::Stmt::Local(l) => {
+            for v in &l.values {
+                collect_capture_idents_expr(v, bound, out);
+            }
+        }
+        hy_syntax::Stmt::Assign { targets, values, .. } => {
+            for t in targets {
+                collect_capture_idents_place(t, bound, out);
+            }
+            for v in values {
+                collect_capture_idents_expr(v, bound, out);
+            }
+        }
+        hy_syntax::Stmt::Expr { expr, .. } => collect_capture_idents_expr(expr, bound, out),
+        hy_syntax::Stmt::Send { chan, value, .. } => {
+            collect_capture_idents_expr(chan, bound, out);
+            collect_capture_idents_expr(value, bound, out);
+        }
+        hy_syntax::Stmt::If {
+            init,
+            cond,
+            then,
+            otherwise,
+            ..
+        } => {
+            if let Some(i) = init {
+                collect_capture_idents_stmt(i, bound, out);
+            }
+            collect_capture_idents_expr(cond, bound, out);
+            collect_capture_idents_block(then, bound, out);
+            if let Some(o) = otherwise {
+                collect_capture_idents_stmt(o, bound, out);
+            }
+        }
+        hy_syntax::Stmt::For { kind, body, .. } => {
+            match kind {
+                hy_syntax::ForKind::While { cond } => {
+                    collect_capture_idents_expr(cond, bound, out)
+                }
+                hy_syntax::ForKind::Range { lo, hi, .. } => {
+                    collect_capture_idents_expr(lo, bound, out);
+                    collect_capture_idents_expr(hi, bound, out);
+                }
+                hy_syntax::ForKind::Iterate { expr, .. } => {
+                    collect_capture_idents_expr(expr, bound, out)
+                }
+                hy_syntax::ForKind::Infinite => {}
+            }
+            collect_capture_idents_block(body, bound, out);
+        }
+        hy_syntax::Stmt::Return { values, .. } => {
+            for v in values {
+                collect_capture_idents_expr(v, bound, out);
+            }
+        }
+        hy_syntax::Stmt::Task { callee, args, .. } => {
+            collect_capture_idents_expr(callee, bound, out);
+            for a in args {
+                collect_capture_idents_expr(&a.value, bound, out);
+            }
+        }
+        hy_syntax::Stmt::Managed { body, .. } => collect_capture_idents_block(body, bound, out),
+        hy_syntax::Stmt::Match { subject, arms, .. } => {
+            collect_capture_idents_expr(subject, bound, out);
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    collect_capture_idents_expr(g, bound, out);
+                }
+                collect_capture_idents_block(&arm.body, bound, out);
+            }
+        }
+        hy_syntax::Stmt::Defer { call, .. } => collect_capture_idents_expr(call, bound, out),
+        hy_syntax::Stmt::Break { .. } | hy_syntax::Stmt::Continue { .. } => {}
+        hy_syntax::Stmt::Block { block, .. } => collect_capture_idents_block(block, bound, out),
+        hy_syntax::Stmt::Select { arms, .. } => {
+            for arm in arms {
+                match &arm.kind {
+                    hy_syntax::SelectArmKind::Send { chan, value } => {
+                        collect_capture_idents_expr(chan, bound, out);
+                        collect_capture_idents_expr(value, bound, out);
+                    }
+                    hy_syntax::SelectArmKind::Recv { chan, .. } => {
+                        collect_capture_idents_expr(chan, bound, out)
+                    }
+                    hy_syntax::SelectArmKind::Default => {}
+                }
+                collect_capture_idents_block(&arm.body, bound, out);
+            }
+        }
+    }
+}
+
+fn collect_capture_idents_expr(
+    expr: &Expr,
+    bound: &mut std::collections::HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    match expr {
+        Expr::Ident { name, .. } => {
+            if !bound.contains(name) {
+                out.push(name.clone());
+            }
+        }
+        Expr::FnLit { params, body, .. } => {
+            let mut nested = bound.clone();
+            for p in params {
+                nested.insert(p.name.clone());
+            }
+            collect_capture_idents_block(body, &mut nested, out);
+        }
+        Expr::Lit { .. } => {}
+        Expr::Interp { parts, .. } => {
+            for p in parts {
+                if let hy_syntax::InterpPart::Expr(e) = p {
+                    collect_capture_idents_expr(e, bound, out);
+                }
+            }
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_capture_idents_expr(lhs, bound, out);
+            collect_capture_idents_expr(rhs, bound, out);
+        }
+        Expr::Unary { operand, .. } | Expr::AddrOf { operand, .. } => {
+            collect_capture_idents_expr(operand, bound, out)
+        }
+        Expr::Move { operand, .. } | Expr::Try { operand, .. } => {
+            collect_capture_idents_expr(operand, bound, out)
+        }
+        Expr::Receive { chan, .. } => collect_capture_idents_expr(chan, bound, out),
+        Expr::Index { base, index, .. } => {
+            collect_capture_idents_expr(base, bound, out);
+            collect_capture_idents_expr(index, bound, out);
+        }
+        Expr::Slice { base, lo, hi, .. } => {
+            collect_capture_idents_expr(base, bound, out);
+            if let Some(lo) = lo {
+                collect_capture_idents_expr(lo, bound, out);
+            }
+            if let Some(hi) = hi {
+                collect_capture_idents_expr(hi, bound, out);
+            }
+        }
+        Expr::Field { base, .. } => collect_capture_idents_expr(base, bound, out),
+        Expr::Call { callee, args, .. } => {
+            collect_capture_idents_expr(callee, bound, out);
+            for a in args {
+                collect_capture_idents_expr(&a.value, bound, out);
+            }
+        }
+        Expr::StructLit { fields, .. } => {
+            for f in fields {
+                collect_capture_idents_expr(&f.value, bound, out);
+            }
+        }
+        Expr::SliceLit { items, .. } => {
+            for i in items {
+                collect_capture_idents_expr(i, bound, out);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                collect_capture_idents_expr(k, bound, out);
+                collect_capture_idents_expr(v, bound, out);
+            }
+        }
+        Expr::Paren { inner, .. } => collect_capture_idents_expr(inner, bound, out),
+    }
+}
+
+fn collect_capture_idents_place(
+    place: &Place,
+    bound: &mut std::collections::HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    match &place.kind {
+        PlaceKind::Ident(name) => {
+            if !bound.contains(name) {
+                out.push(name.clone());
+            }
+        }
+        PlaceKind::Index { base, index } => {
+            collect_capture_idents_place(base, bound, out);
+            collect_capture_idents_expr(index, bound, out);
+        }
+        PlaceKind::Field { base, .. } => collect_capture_idents_place(base, bound, out),
+        PlaceKind::AddrOf { base } => collect_capture_idents_place(base, bound, out),
     }
 }
 
