@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use hy_syntax::*;
 
 mod shapes;
-use shapes::{import_path_of, lookup_conversion, lookup_rust_crate, Conversion};
+use shapes::{import_path_of, lookup_conversion, lookup_rust_crate, lookup_unbound_crate, Conversion};
 
 // ---------------------------------------------------------------------------
 // Hybrid prelude (auto-generated Go, emitted only when the program uses it)
@@ -105,6 +105,19 @@ impl EmitError {
     fn unsupported(what: impl Into<String>) -> Self {
         EmitError {
             message: format!("emitter (MVP-0): not yet supported: {}", what.into()),
+        }
+    }
+
+    /// The honest unshipped-crate error (the adoption-audit follow-up): the
+    /// checker's foreign table knows the crate's type shapes, but the
+    /// runtime ships no binding for it — the program cannot build or run.
+    /// Deliberately NOT "not yet supported": the crate is known, the
+    /// decision was made, the diagnostic should say so.
+    pub fn unbound_crate(crate_name: &str) -> Self {
+        EmitError {
+            message: format!(
+                "the runtime does not ship a `{crate_name}` binding — the checker's foreign table knows its type shapes (that is what drives the A7 consume-mode fixture), so `hyb check` passes, but no Go binding package is vendored and this program cannot build or run; the external audit priced shipping the crate at 250-400 lines and declined. Remove the use, or vendor a binding (runtime/go/{crate_name}binding + the RUST_CRATES descriptor) and drop `{crate_name}` from UNBOUND_RUST_CRATES in the same commit"
+            ),
         }
     }
 }
@@ -498,6 +511,13 @@ impl Emitter {
                         // assembled into the build workspace by `hyb build`;
                         // imports register at call sites (use_package).
                         if lookup_rust_crate(crate_name).is_none() {
+                            // Known to the checker but unshipped (the audit's
+                            // flate2 row): the honest message, not a
+                            // "not yet supported" that reads like a language
+                            // gap.
+                            if lookup_unbound_crate(crate_name).is_some() {
+                                return Err(EmitError::unbound_crate(crate_name));
+                            }
                             return Err(EmitError::unsupported(format!(
                                 "rust crate import `{}` is not in the pinned binding set",
                                 crate_name

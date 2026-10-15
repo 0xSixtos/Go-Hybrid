@@ -16,7 +16,8 @@ use super::{
 };
 
 use super::shapes::{
-    lookup_conversion, lookup_member, lookup_rust_crate, MemberKind, RustCrateDesc,
+    lookup_conversion, lookup_member, lookup_rust_crate, lookup_unbound_crate, MemberKind,
+    RustCrateDesc,
 };
 
 /// Operator precedence (Go tiers; higher binds tighter).
@@ -533,6 +534,15 @@ impl Emitter {
         // --- package-qualified calls ---
         if let Expr::Field { base, name, .. } = callee {
             if let Expr::Ident { name: pkg, .. } = base.as_ref() {
+                // Known to the checker, unshipped by the runtime (the
+                // audit's flate2 row): the honest refusal must come BEFORE
+                // the package-root gate — an unbound crate is not a Go
+                // package root, so its call used to fall through this whole
+                // block, emit verbatim, and die in the toolchain with
+                // `undefined: flate2`.
+                if lookup_unbound_crate(pkg).is_some() {
+                    return Err(EmitError::unbound_crate(pkg));
+                }
                 if is_package_root(pkg) {
                     return self.emit_pkg_call(pkg, name, args);
                 }
@@ -794,6 +804,15 @@ impl Emitter {
         //     owns param order (named args place by name — Go has none). ---
         if let Some(crate_desc) = lookup_rust_crate(pkg) {
             return self.emit_rust_call(crate_desc, name, args);
+        }
+
+        // Known to the checker, unshipped by the runtime (the audit's
+        // flate2 row): refuse HERE, not at go build with `undefined: flate2`
+        // — a call without an explicit import line used to reach this
+        // fallthrough, get recorded as a plain Go package use, and die in
+        // the toolchain with a message about std packages.
+        if lookup_unbound_crate(pkg).is_some() {
+            return Err(EmitError::unbound_crate(pkg));
         }
 
         self.use_package(pkg);
