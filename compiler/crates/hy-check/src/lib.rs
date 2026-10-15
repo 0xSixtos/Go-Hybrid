@@ -2890,5 +2890,215 @@ mod tests {
         );
         assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
     }
+
+    #[test]
+    fn closure_ascribed_local_assign_rebind_and_self_shadow_reject() {
+        // 1. Type-ascribed local inside a closure (`var alias map[string]int = m`)
+        // preserves `non_owned_origin` and rejects `move alias` with HYB-E3004.
+        let r_ascribed_capture = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 1)\n\
+               f := fn() {\n\
+                 var alias map[string]int = m\n\
+                 task worker(move alias, done)\n\
+               }\n\
+               f()\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_ascribed_capture.verdict, Verdict::Reject);
+        assert!(r_ascribed_capture
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3004"));
+
+        // 2. Assignment rebind inside a closure (`alias = m`) inherits
+        // `non_owned_origin` and rejects `move alias` with HYB-E3004.
+        let r_assign_capture = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 1)\n\
+               f := fn() {\n\
+                 var alias map[string]int\n\
+                 alias = m\n\
+                 task worker(move alias, done)\n\
+               }\n\
+               f()\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_assign_capture.verdict, Verdict::Reject);
+        assert!(r_assign_capture
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3004"));
+
+        // 3. Closure-owned map aliased via ascribed define (`var m2 map[string]int = m1`)
+        // or assignment (`m2 = m1`) freezes when `m1` is moved (HYB-E3003).
+        let r_closure_freeze = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               done := make(chan bool, 1)\n\
+               f := fn() {\n\
+                 m1 := map[string]int{\"k\": 0}\n\
+                 var m2 map[string]int\n\
+                 m2 = m1\n\
+                 task worker(move m1, done)\n\
+                 m2[\"k\"] = 2\n\
+               }\n\
+               f()\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_closure_freeze.verdict, Verdict::Reject);
+        assert!(r_closure_freeze
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3003"));
+
+        // 4. Self-shadowing define (`m := m`) inside a closure preserves the
+        // captured binding's `non_owned_origin` and rejects `move m` (HYB-E3004).
+        let r_self_shadow = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 1)\n\
+               f := fn() {\n\
+                 m := m\n\
+                 task worker(move m, done)\n\
+               }\n\
+               f()\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_self_shadow.verdict, Verdict::Reject);
+        assert!(r_self_shadow
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3004"));
+    }
+
+    #[test]
+    fn self_rebind_assign_and_param_peer_rebind_preserve_origin_and_shares() {
+        // 1. Self-rebind assignment (`s = s[:]`, `m = same(m)`) on a parameter
+        // preserves `non_owned_origin` and rejects `move` with HYB-E3004.
+        let r_param_reslice = check(
+            "fn worker(s []int, done chan<- bool) {\n\
+               s[0] = 1\n\
+               done <- true\n\
+             }\n\
+             fn spawn_it(s []int, done chan<- bool) {\n\
+               s = s[:]\n\
+               task worker(move s, done)\n\
+             }\n\
+             fn main() {\n\
+               s := []int{0, 1}\n\
+               done := make(chan bool, 1)\n\
+               spawn_it(s, done)\n\
+               s[0] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_param_reslice.verdict, Verdict::Reject);
+        assert!(r_param_reslice
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3004"));
+
+        // 2. Rebinding a struct parameter `h` after `h2 := h` transfers `h`'s
+        // non-owned origin to `h2`, so `move h2` still rejects with HYB-E3004.
+        let r_peer_rebind = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(h holder, done chan<- bool) {\n\
+               h.m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn launder(h holder, done chan<- bool) {\n\
+               h2 := h\n\
+               h = holder{m: map[string]int{\"fresh\": 0}}\n\
+               task worker(move h2, done)\n\
+             }\n\
+             fn main() {\n\
+               h := holder{m: map[string]int{\"k\": 0}}\n\
+               done := make(chan bool, 1)\n\
+               launder(h, done)\n\
+               h.m[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_peer_rebind.verdict, Verdict::Reject);
+        assert!(r_peer_rebind
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3004" && d.message.contains("may-share peer")));
+
+        // 3. Self-rebind of an owned map (`m1 = same(m1)`) preserves its
+        // existing `may_share` edge to `h := holder{m: m1}`, so `move m1`
+        // freezes `h` (HYB-E3003).
+        let r_self_rebind_share = check(
+            "struct holder { m map[string]int }\n\
+             fn same(m map[string]int) map[string]int { return m }\n\
+             fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m1 := map[string]int{\"k\": 0}\n\
+               h := holder{m: m1}\n\
+               m1 = same(m1)\n\
+               done := make(chan bool, 1)\n\
+               task worker(move m1, done)\n\
+               h.m[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_self_rebind_share.verdict, Verdict::Reject);
+        assert!(r_self_rebind_share
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3003"));
+
+        // 4. Positive control: rebinding a parameter to a genuinely fresh map
+        // (`m = map[string]int{"fresh": 0}`) re-owns `m` and stays accepted.
+        let r_fresh_rebind = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn spawn_fresh(m map[string]int, done chan<- bool) {\n\
+               m = map[string]int{\"fresh\": 0}\n\
+               task worker(move m, done)\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 1)\n\
+               spawn_fresh(m, done)\n\
+               m[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(
+            r_fresh_rebind.verdict,
+            Verdict::Accept,
+            "{:?}",
+            r_fresh_rebind.diagnostics
+        );
+    }
 }
+
 
