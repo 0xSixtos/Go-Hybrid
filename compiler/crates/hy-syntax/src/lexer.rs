@@ -113,6 +113,15 @@ const KEYWORDS: &[&str] = &[
     // `mut x := 3` silently emitted the word `mut` into Go — a broken
     // build from accepted source. Reserved so it fails at parse.
     "mut",
+    // Select-arm words (issue #104): the parser has always expected
+    // Tok::Kw("default") / Tok::Kw("case") in select bodies, but neither
+    // was in KEYWORDS — so `default:` arms hit the statement-shaped path
+    // and failed to parse (dead default-arm branch), while Go-style
+    // `case <-ch:` silently became a Send on ident `case` and emitted
+    // `case case <- ch:` (invalid Go). Reserving both makes default: a
+    // live arm form and case a clean parse error, like `mut`.
+    "default",
+    "case",
 ];
 
 /// Lex a whole source file. On success the token stream ends with a single

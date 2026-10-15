@@ -3269,6 +3269,55 @@ mod tests {
     }
 
     #[test]
+    fn default_select_arm_parses() {
+        // `default` was never in KEYWORDS, so at_kw("default") in
+        // parse_select was dead code and a `default:` arm failed to parse
+        // ("expected expression, found `:`") — issue #104. Reserving it
+        // makes the existing Default arm branch live.
+        let src = "\
+fn main() {
+    ch := make(chan int, 1)
+    select {
+        v := <-ch:
+            fmt.println(v)
+        default:
+            fmt.println(\"d\")
+    }
+}
+";
+        if let Err(diags) = parse_file("t.hy", src) {
+            panic!("default arm must parse: {:?}", diags);
+        }
+    }
+
+    #[test]
+    fn case_select_arm_is_reserved_not_silently_fused() {
+        // Go-style `case <-ch:` used to parse: `case` was an unreserved
+        // ident, the same-line `<-` fusion turned `case <-ch` into a Send
+        // on ident `case`, and the emitter wrote `case case <- ch:`
+        // (invalid Go) — issue #104. Now `case` is a keyword and the arm
+        // fails cleanly at parse.
+        let src = "\
+fn main() {
+    ch := make(chan int)
+    select {
+        case <-ch:
+            return
+    }
+}
+";
+        let errs = match parse_file("t.hy", src) {
+            Ok(_) => panic!("case arm must fail at parse, not emit broken Go"),
+            Err(d) => d,
+        };
+        assert!(
+            errs.iter().any(|d| d.message.contains("`case`")),
+            "error should name the keyword: {:?}",
+            errs
+        );
+    }
+
+    #[test]
     fn interp_field_chain_and_calls() {
         // corpus 03: "processed={stats.processed} failures={stats.failures}"
         let f = parse_src(
