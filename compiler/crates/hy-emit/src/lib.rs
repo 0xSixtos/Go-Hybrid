@@ -31,6 +31,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use hy_syntax::*;
 
 mod rangebind;
+mod constconv;
 mod shapes;
 use shapes::{import_path_of, lookup_conversion, lookup_rust_crate, lookup_unbound_crate, Conversion};
 
@@ -1144,7 +1145,12 @@ impl Emitter {
                 .join(".");
             format!("{}.{}", root, joined)
         } else {
-            name.to_string()
+            // A SPEC primitive spelling maps to its Go equivalent
+            // (`u16` -> `uint16`); anything else stays verbatim. Issue #147.
+            match shapes::go_primitive_name(name) {
+                Some(go) => go.to_string(),
+                None => name.to_string(),
+            }
         }
     }
 
@@ -1160,6 +1166,10 @@ impl Emitter {
             TypeExpr::Named { name, .. } if !name.contains('.') => match name.as_str() {
                 "bool" => "false".into(),
                 "string" => "\"\"".into(),
+                // A SPEC primitive spelling takes its own zero value
+                // (`var n u16` -> `var n uint16 = 0`, not `*new(u16)`).
+                // Issue #147.
+                _ if shapes::go_primitive_name(name).is_some() => "0".into(),
                 "byte" | "rune" | "int" | "int8" | "int16" | "int32" | "int64" | "uint"
                 | "uint8" | "uint16" | "uint32" | "uint64" | "uintptr" | "float32" | "float64"
                 | "complex64" | "complex128" => "0".into(),
