@@ -63,8 +63,8 @@ def read_expected(path):
     return verdict, (rule or None), hazards
 
 
-def checker_rejects(bin_path, hy_path):
-    """True iff the checker rejects with at least one error diagnostic."""
+def checker_rejects(bin_path, hy_path, expected_rule):
+    """Require the first error to match the pre-registered rejection rule."""
     proc = subprocess.run(
         [bin_path, "check", hy_path, "--json"],
         capture_output=True, text=True, timeout=60,
@@ -76,9 +76,12 @@ def checker_rejects(bin_path, hy_path):
     summary = payload.get("summary", {})
     diags = payload.get("diagnostics", [])
     errors = [d for d in diags if d.get("severity") == "error"]
+    first_rule = errors[0].get("tier0_rule") if errors else None
     return (
-        summary.get("verdict") == "reject" and len(errors) >= 1,
-        f"verdict={summary.get('verdict')} errors={len(errors)}",
+        summary.get("verdict") == "reject"
+        and first_rule is not None and first_rule == expected_rule,
+        f"verdict={summary.get('verdict')} errors={len(errors)} "
+        f"first_rule={first_rule} expected_rule={expected_rule}",
     )
 
 
@@ -151,7 +154,7 @@ def main():
         verdict, rule, hazards = expected
         if verdict == "REJECT":
             reject_total += 1
-            ok, detail = checker_rejects(bin_path, path)
+            ok, detail = checker_rejects(bin_path, path, rule)
             if ok:
                 reject_pass += 1
                 print(f"PASS  {name} (reject {rule})")
