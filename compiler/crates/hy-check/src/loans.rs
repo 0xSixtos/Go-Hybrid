@@ -738,6 +738,27 @@ impl<'a> Checker<'a> {
         _span: Span,
         idx: usize,
     ) {
+        // A3 loan creation on assignment: `x = &m[k]`
+        if op == AssignOp::Assign && targets.len() == values.len() {
+            for (t, v) in targets.iter().zip(values.iter()) {
+                if let PlaceKind::Ident(name) = &t.kind {
+                    if let Some(path) = walk::addr_of_index_base_path(v) {
+                        let binding = name.clone();
+                        let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
+                        st.loans.push(Loan {
+                            target: LoanTarget::MapSlot {
+                                binding: binding.clone(),
+                                path,
+                            },
+                            created: idx,
+                            last,
+                            span: v.span(),
+                            desc: format!("`{} = {}`", binding, v.render()),
+                        });
+                    }
+                }
+            }
+        }
         // T22 (issue #37): `const` is deeply immutable — a rebind, an
         // element/index write, or a field store whose ROOT resolves to a
         // `const` binding is HYB-E3006. `Binding::immutable` is set iff

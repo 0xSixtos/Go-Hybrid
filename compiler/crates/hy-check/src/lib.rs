@@ -1345,6 +1345,27 @@ mod tests {
     }
 
     #[test]
+    fn a3_assign_rebind_loan_window_rejects() {
+        // Issue #138: re-assignment `s = &e.m["a"]` opens the same loan window
+        // as the define `s := &e.m["a"]`.
+        let r = check(
+            "struct svc { n int }\n\
+             struct env { m map[string]svc }\n\
+             fn f(e *env) {\n\
+               var s *svc\n\
+               s = &e.m[\"a\"]\n\
+               e.m[\"b\"] = svc{n: 1}\n\
+               s.n = 2\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A3"));
+        let d = &r.diagnostics[0];
+        assert_eq!(d.code, "HYB-E3102");
+        assert!(d.message.contains("insert"));
+    }
+
+    #[test]
     fn a3_insert_after_last_use_accepts() {
         let r = check(
             "struct svc { n int }\n\

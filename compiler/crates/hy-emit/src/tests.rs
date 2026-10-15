@@ -725,6 +725,26 @@ fn slot_loan_copies_and_stores_back() {
 }
 
 #[test]
+fn assign_slot_loan_copies_and_stores_back() {
+    // Issue #138: re-assignment `n = &g.nodes[from]` lowers to copy-read
+    // and schedules store-back at block's end.
+    let go = emit(
+        "struct node {\n    edges []int\n}\n\nstruct graph {\n    nodes map[int]node\n}\n\nfn (g *graph) connect(from int, to int) {\n    var n node\n    n = &g.nodes[from]\n    n.edges = append(n.edges, to)\n}\n",
+    );
+    assert!(
+        go.contains("n = g.nodes[from]"),
+        "copy assign (no &):\n{}",
+        go
+    );
+    assert!(go.contains("n.edges = append(n.edges, to)"), ":\n{}", go);
+    assert!(
+        go.contains("g.nodes[from] = n"),
+        "store-back at block end:\n{}",
+        go
+    );
+}
+
+#[test]
 fn single_var_iterate_value_semantics() {
     // Slices: `for w in shard` binds the VALUE (Go's range binds the index).
     let go = emit("fn f(shard []int) {\n    for w in shard {\n        _ = w\n    }\n}\n");
