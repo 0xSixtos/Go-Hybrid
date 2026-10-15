@@ -1,5 +1,7 @@
 # STATUS (for the human — 15 lines max)
 
+- Contributor installer fix (2026-10-15): validate extracted CLI/runtime and smoke CLI before deleting a working installation. Three invalid-upgrade regressions fail on `f99d6d0` and pass patched; healthy upgrade, 8 installer tests, and 19 Python tooling tests pass. Full Go/Rust suites require upstream CI (toolchains unavailable locally).
+
 - Phase: **MVP DONE + v0.1.0 released + community OPEN** — the stale family rebased+merged, audit follow-ups (a)/(b)/(c) LANDED, the bounty PR conveyor running
 - **Stale family (#28/#30/#32/#34, carelessdept) CLOSED by maintainer-assisted rebase**: each PR verified hole-by-hole against the seam first (some subsumed by pr-35's may-share, the rest live), ported through the seam's architecture with the authors' tests intact, CI-validated per head, merged with per-PR seam notes; bounty standing preserved
 - **Audit follow-ups landed**: (a) composite-nil — `job{m: nil}` rejects E4001 at every type-known site incl. inside managed (corpus 28); (b) flate2 early-fail — unshipped crates refuse at emit with the honest message on BOTH shapes, check stays type-pure for the A7 fixture; (c) pin-drift — hyb/build.rs refuses a mismatched bake with the three honest ways out + rerun-if-env-changed kills the stale-bake half
