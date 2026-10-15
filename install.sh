@@ -107,11 +107,18 @@ cp "$TMP/hybrid-${TAG}/hyb" "$INSTALL_DIR/bin/hyb"
 chmod +x "$INSTALL_DIR/bin/hyb"
 
 # --- launcher (bakes the install path; runtime override still wins) ---
+# Encode the path as a shell literal; the launcher parses it again later.
+# The closing quote also preserves trailing newlines in command substitution.
+shell_quote() {
+    printf "'"
+    printf '%s' "$1" | sed "s/'/'\\\\''/g"
+    printf "'"
+}
 mkdir -p "$BIN_DIR"
 cat > "$BIN_DIR/hyb" <<LAUNCH
 #!/bin/sh
 # Hybrid launcher (installed by install.sh) — wires the packaged runtime.
-HYB_HOME="$INSTALL_DIR"
+HYB_HOME=$(shell_quote "$INSTALL_DIR")
 [ -n "\${HYB_INSTALL_DIR:-}" ] && HYB_HOME="\$HYB_INSTALL_DIR"
 export HYB_RUNTIME_DIR="\${HYB_RUNTIME_DIR:-\$HYB_HOME/runtime}"
 exec "\$HYB_HOME/bin/hyb" "\$@"
