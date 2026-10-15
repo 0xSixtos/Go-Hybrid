@@ -672,6 +672,130 @@ mod tests {
     }
 
     #[test]
+    fn closure_boundary_rejects_outer_or_closure_moved_binding_e3003() {
+        // Issue #29: outer binding `m` is moved in `main`, and closure `f`
+        // spawns a task with `m` — must not silently pass via `b.moved.is_some() => Ok`.
+        let r_outer = check(
+            "fn worker(m map[string]int, done chan<- bool) { m[\"k\"] = 1\n done <- true }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 2)\n\
+               f := fn() {\n\
+                 task worker(m, done)\n\
+               }\n\
+               task worker(move m, done)\n\
+               f()\n\
+             }",
+        );
+        assert_eq!(
+            r_outer.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_outer.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_outer).as_deref(), Some("A1b"));
+        assert!(r_outer.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // Closure-local binding moved once then shared/moved again at a second
+        // boundary inside the same closure must also reject with HYB-E3003.
+        let r_inner = check(
+            "fn worker(m map[string]int, done chan<- bool) { m[\"k\"] = 1\n done <- true }\n\
+             fn main() {\n\
+               done := make(chan bool, 2)\n\
+               f := fn() {\n\
+                 m := map[string]int{\"k\": 0}\n\
+                 task worker(move m, done)\n\
+                 task worker(m, done)\n\
+               }\n\
+               f()\n\
+             }",
+        );
+        assert_eq!(
+            r_inner.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_inner.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_inner).as_deref(), Some("A1b"));
+        assert!(r_inner.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // Moving a captured outer binding inside a closure (`task worker(move m)`)
+        // must also reject with HYB-E3003 / HYB-E3004 (A1b) because closures can
+        // run multiple times or concurrently with the enclosing scope.
+        let r_capture_move = check(
+            "fn worker(m map[string]int, done chan<- bool) { m[\"k\"] = 1\n done <- true }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 2)\n\
+               f := fn() {\n\
+                 task worker(move m, done)\n\
+               }\n\
+               f()\n\
+               m[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(
+            r_capture_move.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_capture_move.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_capture_move).as_deref(), Some("A1b"));
+        assert!(r_capture_move
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3003" || d.code == "HYB-E3004"));
+
+        // Using/mutating a closure-local binding after moving it inside the
+        // closure must reject with HYB-E3003 even when the use is a non-boundary
+        // statement (`m["k"] = 2`).
+        let r_inner_assign = check(
+            "fn worker(m map[string]int, done chan<- bool) { m[\"k\"] = 1\n done <- true }\n\
+             fn main() {\n\
+               done := make(chan bool, 1)\n\
+               f := fn() {\n\
+                 m := map[string]int{\"k\": 0}\n\
+                 task worker(move m, done)\n\
+                 m[\"k\"] = 2\n\
+               }\n\
+               f()\n\
+             }",
+        );
+        assert_eq!(
+            r_inner_assign.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_inner_assign.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_inner_assign).as_deref(), Some("A1b"));
+
+        // A closure defined inside a `select` arm body must still be collected
+        // and checked by the closure boundary pass.
+        let r_select_closure = check(
+            "fn worker(m map[string]int, done chan<- bool) { m[\"k\"] = 1\n done <- true }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 1)\n\
+               select {\n\
+               v, ok := <-done: {\n\
+                   f := fn() {\n\
+                     task worker(m, done)\n\
+                   }\n\
+                   f()\n\
+                 }\n\
+               }\n\
+             }",
+        );
+        assert_eq!(
+            r_select_closure.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_select_closure.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_select_closure).as_deref(), Some("A1c"));
+    }
+
+    #[test]
     fn a1c_spawn_shared_map_rejects() {
         let r = check(
             "fn tally(counts map[string]int) { counts[\"a\"]++ }\n\
