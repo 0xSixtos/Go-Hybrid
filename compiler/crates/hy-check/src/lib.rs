@@ -329,6 +329,31 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             });
         }
 
+        // LX14: `break loop` / `continue loop` bind to the nearest enclosing
+        // for/loop. With no enclosing loop in this function body the label
+        // has no target — the emitter would lower it to `break hyLoop`
+        // against an undefined Go label (`invalid break label hyLoop`).
+        // Reject at check time (HYB-E3010); closure bodies are outside the
+        // Tier-0 flat walk and are guarded at emit time instead.
+        if let Stmt::Break { label: Some(_), span, .. }
+        | Stmt::Continue { label: Some(_), span, .. } = stmt
+        {
+            if !flat.in_loop(idx) {
+                ck.diags.push(
+                    Diagnostic::error(
+                        "HYB-E3010",
+                        ck.path.clone(),
+                        *span,
+                        "`break loop` / `continue loop` with no enclosing loop — the label has no target here (HYB-E3010)",
+                    )
+                    .with_notes(vec![
+                        "the `loop` label binds to the nearest enclosing `for`/`loop` (LX14); labels do not cross function or closure boundaries".to_string(),
+                        "remove the `loop` label (plain `break`/`continue` targets the innermost loop), or move this statement inside a loop".to_string(),
+                    ]),
+                );
+            }
+        }
+
         // A1b/A7: use-after-move on this statement's own uses (checked
         // BEFORE this statement marks any new transfers).
         let mut uses = Vec::new();

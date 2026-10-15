@@ -77,6 +77,14 @@ impl<'a> FlatInfo<'a> {
         self.managed_end.iter().any(|(&k, &v)| k < idx && idx <= v)
     }
 
+    /// Is statement `idx` lexically inside a `for`/`loop` body (LX14 label
+    /// scope)? `break loop` / `continue loop` outside any loop has no
+    /// target — the checker rejects it (HYB-E3010) instead of letting the
+    /// emitter lower it to `break hyLoop` against an undefined Go label.
+    pub(crate) fn in_loop(&self, idx: usize) -> bool {
+        self.loop_end.iter().any(|(&k, &v)| k < idx && idx <= v)
+    }
+
     /// The loop-extent end for a for-statement at `for_idx`.
     pub(crate) fn loop_end_of(&self, for_idx: usize) -> usize {
         self.loop_end.get(&for_idx).copied().unwrap_or(for_idx)

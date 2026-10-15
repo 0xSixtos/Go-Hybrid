@@ -208,6 +208,22 @@
       "tier0_rule_id": "IMMUT"
     },
     {
+      "code": "HYB-E3010",
+      "name": "loop-label-out-of-scope",
+      "category": "resolve",
+      "severity": "error",
+      "title": "`break loop` / `continue loop` has no enclosing loop to target",
+      "summary": "The `loop` label on `break`/`continue` binds to the nearest enclosing `for`/`loop` statement (SPEC-LANGUAGE LX14). Outside any loop the label has no target: the emitter would lower it to `break hyLoop` / `continue hyLoop` against an undefined Go label, which fails `go vet`/`go build` with `invalid break label hyLoop`. Labels do not cross function or closure boundaries (Go's rule, inherited). Plain `break`/`continue` (no label) inside no loop is separately a parse-level concern; this check covers the labeled form wherever it appears in a checked function body.",
+      "fixits": [
+        "remove the `loop` label — plain `break`/`continue` already targets the innermost enclosing loop",
+        "move the statement inside the `for`/`loop` it is meant to exit",
+        "if the target is an OUTER loop from inside a nested one, keep `break loop` but ensure the statement is lexically inside that outer loop (the emitter labels the owning loop automatically)"
+      ],
+      "example": "fn main() { break loop }   // reject: HYB-E3010 — no enclosing loop",
+      "rule": "LX14",
+      "tier0_rule_id": "LABEL"
+    },
+    {
       "code": "HYB-E3101",
       "name": "handle-loan-conflict",
       "category": "ownership-loans",

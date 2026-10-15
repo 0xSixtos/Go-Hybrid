@@ -314,6 +314,12 @@ pub struct Emitter {
     in_main_closure: bool,
     /// Inside a function literal (closure) — `?` binds to ITS results.
     fnlit_depth: usize,
+    /// Enclosing `for`/`loop` depth in the CURRENT function/closure frame.
+    /// A labeled `break loop`/`continue loop` at depth 0 has no Go label
+    /// target (labels do not cross func boundaries) — emit refuses instead
+    /// of emitting `break hyLoop` against an undefined label (backstop for
+    /// closure bodies, which the Tier-0 flat walk skips).
+    for_depth: usize,
     /// Dotted associated-fn names declared in this file
     /// (`lru_cache.new`) — call sites mangle to `lru_cache_new[...]`.
     assoc_fns: BTreeSet<String>,
@@ -379,6 +385,7 @@ impl Emitter {
             temp_n: 0,
             in_main_closure: false,
             fnlit_depth: 0,
+            for_depth: 0,
             assoc_fns: BTreeSet::new(),
             cur_option_result: None,
             loan_frames: Vec::new(),
