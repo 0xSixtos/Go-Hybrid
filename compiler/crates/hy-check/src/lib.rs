@@ -835,6 +835,89 @@ mod tests {
     }
 
     #[test]
+    fn composite_literal_nil_fields_reject_e4001() {
+        // PLAN follow-up (the audit's composite-nil row): classify_composite
+        // has no per-field type context, so `job{m: nil}` passed with 0
+        // diagnostics. The literal carries its own type context — the nil
+        // rejects as a TYPE error wherever the slot resolves.
+        // S1: the audit repro — spawn arg literal.
+        let r_spawn = check(
+            "struct job { m map[string]int }\n\
+             fn worker(j job) { j.m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               j := job{m: nil}\n\
+               task worker(j)\n\
+             }",
+        );
+        assert_eq!(r_spawn.verdict, Verdict::Reject, "{:?}", r_spawn.diagnostics);
+        assert!(r_spawn.diagnostics.iter().any(|d| d.code == "HYB-E4001"));
+
+        // S2: a plain local define — no boundary involved.
+        let r_local = check(
+            "struct job { m map[string]int }\n\
+             fn main() {\n\
+               j := job{m: nil}\n\
+               fmt.println(j)\n\
+             }",
+        );
+        assert_eq!(r_local.verdict, Verdict::Reject, "{:?}", r_local.diagnostics);
+        assert!(r_local.diagnostics.iter().any(|d| d.code == "HYB-E4001"));
+
+        // S3: map literal value slot + slice element slot.
+        let r_map = check("fn main() {\n  mm := map[string][]int{\"k\": nil}\n  fmt.println(mm)\n}");
+        assert_eq!(r_map.verdict, Verdict::Reject, "{:?}", r_map.diagnostics);
+        assert!(r_map.diagnostics.iter().any(|d| d.code == "HYB-E4001"));
+
+        let r_slice = check("fn main() {\n  xs := []map[string]int{nil}\n  fmt.println(xs)\n}");
+        assert_eq!(r_slice.verdict, Verdict::Reject, "{:?}", r_slice.diagnostics);
+        assert!(r_slice.diagnostics.iter().any(|d| d.code == "HYB-E4001"));
+
+        // S4: the managed hatch does NOT suppress a type contract.
+        let r_managed = check(
+            "struct job { m map[string]int }\n\
+             fn worker(j job) { j.m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               managed(\"the job is rebuilt inside the worker\", \"actor\") {\n\
+                 task worker(job{m: nil})\n\
+               }\n\
+             }",
+        );
+        assert_eq!(
+            r_managed.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_managed.diagnostics
+        );
+        assert!(r_managed
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E4001"));
+
+        // Nested literals reject too.
+        let r_nested = check(
+            "struct job { m map[string]int }\n\
+             struct wrap { j job }\n\
+             fn main() {\n\
+               w := wrap{j: job{m: nil}}\n\
+               fmt.println(w)\n\
+             }",
+        );
+        assert_eq!(r_nested.verdict, Verdict::Reject, "{:?}", r_nested.diagnostics);
+        assert!(r_nested.diagnostics.iter().any(|d| d.code == "HYB-E4001"));
+
+        // Positive control: a real map value stays legal; error-typed nil
+        // stays legal (N2).
+        let r_ok = check(
+            "struct job { m map[string]int }\n\
+             fn main() {\n\
+               j := job{m: map[string]int{}}\n\
+               fmt.println(j)\n\
+             }",
+        );
+        assert_eq!(r_ok.verdict, Verdict::Accept, "{:?}", r_ok.diagnostics);
+    }
+
+    #[test]
     fn closure_boundary_rejects_outer_or_closure_moved_binding_e3003() {
         // Issue #29: outer binding `m` is moved in `main`, and closure `f`
         // spawns a task with `m` — must not silently pass via `b.moved.is_some() => Ok`.

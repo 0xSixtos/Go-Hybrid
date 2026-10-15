@@ -338,6 +338,10 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                // N1 for composite literals: `job{m: nil}` carries its own
+                // type context (the struct def / map value / slice elem) —
+                // the nested nil needs no ascription to reject (HYB-E4001).
+                self.check_composite_nils(st, value);
                 // Ascription fills the gaps (O4.9 escape: "make the type
                 // visible to the checker"): when the initializer's shape
                 // does not resolve, the declared type decides. When inference
@@ -776,6 +780,10 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            // N1 for composite literals: a rebind whose RHS is a literal
+            // with nested nils (`j = jobT{m: nil}`) carries its own type
+            // context (HYB-E4001).
+            self.check_composite_nils(st, v);
         }
 
         // whole-binding rebind: `rows = append(rows, ...)`, parallel
@@ -927,6 +935,10 @@ impl<'a> Checker<'a> {
             }
         }
         for v in values {
+            // N1 for composite literals: a returned literal with nested
+            // nils (`return jobT{m: nil}`) carries its own type context
+            // (HYB-E4001).
+            self.check_composite_nils(st, v);
             // O2/LOAN-ESCAPE: a borrow returned from a function
             if as_addr_of(v).is_some() || contains_addr_of_in_literal(v) {
                 let msg = "a borrow cannot be returned from a function".to_string();
