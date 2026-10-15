@@ -301,6 +301,53 @@ impl<'a> Checker<'a> {
         if b.shape.is_sendable_by_type() || b.immutable || b.managed_taint {
             return;
         }
+        let Some((origin, via_share)) = self.non_owned_origin_of(st, name) else {
+            return;
+        };
+        let ty_str = b
+            .ty
+            .as_ref()
+            .map(|t| t.render())
+            .unwrap_or_else(|| b.shape.render());
+        let msg = if via_share {
+            format!(
+                "cannot move `{}` ({}) — `move` requires an exclusively owned local binding, not a may-share peer of {} (O5.1 / O5.4)",
+                name, ty_str, origin
+            )
+        } else {
+            format!(
+                "cannot move `{}` ({}) — `move` requires an exclusively owned local binding, not {} (O5.1 / O5.4)",
+                name, ty_str, origin
+            )
+        };
+        let why = if via_share {
+            format!(
+                "why: `{}` may share mutable GC storage with {}; the sending frame's freeze of `{}` cannot reach that live alias (O5.2 / O5.4)",
+                name, origin, name
+            )
+        } else {
+            format!(
+                "why: {} still aliases the underlying storage outside this move site, so freezing `{}` cannot prevent concurrent access (O5.2 / O5.4)",
+                origin, name
+            )
+        };
+        let notes = vec![
+            why,
+            format!(
+                "fix: copy `{}` into a fresh local before moving (`fresh := ...; move fresh`), move the caller's owned binding at the spawn/send site directly, or wrap a genuinely synchronized share in `managed(\"reason\", \"category\") {{ ... }}`",
+                name
+            ),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E3004", self.path.clone(), span, msg).with_notes(notes),
+        );
+    }
+
+    /// The non-owned origin `check_non_owned_move` would cite for `name`:
+    /// `(origin, via_share)`. Also read by `process_local` BEFORE a
+    /// self-shadowing define (`m := m`) replaces the visible binding.
+    pub(crate) fn non_owned_origin_of(&self, st: &FnState, name: &str) -> Option<(String, bool)> {
+        let b = self.lookup_binding(st, name)?;
         let root = resolve_alias(st, name);
         // (a) the binding's own non-owned origin (param / receiver /
         //     captured / range var), or its alias-chain root's.
@@ -341,46 +388,7 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        let Some((origin, via_share)) = origin else {
-            return;
-        };
-        let ty_str = b
-            .ty
-            .as_ref()
-            .map(|t| t.render())
-            .unwrap_or_else(|| b.shape.render());
-        let msg = if via_share {
-            format!(
-                "cannot move `{}` ({}) — `move` requires an exclusively owned local binding, not a may-share peer of {} (O5.1 / O5.4)",
-                name, ty_str, origin
-            )
-        } else {
-            format!(
-                "cannot move `{}` ({}) — `move` requires an exclusively owned local binding, not {} (O5.1 / O5.4)",
-                name, ty_str, origin
-            )
-        };
-        let why = if via_share {
-            format!(
-                "why: `{}` may share mutable GC storage with {}; the sending frame's freeze of `{}` cannot reach that live alias (O5.2 / O5.4)",
-                name, origin, name
-            )
-        } else {
-            format!(
-                "why: {} still aliases the underlying storage outside this move site, so freezing `{}` cannot prevent concurrent access (O5.2 / O5.4)",
-                origin, name
-            )
-        };
-        let notes = vec![
-            why,
-            format!(
-                "fix: copy `{}` into a fresh local before moving (`fresh := ...; move fresh`), move the caller's owned binding at the spawn/send site directly, or wrap a genuinely synchronized share in `managed(\"reason\", \"category\") {{ ... }}`",
-                name
-            ),
-        ];
-        self.diags.push(
-            Diagnostic::error("HYB-E3004", self.path.clone(), span, msg).with_notes(notes),
-        );
+        origin
     }
 
     /// O5.1 / O5.2 / O13 across loop iterations: when a loop body can repeat,

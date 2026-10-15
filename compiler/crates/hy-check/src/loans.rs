@@ -374,6 +374,27 @@ impl<'a> Checker<'a> {
                     }
                     continue;
                 }
+                // Self-shadowing define (`m := m`, `h := h`, `m := same(m)`
+                // in an inner block): the RHS reads the OUTER binding, but
+                // every link recorded below resolves `name` AFTER the define
+                // — i.e. against the new inner binding itself — so the outer
+                // binding's non-owned origin (param / receiver / capture /
+                // range var, O5.1) is lost and `move m` passed HYB-E3004
+                // while the caller still holds the same map. Read the origin
+                // the outer binding would cite NOW, before it is shadowed.
+                let shadowed_origin = if self.shape_may_share(&shape)
+                    && self.value_reads_storage_of(st, value, name)
+                {
+                    self.non_owned_origin_of(st, name).map(|(o, via_share)| {
+                        if via_share {
+                            format!("a may-share peer of {}", o)
+                        } else {
+                            o
+                        }
+                    })
+                } else {
+                    None
+                };
                 let is_view = matches!(shape, TypeShape::BorrowHandle(_));
                 self.define_binding(st, name, shape, ty, immutable, managed);
                 // A2 non-lexical extension: `u := doc.array(...)` stores an
@@ -395,7 +416,57 @@ impl<'a> Checker<'a> {
                 // friendlier "frozen alias" diagnostic) — and call results
                 // that hand back argument storage (#38).
                 self.record_alias(st, name, value);
+                if let Some(origin) = shadowed_origin {
+                    if let Some(b) = st.env_lookup_mut(name) {
+                        if b.non_owned_origin.is_none() {
+                            b.non_owned_origin = Some(origin);
+                        }
+                    }
+                }
             }
+        }
+    }
+
+    /// Does `value` hand back (part of) the storage of the binding `name`,
+    /// in one of the forms `record_may_share` / `record_alias` link: a bare
+    /// or parenthesized copy, a re-slice, a reference-bearing projection, a
+    /// composite literal embedding it, or a call that takes it as a
+    /// non-`move` argument / receiver and returns a value that may share.
+    /// Used for the self-shadowing define, where those recorders cannot
+    /// tell the outer `name` from the new inner one.
+    fn value_reads_storage_of(&self, st: &FnState, value: &Expr, name: &str) -> bool {
+        let root_is = |e: &Expr| e.root_ident() == Some(name);
+        match unwrap_parens(value) {
+            Expr::Ident { name: src, .. } => src == name,
+            Expr::Slice { base, .. } => root_is(unwrap_parens(base)),
+            Expr::Field { .. } | Expr::Index { .. } => {
+                self.shape_may_share(&self.shape_of_expr(st, unwrap_parens(value)))
+                    && root_is(value)
+            }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| self.value_reads_storage_of(st, &f.value, name)),
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
+                self.value_reads_storage_of(st, k, name) || self.value_reads_storage_of(st, v, name)
+            }),
+            Expr::SliceLit { items, .. } => items
+                .iter()
+                .any(|it| self.value_reads_storage_of(st, it, name)),
+            Expr::Call { callee, args, .. } => {
+                let result = self.shape_of_expr(st, unwrap_parens(value));
+                if !(self.shape_may_share(&result) || matches!(result, TypeShape::Unknown)) {
+                    return false;
+                }
+                let via_arg = args.iter().any(|a| {
+                    !matches!(unwrap_parens(&a.value), Expr::Move { .. }) && root_is(&a.value)
+                });
+                let via_recv = match unwrap_parens(callee) {
+                    Expr::Field { base, .. } => root_is(base),
+                    _ => false,
+                };
+                via_arg || via_recv
+            }
+            _ => false,
         }
     }
 
