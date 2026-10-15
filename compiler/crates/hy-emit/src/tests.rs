@@ -745,6 +745,53 @@ fn option_match_lowes_to_ok_branch() {
 }
 
 #[test]
+fn match_multi_some_arms_retains_all_arms() {
+    // Issue #204: match on option with multiple some arms must retain all arms,
+    // not just the last one.
+    let go = emit(
+        "fn main() {\n    opt := some(15)\n    match opt {\n        some(v) if v > 10: {\n            fmt.println(\"big\")\n        }\n        some(v): {\n            fmt.println(\"small\")\n        }\n        none: {\n            fmt.println(\"none\")\n        }\n    }\n}\n",
+    );
+    assert!(go.contains("if hyMatch0.ok {"), ":\n{}", go);
+    assert!(go.contains("v := hyMatch0.val"), ":\n{}", go);
+    assert!(go.contains("if v > 10 {"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"big\")"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"small\")"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"none\")"), ":\n{}", go);
+}
+
+#[test]
+fn match_guarded_some_with_wildcard_fallback() {
+    // Issue #204: with guarded some arms and wildcard, failed guard must fall through to wildcard.
+    let go = emit(
+        "fn main() {\n    opt := some(3)\n    match opt {\n        some(v) if v > 10: {\n            fmt.println(\"big\")\n        }\n        _: {\n            fmt.println(\"fallback\")\n        }\n    }\n}\n",
+    );
+    assert!(go.contains("hyMatched0 := false"), ":\n{}", go);
+    assert!(go.contains("if hyMatch0.ok {"), ":\n{}", go);
+    assert!(go.contains("if v > 10 {"), ":\n{}", go);
+    assert!(go.contains("hyMatched0 = true"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"big\")"), ":\n{}", go);
+    assert!(go.contains("if !hyMatched0 {"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"fallback\")"), ":\n{}", go);
+}
+
+#[test]
+fn match_guarded_some_with_none_and_wildcard() {
+    // Issue #204: guarded some arm, none arm, and wildcard arm all handled cleanly.
+    let go = emit(
+        "fn main() {\n    opt := some(3)\n    match opt {\n        some(v) if v > 10: {\n            fmt.println(\"big\")\n        }\n        none: {\n            fmt.println(\"none\")\n        }\n        _: {\n            fmt.println(\"fallback\")\n        }\n    }\n}\n",
+    );
+    assert!(go.contains("hyMatched0 := false"), ":\n{}", go);
+    assert!(go.contains("if hyMatch0.ok {"), ":\n{}", go);
+    assert!(go.contains("if v > 10 {"), ":\n{}", go);
+    assert!(go.contains("hyMatched0 = true"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"big\")"), ":\n{}", go);
+    assert!(go.contains("if !hyMatched0 && !hyMatch0.ok {"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"none\")"), ":\n{}", go);
+    assert!(go.contains("if !hyMatched0 {"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"fallback\")"), ":\n{}", go);
+}
+
+#[test]
 fn return_none_lowers_to_option_zero() {
     let go = emit("fn get() option[int] {\n    return none\n}\n");
     assert!(

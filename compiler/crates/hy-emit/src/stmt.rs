@@ -1302,57 +1302,142 @@ impl Emitter {
         let s = self.emit_expr(subject, 0)?;
         self.push(&format!("{} := {}", temp, s));
 
-        let mut some_arm: Option<(&ArmKind, &MatchArm)> = None;
-        let mut else_arm: Option<&MatchArm> = None;
+        let mut some_arms: Vec<(&String, &MatchArm)> = Vec::new();
+        let mut none_arm: Option<&MatchArm> = None;
+        let mut wildcard_arm: Option<&MatchArm> = None;
         for (kind, arm) in &classified {
             match kind {
-                ArmKind::Some(_) => some_arm = Some((kind, arm)),
-                ArmKind::NoneArm | ArmKind::Wildcard => else_arm = Some(arm),
+                ArmKind::Some(binding) => some_arms.push((binding, *arm)),
+                ArmKind::NoneArm => none_arm = Some(*arm),
+                ArmKind::Wildcard => wildcard_arm = Some(*arm),
             }
         }
 
-        match some_arm {
-            Some((ArmKind::Some(binding), arm)) => {
-                let head = match &arm.guard {
-                    Some(g) => {
-                        // The binding is not yet in scope for the guard —
-                        // lower the guard INSIDE the ok-branch.
-                        let _ = g;
-                        format!("if {}.ok {{", temp)
-                    }
-                    None => format!("if {}.ok {{", temp),
-                };
-                self.push(&head);
+        if some_arms.is_empty() {
+            // No some-arm: the checker's exhaustiveness (E5001) rejects
+            // this before emission; nothing to lower.
+            return Ok(());
+        }
+
+        let has_unguarded_some = some_arms.iter().any(|(_, arm)| arm.guard.is_none());
+
+        if has_unguarded_some {
+            let else_arm = none_arm.or(wildcard_arm);
+            if some_arms.len() == 1 {
+                let (binding, arm) = some_arms[0];
+                self.push(&format!("if {}.ok {{", temp));
                 self.indent += 1;
                 self.push(&format!("{} := {}.val", binding, temp));
-                if let Some(g) = &arm.guard {
-                    let gt = self.emit_expr(g, 0)?;
+                for st in &arm.body.stmts {
+                    self.emit_stmt(st)?;
+                }
+                self.indent -= 1;
+            } else {
+                self.push(&format!("if {}.ok {{", temp));
+                self.indent += 1;
+                let primary_binding = some_arms[0].0;
+                self.push(&format!("{} := {}.val", primary_binding, temp));
+                for (i, (binding, arm)) in some_arms.iter().enumerate() {
+                    match &arm.guard {
+                        Some(g) => {
+                            let gt = self.emit_expr(g, 0)?;
+                            if i == 0 {
+                                self.push(&format!("if {} {{", gt));
+                            } else {
+                                self.push(&format!("}} else if {} {{", gt));
+                            }
+                            self.indent += 1;
+                            if binding != primary_binding {
+                                self.push(&format!("{} := {}", binding, primary_binding));
+                            }
+                            for st in &arm.body.stmts {
+                                self.emit_stmt(st)?;
+                            }
+                            self.indent -= 1;
+                        }
+                        None => {
+                            self.push("} else {");
+                            self.indent += 1;
+                            if binding != primary_binding {
+                                self.push(&format!("{} := {}", binding, primary_binding));
+                            }
+                            for st in &arm.body.stmts {
+                                self.emit_stmt(st)?;
+                            }
+                            self.indent -= 1;
+                            self.push("}");
+                            break;
+                        }
+                    }
+                }
+                self.indent -= 1;
+            }
+            match else_arm {
+                Some(arm) => {
+                    self.push("} else {");
+                    self.emit_block_body(&arm.body.stmts)?;
+                    self.push("}");
+                }
+                None => {
+                    self.push("}");
+                }
+            }
+        } else {
+            let matched_temp = self.next_temp("hyMatched");
+            self.push(&format!("{} := false", matched_temp));
+            self.push(&format!("if {}.ok {{", temp));
+            self.indent += 1;
+            let primary_binding = some_arms[0].0;
+            self.push(&format!("{} := {}.val", primary_binding, temp));
+            for (i, (binding, arm)) in some_arms.iter().enumerate() {
+                let gt = self.emit_expr(arm.guard.as_ref().unwrap(), 0)?;
+                if i == 0 {
                     self.push(&format!("if {} {{", gt));
+                } else {
+                    self.push(&format!("}} else if {} {{", gt));
+                }
+                self.indent += 1;
+                self.push(&format!("{} = true", matched_temp));
+                if binding != primary_binding {
+                    self.push(&format!("{} := {}", binding, primary_binding));
+                }
+                for st in &arm.body.stmts {
+                    self.emit_stmt(st)?;
+                }
+                self.indent -= 1;
+            }
+            self.push("}");
+            self.indent -= 1;
+            self.push("}");
+
+            if let Some(arm) = none_arm {
+                if wildcard_arm.is_some() {
+                    self.push(&format!("if !{} && !{}.ok {{", matched_temp, temp));
                     self.indent += 1;
+                    self.push(&format!("{} = true", matched_temp));
                     for st in &arm.body.stmts {
                         self.emit_stmt(st)?;
                     }
                     self.indent -= 1;
                     self.push("}");
                 } else {
+                    self.push(&format!("if !{} && !{}.ok {{", matched_temp, temp));
+                    self.indent += 1;
                     for st in &arm.body.stmts {
                         self.emit_stmt(st)?;
                     }
+                    self.indent -= 1;
+                    self.push("}");
+                }
+            }
+
+            if let Some(arm) = wildcard_arm {
+                self.push(&format!("if !{} {{", matched_temp));
+                self.indent += 1;
+                for st in &arm.body.stmts {
+                    self.emit_stmt(st)?;
                 }
                 self.indent -= 1;
-            }
-            _ => {
-                // No some-arm: the checker's exhaustiveness (E5001) rejects
-                // this before emission; nothing to lower.
-            }
-        }
-        match else_arm {
-            Some(arm) => {
-                self.push("} else {");
-                self.emit_block_body(&arm.body.stmts)?;
-                self.push("}");
-            }
-            None => {
                 self.push("}");
             }
         }
