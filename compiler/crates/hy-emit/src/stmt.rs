@@ -1643,72 +1643,70 @@ impl Emitter {
             };
             classified.push((kind, a));
         }
-        if let Some((ArmKind::Wildcard, _)) = classified.first() {
-            return Err(EmitError::unsupported(
-                "`_` as the FIRST match arm (MVP-0 lowers some→if, none/_→else)",
-            ));
+        for (i, (kind, _)) in classified.iter().enumerate() {
+            if matches!(kind, ArmKind::Wildcard) && (i == 0 || i + 1 < classified.len()) {
+                return Err(EmitError::unsupported(
+                    "`_` must be the last match arm after `some(v)` (HYB-E5001)",
+                ));
+            }
         }
+
+        let mut some_arm: Option<(&str, &MatchArm)> = None;
+        let mut else_arm: Option<&MatchArm> = None;
+        for (kind, arm) in &classified {
+            match kind {
+                ArmKind::Some(binding) => some_arm = Some((binding.as_str(), arm)),
+                ArmKind::NoneArm | ArmKind::Wildcard => else_arm = Some(arm),
+            }
+        }
+
+        let Some((binding, some_arm)) = some_arm else {
+            return Err(EmitError::unsupported(
+                "non-exhaustive option match: missing `some(v)` arm (HYB-E5001)",
+            ));
+        };
+        let Some(else_arm) = else_arm else {
+            return Err(EmitError::unsupported(
+                "non-exhaustive option match: missing `none` or `_` arm (HYB-E5001)",
+            ));
+        };
 
         self.hoist_tries_expr(subject)?;
         let temp = self.next_temp("hyMatch");
         let s = self.emit_expr(subject, 0)?;
         self.push(&format!("{} := {}", temp, s));
 
-        let mut some_arm: Option<(&ArmKind, &MatchArm)> = None;
-        let mut else_arm: Option<&MatchArm> = None;
-        for (kind, arm) in &classified {
-            match kind {
-                ArmKind::Some(_) => some_arm = Some((kind, arm)),
-                ArmKind::NoneArm | ArmKind::Wildcard => else_arm = Some(arm),
+        let head = match &some_arm.guard {
+            Some(g) => {
+                // The binding is not yet in scope for the guard —
+                // lower the guard INSIDE the ok-branch.
+                let _ = g;
+                format!("if {}.ok {{", temp)
+            }
+            None => format!("if {}.ok {{", temp),
+        };
+        self.push(&head);
+        self.indent += 1;
+        self.push(&format!("{} := {}.val", binding, temp));
+        if let Some(g) = &some_arm.guard {
+            self.hoist_tries_expr(g)?;
+            let gt = self.emit_expr(g, 0)?;
+            self.push(&format!("if {} {{", gt));
+            self.indent += 1;
+            for st in &some_arm.body.stmts {
+                self.emit_stmt(st)?;
+            }
+            self.indent -= 1;
+            self.push("}");
+        } else {
+            for st in &some_arm.body.stmts {
+                self.emit_stmt(st)?;
             }
         }
-
-        match some_arm {
-            Some((ArmKind::Some(binding), arm)) => {
-                let head = match &arm.guard {
-                    Some(g) => {
-                        // The binding is not yet in scope for the guard —
-                        // lower the guard INSIDE the ok-branch.
-                        let _ = g;
-                        format!("if {}.ok {{", temp)
-                    }
-                    None => format!("if {}.ok {{", temp),
-                };
-                self.push(&head);
-                self.indent += 1;
-                self.push(&format!("{} := {}.val", binding, temp));
-                if let Some(g) = &arm.guard {
-                    self.hoist_tries_expr(g)?;
-                    let gt = self.emit_expr(g, 0)?;
-                    self.push(&format!("if {} {{", gt));
-                    self.indent += 1;
-                    for st in &arm.body.stmts {
-                        self.emit_stmt(st)?;
-                    }
-                    self.indent -= 1;
-                    self.push("}");
-                } else {
-                    for st in &arm.body.stmts {
-                        self.emit_stmt(st)?;
-                    }
-                }
-                self.indent -= 1;
-            }
-            _ => {
-                // No some-arm: the checker's exhaustiveness (E5001) rejects
-                // this before emission; nothing to lower.
-            }
-        }
-        match else_arm {
-            Some(arm) => {
-                self.push("} else {");
-                self.emit_block_body(&arm.body.stmts)?;
-                self.push("}");
-            }
-            None => {
-                self.push("}");
-            }
-        }
+        self.indent -= 1;
+        self.push("} else {");
+        self.emit_block_body(&else_arm.body.stmts)?;
+        self.push("}");
         Ok(())
     }
 }

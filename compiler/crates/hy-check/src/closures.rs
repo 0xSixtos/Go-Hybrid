@@ -142,6 +142,9 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
             // must NOT take the class-4 sendability shortcut.
             let immutable = l.kind == LocalKind::Const;
             if let Some(t) = &l.ty {
+                if l.values.is_empty() {
+                    ck.check_zero_value_local(l, t);
+                }
                 // ascribed: the declared type decides
                 let shape = ck.shape_of_type(t);
                 for name in &l.names {
@@ -330,7 +333,12 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
             st.scope_pop();
             st.scope_pop();
         }
-        Stmt::Match { arms, .. } => {
+        Stmt::Match {
+            subject,
+            arms,
+            span,
+        } => {
+            ck.check_match(st, subject, arms, *span);
             for arm in arms {
                 st.scope_push();
                 check_body_boundaries(ck, st, &arm.body, managed);
