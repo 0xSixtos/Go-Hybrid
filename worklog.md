@@ -448,3 +448,25 @@ Stage Summary:
 - corpus 31/31 · cargo 322/0 · clippy 0 · differential FULL (21 reject-side) · examples 10/10 · main CI green at every push since fed3ebd.
 - PLAN follow-up row marked LANDED with the decision-log entry; STATUS rewritten.
 - Remaining queue (14, next session): #8 #22 #63 #64 #65 #67 #68 #70 #71 #76 #84 #85 #88 #90 — same discipline: repro-verify on main first (several may already be fixed by today's landings), port-or-close with credit, gates WITHOUT piped tails.
+
+---
+Task ID: session-28
+Agent: Super Z (main)
+Task: Check all pending PRs; add the $500 Wildcard Track to the bounty program (bounty page, CONTRIBUTING, repo docs, moonshot.md); AI-managed intake/review/milestones/payouts; active solicitation.
+
+Work Log:
+- Fresh sandbox: re-pinned Go 1.26.9 + Rust 1.99.0; baselines re-established.
+- Discovered local main was ~100 commits stale; rebased onto origin/main (f99d6d0) — the repo already had BOUNTY.md ($500 ladder), CONTRIBUTING, CONTRIBUTOR_RECOGNITION, SECURITY; re-integrated the wildcard work INTO BOUNTY.md rather than a parallel BOUNTIES.md.
+- Wildcard Track landed (commit 11742cc): BOUNTY.md Track 3 (another $500/cycle; $250 M1 acceptance + $250 M2 published learning, success or failure alike; no prototype required; breaking changes/rewrites/"impossible" ideas allowed; failure-with-knowledge paid), MOONSHOT.md (ledger + learnings log + failure wall + monthly review window + solicitation calendar), wildcard.yml intake, config.yml contact, CONTRIBUTING/README/GUARANTEES/PLAN cross-links, wildcard+moonshot labels, announcement posted as Discussion #165 with five solicitation prompts.
+- PR marathon: 54 open PRs found (recon: pr_recon.json); 44 fork-PR workflow runs batch-approved via API.
+- Round A (tools/CI, 14 merged): #63 #64 #85(seam) #71 #122(fixture seam-fix) #127 #116 #133 #102 #135 #65 #129 #154 #76(darwin bridge + Mach-O detection). Battery: cargo 326/0, python 56, corpus 31/31, differential FULL, examples 10/10, gate PASS. (One false alarm diagnosed: a stale Oct-14 compiler/target/debug/hyb produced fake differential disagreements; fresh shared-target binary = FULL.)
+- Round B (parser/emit, 8 merged): #107 #108(seam: `case` reserved + pr-22 contextual default) #136 #145 #150(spec primitives + const folding) #90 #101(seam fixes: JSON boundary, dup arm line, truncated test) #22(corpus renumbered 32-35, counts 35). Workspace 361/0, corpus 35/35, differential FULL, go suite 6 pkgs. Pushed 96f0bc4.
+- Round C (checker stack): #110→#117→#126 stacked, landed with seam repairs (Call-arm braces, corpus renumber 36/37/38, parse_all rebuilt); #142(corpus 39) #151; SEMANTIC CONFLICT: pr-110's two accept-side precision tests predate fef40da — verified against f99d6d0's checker that the shape was already rejected on main; amended tests with logged decision, PLAN follow-up (N1-p). #162 (generalized collector; major seam: took pr-162's record_may_share wholesale + re-added the #110 FnLit arm; corpus 40/41) #140(self-shadow origin) #128(const-move; test attribution amended E3001→E3003/E3006, logged) #156(corpus 42) #157(E6001) #163(E6002; JSON seam fix) #68 #70. Pushed through b0617ea.
+- Triaged ALL remaining open PRs in writing (#132 #121 #159 #153 #106 #99 #67 #84 #88 #93 #115 #91 #96 #113 #97 #8) with queue order and seam notes; #161 closed as duplicate of #150 with credit; #8 honestly triaged (in-grammar rewrite invited; rewritten intent ACCEPTS soundly).
+- Close-out: STATUS.md rewritten, PLAN.md conveyor + decision rows, this worklog.
+
+Stage Summary:
+- 20 PRs merged this session; 1 closed; 16 queued with written triage. Corpus 31→42, cargo 322→398, differential 21→29 rejects, all suites green at every boundary.
+- Wildcard Track fully operational: rules, ledger, intake template, labels, announcement, solicitation prompts.
+- Key artifacts: BOUNTY.md Track 3, MOONSHOT.md, wildcard.yml, Discussion #165, seven corpus renumberings with maintainer-integration notes, four logged semantic-conflict decisions.
+- Next session: the triaged 16-PR queue (#91+#96 pair next), first community wildcard entries, release republish.
