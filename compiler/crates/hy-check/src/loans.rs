@@ -24,7 +24,60 @@ use crate::model::{
 use crate::shape::receiver_type_name;
 use crate::walk::{self, CallRef};
 use hy_diag::{Diagnostic, Span};
-use hy_syntax::{AssignOp, Expr, LocalDecl, LocalKind, Place, PlaceKind};
+use hy_syntax::{AssignOp, Block, Expr, FnDecl, LocalDecl, LocalKind, Place, PlaceKind, Stmt};
+use std::collections::HashSet;
+
+/// Read-only call targets that can never mutate a map argument — the A3
+/// callee scan fails closed on everything else (#111).
+const A3_PURE_FNS: &[&str] = &["len", "cap", "print", "println"];
+/// Read-only packages (`fmt.println(m)`, `strings.split(...)`) — their
+/// methods receive values without storing to them (#111).
+const A3_PURE_PKGS: &[&str] = &["fmt", "strings", "strconv", "math", "unicode"];
+
+/// First segment of a dotted path (`e.services` -> `e`): the binding whose
+/// storage the path reaches through.
+fn path_root(path: &str) -> &str {
+    path.split('.').next().unwrap_or(path)
+}
+
+/// #111 A3 peer connectivity: an event path invalidates a loan on another
+/// path when the two ROOTS are the same binding or connected through the
+/// may-share graph (`alias := m`, shallow copies, closures) or the
+/// single-parent alias chain. Used instead of string equality so an insert
+/// through a peer of the loaned map fires the same E3102 as a direct one.
+fn a3_paths_conflict(st: &FnState, loan_path: &str, event_path: &str) -> bool {
+    let lr = path_root(loan_path);
+    let er = path_root(event_path);
+    if lr == er {
+        return true;
+    }
+    let mut seen: HashSet<String> = HashSet::new();
+    seen.insert(lr.to_string());
+    let mut stack = vec![lr.to_string()];
+    while let Some(x) = stack.pop() {
+        if x == er {
+            return true;
+        }
+        if let Some(p) = st.aliases.get(&x) {
+            if seen.insert(p.clone()) {
+                stack.push(p.clone());
+            }
+        }
+        for (k, v) in &st.aliases {
+            if v == &x && seen.insert(k.clone()) {
+                stack.push(k.clone());
+            }
+        }
+        if let Some(peers) = st.may_share.get(&x) {
+            for p in peers {
+                if seen.insert(p.clone()) {
+                    stack.push(p.clone());
+                }
+            }
+        }
+    }
+    false
+}
 
 // ---------------------------------------------------------------------------
 // Call resolution + A2/A7 processing
@@ -151,9 +204,17 @@ impl<'a> Checker<'a> {
                     self.check_delete_conflict(st, cr, idx);
                 }
                 if self.fns.contains_key(&name) {
+                    // A3 #111: the callee may insert/delete through the
+                    // argument — that event runs inside THIS call site's
+                    // window when the call is within it.
+                    self.check_a3_call_conflict(st, cr, idx, &name);
                     // A7 borrow-by-default: a handle passed to a Hybrid
                     // function is lent for the call only
                     self.lend_handle_args(st, cr, idx);
+                } else if st.closure_mutates.contains_key(&name) {
+                    // A3 #111 form 4: a local closure whose body mutates a
+                    // captured binding — event attributed to this call site.
+                    self.check_a3_closure_call(st, cr, idx, &name);
                 }
             }
             Resolved::None => {}
@@ -222,9 +283,12 @@ impl<'a> Checker<'a> {
     }
 
     /// Shared A3 emitter for index-assign inserts and `delete` calls.
+    /// Matching is peer-aware (#111): an event on `alias` conflicts with a
+    /// loan on `m` when the roots share storage.
     fn emit_a3_if_live(&mut self, st: &FnState, path: &str, span: Span, idx: usize, verb: &str) {
         let Some(loan) = st.loans.iter().find(|l| {
-            matches!(&l.target, LoanTarget::MapSlot { path: p, .. } if p == path)
+            matches!(&l.target, LoanTarget::MapSlot { path: p, .. }
+                if a3_paths_conflict(st, p, path))
                 && l.created <= idx
                 && idx <= l.last
         }) else {
@@ -250,6 +314,398 @@ impl<'a> Checker<'a> {
         ];
         self.diags
             .push(Diagnostic::error("HYB-E3102", self.path.clone(), span, msg).with_notes(notes));
+    }
+
+    // -----------------------------------------------------------------------
+    // #111: A3 events that cross frames, aliases, and closure bodies
+    // -----------------------------------------------------------------------
+
+    /// #111 forms 1-2: a top-level fn call inside a live slot-loan window
+    /// whose argument IS (or shares storage with) the loaned map invalidates
+    /// the window when the callee mutates that parameter — the insert/delete
+    /// executes while the loan is live even though it is spelled in the
+    /// callee's frame.
+    fn check_a3_call_conflict(&mut self, st: &FnState, cr: &CallRef, idx: usize, name: &str) {
+        // Collect the live loan paths first so the `self.fns` borrow below
+        // does not overlap the `&mut self` emit afterwards.
+        let live: Vec<String> = st
+            .loans
+            .iter()
+            .filter_map(|l| match &l.target {
+                LoanTarget::MapSlot { path, .. } if l.created <= idx && idx <= l.last => {
+                    Some(path.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        if live.is_empty() {
+            return;
+        }
+        let mut conflict_paths: Vec<String> = Vec::new();
+        for (i, a) in cr.args.iter().enumerate() {
+            let Some(arg_path) = walk::expr_path(&a.value) else {
+                continue;
+            };
+            if !live.iter().any(|p| a3_paths_conflict(st, p, &arg_path)) {
+                continue;
+            }
+            let Some(decl) = self.fns.get(name) else {
+                continue;
+            };
+            match decl.params.get(i) {
+                Some(p) => {
+                    if self.fn_mutates_param(decl, &p.name, 0) {
+                        conflict_paths.push(arg_path);
+                    }
+                }
+                // argument beyond the signature — fail closed
+                None => conflict_paths.push(arg_path),
+            }
+        }
+        let verb = format!("mutation via `{}`", cr.callee.render());
+        for p in conflict_paths {
+            self.emit_a3_if_live(st, &p, cr.span, idx, &verb);
+        }
+    }
+
+    /// #111 form 4: a local closure invoked inside a live slot-loan window
+    /// whose recorded mutation roots reach the loaned storage.
+    fn check_a3_closure_call(&mut self, st: &FnState, cr: &CallRef, idx: usize, name: &str) {
+        let Some(roots) = st.closure_mutates.get(name) else {
+            return;
+        };
+        if roots.is_empty() {
+            return;
+        }
+        let verb = format!("mutation via `{}`", cr.callee.render());
+        for l in &st.loans {
+            let LoanTarget::MapSlot { path, .. } = &l.target else {
+                continue;
+            };
+            if !(l.created <= idx && idx <= l.last) {
+                continue;
+            }
+            if roots.iter().any(|r| a3_paths_conflict(st, path, r)) {
+                self.emit_a3_if_live(st, path, cr.span, idx, &verb);
+                return;
+            }
+        }
+    }
+
+    /// Does `decl` mutate its parameter `param` (map insert/delete — the
+    /// only A3 events)? Bounded interprocedural scan, fail-closed past the
+    /// depth bound and on unknown callees that receive the parameter (#111).
+    fn fn_mutates_param(&self, decl: &FnDecl, param: &str, depth: usize) -> bool {
+        if depth > 3 {
+            return true; // fail closed past the bound
+        }
+        let Some(body) = &decl.body else {
+            return false;
+        };
+        self.block_mutates_param(body, param, depth)
+    }
+
+    fn block_mutates_param(&self, block: &Block, param: &str, depth: usize) -> bool {
+        block
+            .stmts
+            .iter()
+            .any(|s| self.stmt_mutates_param(s, param, depth))
+    }
+
+    fn stmt_mutates_param(&self, stmt: &Stmt, param: &str, depth: usize) -> bool {
+        match stmt {
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                for t in targets {
+                    if matches!(t.kind, PlaceKind::Index { .. }) && t.root() == param {
+                        return true;
+                    }
+                }
+                for v in values {
+                    if self.expr_fnlit_mutates_param(v, param, depth) {
+                        return true;
+                    }
+                }
+            }
+            Stmt::Local(l) => {
+                for v in &l.values {
+                    if self.expr_fnlit_mutates_param(v, param, depth) {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        // calls in this statement (covers Expr/Send/Return/Defer/Task/...)
+        let mut calls = Vec::new();
+        walk::own_calls(stmt, &mut calls);
+        for cr in &calls {
+            if self.call_mutates_param(cr, param, depth) {
+                return true;
+            }
+        }
+        // nested bodies (if/for/match/select/block/managed)
+        match stmt {
+            Stmt::If {
+                init,
+                then,
+                otherwise,
+                ..
+            } => {
+                if let Some(i) = init {
+                    if self.stmt_mutates_param(i, param, depth) {
+                        return true;
+                    }
+                }
+                if self.block_mutates_param(then, param, depth) {
+                    return true;
+                }
+                if let Some(o) = otherwise {
+                    if self.stmt_mutates_param(o, param, depth) {
+                        return true;
+                    }
+                }
+            }
+            Stmt::For { body, .. } | Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+                if self.block_mutates_param(body, param, depth) {
+                    return true;
+                }
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    if self.block_mutates_param(&arm.body, param, depth) {
+                        return true;
+                    }
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                for arm in arms {
+                    if self.block_mutates_param(&arm.body, param, depth) {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    /// A nested FnLit inside the callee body mutates `param` only if it
+    /// captures it (a body declaring its own `param` shadows it — those
+    /// references are the closure's fresh binding, not the caller's map).
+    fn expr_fnlit_mutates_param(&self, e: &Expr, param: &str, depth: usize) -> bool {
+        match e {
+            Expr::FnLit { params, body, .. } => {
+                if params.iter().any(|p| p.name == param) {
+                    false
+                } else {
+                    self.block_mutates_param(body, param, depth)
+                }
+            }
+            Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. }
+            | Expr::Try { operand: inner, .. } | Expr::Unary { operand: inner, .. }
+            | Expr::AddrOf { operand: inner, .. } => self.expr_fnlit_mutates_param(inner, param, depth),
+            Expr::Call { callee, args, .. } => {
+                self.expr_fnlit_mutates_param(callee, param, depth)
+                    || args
+                        .iter()
+                        .any(|a| self.expr_fnlit_mutates_param(&a.value, param, depth))
+            }
+            Expr::Index { base, index, .. } | Expr::Binary { lhs: base, rhs: index, .. } => {
+                self.expr_fnlit_mutates_param(base, param, depth)
+                    || self.expr_fnlit_mutates_param(index, param, depth)
+            }
+            _ => false,
+        }
+    }
+
+    /// Does this call site store through / delete `param`?
+    fn call_mutates_param(&self, cr: &CallRef, param: &str, depth: usize) -> bool {
+        let arg_root_is_param = |a: &hy_syntax::CallArg| {
+            walk::expr_path(&a.value)
+                .map(|p| path_root(&p) == param)
+                .unwrap_or(false)
+        };
+        match cr.callee {
+            Expr::Ident { name, .. } => {
+                if name == "delete" {
+                    return cr.args.first().map(&arg_root_is_param).unwrap_or(false);
+                }
+                if A3_PURE_FNS.contains(&name.as_str()) {
+                    return false;
+                }
+                if let Some(decl) = self.fns.get(name) {
+                    for (i, a) in cr.args.iter().enumerate() {
+                        if !arg_root_is_param(a) {
+                            continue;
+                        }
+                        match decl.params.get(i) {
+                            Some(p) => {
+                                if self.fn_mutates_param(decl, &p.name, depth + 1) {
+                                    return true;
+                                }
+                            }
+                            None => return true, // fail closed
+                        }
+                    }
+                    return false;
+                }
+                // unknown Ident callee (closure / builtin we don't model):
+                // passing the parameter fails closed
+                cr.args.iter().any(&arg_root_is_param)
+            }
+            Expr::Field { base, .. } => {
+                if let Expr::Ident { name: pkg, .. } = &**base {
+                    if A3_PURE_PKGS.contains(&pkg.as_str()) {
+                        return false;
+                    }
+                }
+                cr.args.iter().any(&arg_root_is_param)
+            }
+            _ => cr.args.iter().any(&arg_root_is_param),
+        }
+    }
+
+    /// Record (at define/rebind time) which base paths a local closure's
+    /// body may mutate — consumed at the closure's call sites (#111 form 4).
+    /// The closure's own params are excluded: they are fresh bindings.
+    fn record_closure_mutations(&self, st: &mut FnState, name: &str, value: &Expr) {
+        let Expr::FnLit { params, body, .. } = unwrap_parens(value) else {
+            return;
+        };
+        let bound: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+        let roots = self.collect_mutation_roots(st, body, &bound);
+        if !roots.is_empty() {
+            st.closure_mutates
+                .entry(name.to_string())
+                .or_default()
+                .extend(roots);
+        }
+    }
+
+    /// Every base path this block may store through or delete: index-assign
+    /// targets, `delete` first args, and (via calls) anything a called top
+    /// fn mutates of its parameter, or another local closure mutates.
+    /// `bound` = names shadowed by enclosing closure params (#111).
+    fn collect_mutation_roots(
+        &self,
+        st: &FnState,
+        body: &Block,
+        bound: &HashSet<String>,
+    ) -> HashSet<String> {
+        let mut out: HashSet<String> = HashSet::new();
+        let flat = walk::flatten(body);
+        for (stmt, _idx) in &flat.stmts {
+            // index-assign targets
+            if let Stmt::Assign { targets, .. } = stmt {
+                for t in targets {
+                    if matches!(t.kind, PlaceKind::Index { .. }) && !bound.contains(t.root()) {
+                        out.insert(path_root(&walk::place_path(t).unwrap_or_default()).to_string());
+                    }
+                }
+            }
+            // FnLit values bound/rebound in this block (captures mutated by
+            // nested closures — flatten does not descend into FnLit bodies)
+            let mut fnlit_values: Vec<&Expr> = Vec::new();
+            match stmt {
+                Stmt::Local(l) => fnlit_values.extend(l.values.iter()),
+                Stmt::Assign { values, .. } => fnlit_values.extend(values.iter()),
+                _ => {}
+            }
+            for v in fnlit_values {
+                if let Expr::FnLit {
+                    params: fp,
+                    body: fb,
+                    ..
+                } = unwrap_parens(v)
+                {
+                    let mut inner_bound = bound.clone();
+                    inner_bound.extend(fp.iter().map(|p| p.name.clone()));
+                    out.extend(self.collect_mutation_roots(st, fb, &inner_bound));
+                }
+            }
+            // calls in this statement
+            let mut calls = Vec::new();
+            walk::own_calls(stmt, &mut calls);
+            for cr in &calls {
+                match cr.callee {
+                    Expr::Ident { name, .. } => {
+                        if name == "delete" {
+                            if let Some(first) = cr.args.first() {
+                                if let Some(p) = walk::expr_path(&first.value) {
+                                    let r = path_root(&p).to_string();
+                                    if !bound.contains(&r) {
+                                        out.insert(r);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        if A3_PURE_FNS.contains(&name.as_str()) {
+                            continue;
+                        }
+                        if let Some(decl) = self.fns.get(name) {
+                            for (i, a) in cr.args.iter().enumerate() {
+                                let Some(p) = walk::expr_path(&a.value) else {
+                                    continue;
+                                };
+                                let r = path_root(&p).to_string();
+                                if bound.contains(&r) {
+                                    continue;
+                                }
+                                let mutates = match decl.params.get(i) {
+                                    Some(tp) => self.fn_mutates_param(decl, &tp.name, 0),
+                                    None => true, // fail closed
+                                };
+                                if mutates {
+                                    out.insert(r);
+                                }
+                            }
+                        } else if let Some(existing) = st.closure_mutates.get(name.as_str()) {
+                            // another local closure — union its mutation roots
+                            out.extend(existing.iter().cloned());
+                        } else {
+                            // unknown callee — fail closed on path args
+                            for a in cr.args {
+                                if let Some(p) = walk::expr_path(&a.value) {
+                                    let r = path_root(&p).to_string();
+                                    if !bound.contains(&r) {
+                                        out.insert(r);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Expr::Field { base, .. } => {
+                        if let Expr::Ident { name: pkg, .. } = &**base {
+                            if A3_PURE_PKGS.contains(&pkg.as_str()) {
+                                continue;
+                            }
+                        }
+                        for a in cr.args {
+                            if let Some(p) = walk::expr_path(&a.value) {
+                                let r = path_root(&p).to_string();
+                                if !bound.contains(&r) {
+                                    out.insert(r);
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        for a in cr.args {
+                            if let Some(p) = walk::expr_path(&a.value) {
+                                let r = path_root(&p).to_string();
+                                if !bound.contains(&r) {
+                                    out.insert(r);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     // -----------------------------------------------------------------------
@@ -395,6 +851,10 @@ impl<'a> Checker<'a> {
                 // friendlier "frozen alias" diagnostic) — and call results
                 // that hand back argument storage (#38).
                 self.record_alias(st, name, value);
+                // #111 form 4: record the base paths a closure value's body
+                // mutates, so a call inside a live slot-loan window counts
+                // as an A3 insert/delete event.
+                self.record_closure_mutations(st, name, value);
             }
         }
     }
@@ -905,6 +1365,10 @@ impl<'a> Checker<'a> {
                         // rebind may create a fresh alias — ident copies AND
                         // call results that hand back argument storage (#38)
                         self.record_alias(st, name, v);
+                        // #111: a closure rebind replaces the old body's
+                        // mutation set (or clears it for non-closure values)
+                        st.closure_mutates.remove(name);
+                        self.record_closure_mutations(st, name, v);
                     }
                 }
             } else if values.len() == 1 && targets.len() > 1 {

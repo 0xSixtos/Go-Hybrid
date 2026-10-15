@@ -224,6 +224,13 @@ pub(crate) struct FnState {
     pub loans: Vec<Loan>,
     /// name -> last statement index that references it (Pass A result).
     pub last_use: HashMap<String, usize>,
+    /// #111 form 4: a local closure binding -> the base paths its body may
+    /// MUTATE (map insert/delete targets, transitively via calls it makes).
+    /// Captured roots only (the closure's own params are excluded — they
+    /// are fresh bindings, not the caller's storage). Recorded at define/
+    /// rebind time; consumed at the CALL site so an insert inside the body
+    /// counts as an A3 event when the call sits in a live slot-loan window.
+    pub closure_mutates: HashMap<String, HashSet<String>>,
     /// Declared result shapes of the function being checked (rule N1's
     /// return-site nil checks). Empty for closure bodies (fn literals
     /// carry no result types on the AST surface yet).
