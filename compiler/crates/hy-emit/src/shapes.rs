@@ -449,6 +449,20 @@ pub fn lookup_rust_crate(root: &str) -> Option<&'static RustCrateDesc> {
     RUST_CRATES.iter().find(|c| c.hy == root)
 }
 
+/// Crates the CHECKER's foreign table knows (type shapes for the A7
+/// consume-mode fixture and the fail-closed doctrine) but the RUNTIME does
+/// not ship a binding for. A program using one cannot build or run — the
+/// emitter refuses it with an honest diagnostic instead of the cryptic
+/// `undefined: flate2` / `package flate2 is not in std` go-build failure
+/// (the adoption-audit follow-up row). Shipping one = vendor the binding
+/// package under runtime/go/<crate>binding, add its descriptor to
+/// RUST_CRATES, and REMOVE it from this list — in the same commit.
+pub static UNBOUND_RUST_CRATES: &[&str] = &["flate2"];
+
+pub fn lookup_unbound_crate(root: &str) -> Option<&'static str> {
+    UNBOUND_RUST_CRATES.iter().copied().find(|&c| c == root).map(|v| v as _)
+}
+
 // ---------------------------------------------------------------------------
 // Import-path mapping (SPEC M5's curated allowlist, mechanical part).
 // ---------------------------------------------------------------------------

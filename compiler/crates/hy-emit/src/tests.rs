@@ -1239,3 +1239,40 @@ fn diff_duplicate_hyerr_assign_gone() {
     let count = go.matches("hyErr = hyErr0").count();
     assert_eq!(count, 1, "exactly one propagation assign:\n{}", go);
 }
+
+// ---------------------------------------------------------------------------
+// The unbound-crate refusal (the adoption-audit flate2 follow-up)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unbound_crate_call_refused_honestly() {
+    // The checker's foreign table knows flate2 (the A7 fixture), so `hyb
+    // check` passes — but the runtime ships no binding. A call WITHOUT an
+    // explicit import used to fall through emit_call's package-root gate,
+    // emit verbatim, and die at go build with `undefined: flate2`.
+    let msg = emit_err("fn main() {\n    enc := flate2.new_writer(6)?\n    fmt.println(enc)\n}");
+    assert!(
+        msg.contains("does not ship a `flate2` binding"),
+        "honest message expected:\n{}",
+        msg
+    );
+    assert!(
+        !msg.contains("not yet supported"),
+        "must not read as a language gap:\n{}",
+        msg
+    );
+}
+
+#[test]
+fn unbound_crate_import_refused_honestly() {
+    // The explicit-import shape used to say "not in the pinned binding
+    // set" — true but misleading (it reads like the crate is merely
+    // unpinned, when in fact the checker knows it and the runtime
+    // deliberately does not ship it).
+    let msg = emit_err("import \"rust/flate2\"\n\nfn main() {\n    enc := flate2.new_writer(6)?\n    fmt.println(enc)\n}");
+    assert!(
+        msg.contains("does not ship a `flate2` binding"),
+        "honest message expected:\n{}",
+        msg
+    );
+}
