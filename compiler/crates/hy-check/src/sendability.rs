@@ -121,7 +121,48 @@ impl<'a> Checker<'a> {
                     self.binding_ty_str(b)
                 )],
             }),
+            shape if self.shape_holds_closure(shape, &mut Vec::new()) => {
+                Outcome::Rejected(RejectInfo {
+                    value: name.to_string(),
+                    ty: self.binding_ty_str(b),
+                    notes: vec![format!(
+                        "`{}` is a {} that holds closures; moving the container moves only the closure values, not the environment they capture, so the captured state stays reachable from this task (A5 perimeter, same rule as moving a bare closure)",
+                        name,
+                        shape.noun()
+                    )],
+                })
+            }
             _ => Outcome::Ok,
+        }
+    }
+
+    /// True when a composite shape (slice / array / map / struct / pointer)
+    /// reaches a `Closure` through its elements or fields. A moved container
+    /// of closures would otherwise launder captured state past the freeze:
+    /// `move fs` freezes `fs`, never the bindings the closures inside it
+    /// capture. `seen` guards recursive struct decls.
+    pub(crate) fn shape_holds_closure(&self, shape: &TypeShape, seen: &mut Vec<String>) -> bool {
+        match shape {
+            TypeShape::Closure => true,
+            TypeShape::Slice(e) | TypeShape::Array(e) | TypeShape::Pointer(e) => {
+                self.shape_holds_closure(e, seen)
+            }
+            TypeShape::Map(k, v) => {
+                self.shape_holds_closure(k, seen) || self.shape_holds_closure(v, seen)
+            }
+            TypeShape::Struct(Some(sname)) => {
+                if seen.iter().any(|s| s == sname) {
+                    return false;
+                }
+                seen.push(sname.clone());
+                let Some(fields) = self.structs.get(sname) else {
+                    return false;
+                };
+                fields
+                    .iter()
+                    .any(|(_, ty)| self.shape_holds_closure(&self.shape_of_type(ty), seen))
+            }
+            _ => false,
         }
     }
 
