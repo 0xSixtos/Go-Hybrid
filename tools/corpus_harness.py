@@ -14,6 +14,8 @@ Verdict agreement rules (VERDICTS.md "checker consumption"):
                                 (HYB-E8001) AND zero errors
   EXPECTED  REJECT <rule-id> -> got.verdict == reject AND the first ERROR
                                 diagnostic carries tier0_rule == <rule-id>
+  Optional EXPECTED-DIAGNOSTIC: HYB-Exxxx on a REJECT fixture additionally
+                                pins that first ERROR's exact code.
 
 Any disagreement is a bug in the checker OR in the corpus, resolved by a
 logged amendment to VERDICTS.md — never silently (pre-registration stmt).
@@ -35,6 +37,10 @@ DEFAULT_BIN = os.path.join(os.environ.get("CARGO_TARGET_DIR", "/home/z/go-hybrid
 VERDICT_RE = re.compile(
     r"^//\s*EXPECTED-VERDICT:\s*(ACCEPT-MANAGED|ACCEPT|REJECT)\b\s*(\S*)", re.M
 )
+DIAGNOSTIC_HEADER_RE = re.compile(
+    r"^[ \t]*//[ \t]*EXPECTED-DIAGNOSTIC\b[^\n]*$", re.M
+)
+DIAGNOSTIC_RE = re.compile(r"//[ \t]*EXPECTED-DIAGNOSTIC:[ \t]*(HYB-E[0-9]{4})[ \t]*")
 
 # As-written managed (the friction number) — the pre-registered static list
 # from VERDICTS.md "Tripwire baseline" (04 counts only while lock-mediated
@@ -54,6 +60,35 @@ def read_expected(path):
     if verdict == "REJECT" and not rule:
         raise SystemExit(f"corpus error: {path} has REJECT without a rule id")
     return verdict, (rule or None)
+
+
+def read_expected_diagnostic(path, expected):
+    """Read an optional exact first-error code, rejecting malformed metadata.
+
+    Only REJECT fixtures may declare this header. Existing fixtures without
+    it keep their verdict/rule-only contract; read_expected's API is unchanged.
+    """
+    with open(path, encoding="utf-8") as f:
+        headers = DIAGNOSTIC_HEADER_RE.findall(f.read())
+    if not headers:
+        return None
+    if len(headers) != 1:
+        raise ValueError(f"corpus error: {path} has multiple EXPECTED-DIAGNOSTIC headers")
+    match = DIAGNOSTIC_RE.fullmatch(headers[0].strip())
+    if match is None:
+        raise ValueError(f"corpus error: {path} has malformed EXPECTED-DIAGNOSTIC header")
+    if expected is None or expected[0] != "REJECT":
+        raise ValueError(f"corpus error: {path} declares EXPECTED-DIAGNOSTIC without REJECT")
+    return match.group(1)
+
+
+def agree_diagnostic(expected_code, diags):
+    """Compare an optional exact first-error code, independently of its rule."""
+    if expected_code is None:
+        return True, ""
+    errors = [d for d in diags if d.get("severity") == "error"]
+    actual = errors[0].get("code") if errors else None
+    return actual == expected_code, f"expected first diagnostic {expected_code}, got {actual}"
 
 
 def run_checker(bin_path, hy_path, report_managed=False):
@@ -145,10 +180,18 @@ def main():
     managed_sites = 0
     total_sites = 0
     accept_managed_count = 0
+    expected_diagnostics = {}
+    got_diagnostics = {}
 
     for fname in files:
         path = os.path.join(args.corpus, fname)
         expected = read_expected(path)
+        try:
+            expected_code = read_expected_diagnostic(path, expected)
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            return 2
+        expected_diagnostics[fname] = expected_code
         if expected is None:
             print(f"SKIP (no EXPECTED-VERDICT): {fname}")
             continue
@@ -161,6 +204,12 @@ def main():
             continue
         got = classify_got(summary, diags)
         ok, why = agree(expected, got)
+        code_ok, code_why = agree_diagnostic(expected_code, diags)
+        if not code_ok:
+            why += "; " + code_why
+        ok = ok and code_ok
+        errors = [d for d in diags if d.get("severity") == "error"]
+        got_diagnostics[fname] = errors[0].get("code") if errors else None
         if ok:
             agreed += 1
         if expected[0] == "ACCEPT-MANAGED":
@@ -188,6 +237,9 @@ def main():
     for fname, expected, got, ok, detail in rows:
         exp_s = expected[0] + (f" {expected[1]}" if expected[1] else "")
         got_s = got[0] + (f" {got[1]}" if got[1] else "")
+        if expected_diagnostics.get(fname):
+            exp_s += f" [{expected_diagnostics[fname]}]"
+            got_s += f" [{got_diagnostics.get(fname)}]"
         mark = "OK" if ok else "FAIL"
         print(f"{fname:<46} {exp_s:<28} {got_s:<28} {mark:<4}")
         if detail:

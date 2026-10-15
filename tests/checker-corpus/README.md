@@ -1,6 +1,19 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-27 pseudo-Hybrid (`.hy`) programs written BEFORE the Phase-1 checker exists,
+35 pseudo-Hybrid (`.hy`) programs written BEFORE the Phase-1 checker exists,
+Current registered corpus: **28 programs**. The original pre-checker
+registration described below started with 18 and grew to 20 during the
+2026-10-12 integration. An additive 2026-10-14 registration in VERDICTS.md
+adds the select-send clauses (landed as corpus 32–34 after the renumber): mutable-map rejection, a positive
+string/channel control, and fail-closed rejection of an unresolved name.
+A further additive registration pins case 28, the documented default-arm
+syntax and a nonblocking fallback that prints exactly `idle`.
+Their expected results were recorded before running the new fixtures.
+These four files were initially numbered 21–24 and then 25–28 on the contributor's branch; the 2026-10-15 maintainer integration renumbered them to 32–35 (slots 25–31 were taken by the audit/PR wave) without changing their expected results.
+The dated original tripwire baseline below is preserved as historical.
+
+18 pseudo-Hybrid (`.hy`) programs written BEFORE the Phase-1 checker exists,
+
 per the human owner's 2026-10-12 ruling (QUESTIONS.md Q1): the adversarial
 programs are written first and treated as the spec. Coverage: the named
 tripwire cases (shared map across tasks; worker pool mutating a shared

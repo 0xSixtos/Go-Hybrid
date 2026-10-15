@@ -1442,7 +1442,7 @@ impl Parser {
         self.expect_punct("{")?;
         let mut arms = Vec::new();
         while !self.at_punct("}") && !self.at_eof() {
-            let kind = if self.at_kw("default") {
+            let kind = if self.at_select_default() {
                 self.bump();
                 SelectArmKind::Default
             } else if self.at_punct("<-") {
@@ -1514,10 +1514,19 @@ impl Parser {
         })
     }
 
+    /// `default` is not a reserved lexer keyword (LX3). Recognize it only
+    /// in an arm head, without consuming an ordinary channel/local name.
+    fn at_select_default(&self) -> bool {
+        self.at_kw("default")
+            || (self.at_ident("default") && matches!(self.nth(1), Tok::Punct(":" | "=>")))
+    }
+
     /// Recovery/loop lookahead: does a new select arm start here?
     fn looks_like_select_arm_head(&self) -> bool {
+        if self.at_select_default() {
+            return true;
+        }
         match self.cur() {
-            Tok::Kw("default") => true,
             Tok::Punct("<-") => true,
             Tok::Ident(_) => match self.nth(1) {
                 Tok::Punct("<-") => true, // send arm: ch <- v:
@@ -2434,7 +2443,10 @@ mod tests {
         // parser rejects only non-literal payloads (E0002 envelope).
         let f = parse_src("fn main() { managed { x := 1 } }");
         let stmt = first_stmt(&f);
-        let Stmt::Managed { reason, category, .. } = stmt else {
+        let Stmt::Managed {
+            reason, category, ..
+        } = stmt
+        else {
             panic!("managed")
         };
         assert!(reason.is_empty() && category.is_empty());
@@ -2442,7 +2454,11 @@ mod tests {
         parse_src("fn main() { managed() { x := 1 } }");
         parse_src("fn main() { managed(\"only reason\") { x := 1 } }");
         // computed payload rejected at parse level (literals only)
-        assert!(parse_file("t.hy", "fn main() { managed(reason, \"mutex\") { x := 1 } }").is_err());
+        assert!(parse_file(
+            "t.hy",
+            "fn main() { managed(reason, \"mutex\") { x := 1 } }"
+        )
+        .is_err());
     }
 
     #[test]
@@ -3047,6 +3063,81 @@ mod tests {
     }
 
     #[test]
+    fn select_default_braced_arm() {
+        let f = parse_src("fn main() { select { default: { fmt.println(\"idle\") } } }");
+        let Stmt::Select { arms, .. } = first_stmt(&f) else {
+            panic!("select")
+        };
+        assert_eq!(arms.len(), 1);
+        assert!(matches!(arms[0].kind, SelectArmKind::Default));
+        assert_eq!(arms[0].body.stmts.len(), 1);
+    }
+
+    #[test]
+    fn select_default_ends_unbraced_send_body() {
+        let f = parse_src(
+            "fn main() { select { ch <- 1: fmt.println(\"sent\") default: fmt.println(\"idle\") } }",
+        );
+        let Stmt::Select { arms, .. } = first_stmt(&f) else {
+            panic!("select")
+        };
+        assert_eq!(arms.len(), 2);
+        assert!(matches!(arms[0].kind, SelectArmKind::Send { .. }));
+        assert!(matches!(arms[1].kind, SelectArmKind::Default));
+        assert_eq!(arms[0].body.stmts.len(), 1);
+        assert_eq!(arms[1].body.stmts.len(), 1);
+    }
+
+    #[test]
+    fn select_default_arrow_before_receive() {
+        let f = parse_src("fn main() { select { default => { fmt.println(\"idle\") } <-ch: {} } }");
+        let Stmt::Select { arms, .. } = first_stmt(&f) else {
+            panic!("select")
+        };
+        assert_eq!(arms.len(), 2);
+        assert!(matches!(arms[0].kind, SelectArmKind::Default));
+        assert!(matches!(arms[1].kind, SelectArmKind::Recv { .. }));
+    }
+
+    #[test]
+    fn select_default_identifier_is_not_an_arm_without_separator() {
+        // LX3 does not reserve `default`: preserve the ordinary channel
+        // name and the local assignment inside the unbraced send body.
+        let f =
+            parse_src("fn main() { select { default <- 1: default := 2 fmt.println(default) } }");
+        let Stmt::Select { arms, .. } = first_stmt(&f) else {
+            panic!("select")
+        };
+        assert_eq!(arms.len(), 1);
+        assert!(
+            matches!(&arms[0].kind, SelectArmKind::Send { chan: Expr::Ident { name, .. }, .. } if name == "default")
+        );
+        assert_eq!(arms[0].body.stmts.len(), 2);
+        assert!(matches!(arms[0].body.stmts[0], Stmt::Local(_)));
+    }
+
+    #[test]
+    fn select_default_requires_an_arm_separator() {
+        assert!(parse_file("t.hy", "fn main() { select { default {} } }").is_err());
+    }
+
+    #[test]
+    fn select_default_after_unbraced_receive_with_default_local() {
+        let f = parse_src(
+            "fn main() { select { v := <-ch: default := v fmt.println(default) default: {} } }",
+        );
+        let Stmt::Select { arms, .. } = first_stmt(&f) else {
+            panic!("select")
+        };
+        assert_eq!(arms.len(), 2);
+        assert!(matches!(arms[0].kind, SelectArmKind::Recv { .. }));
+        assert_eq!(arms[0].body.stmts.len(), 2);
+        assert!(matches!(arms[0].body.stmts[0], Stmt::Local(_)));
+        assert!(matches!(arms[1].kind, SelectArmKind::Default));
+        assert!(arms[1].body.stmts.is_empty());
+    }
+
+    #[test]
     fn select_with_recv_define_and_bare_recv_arms() {
         // spike-6 04 select shape
         let src = "fn main() {
@@ -3239,12 +3330,24 @@ mod tests {
             panic!("bitxor at top, got {:?}", values[0])
         };
         assert!(
-            matches!(lhs.as_ref(), Expr::Binary { op: BinOp::BitOr, .. }),
+            matches!(
+                lhs.as_ref(),
+                Expr::Binary {
+                    op: BinOp::BitOr,
+                    ..
+                }
+            ),
             "left of ^ is 1|2, got {:?}",
             lhs
         );
         assert!(
-            matches!(rhs.as_ref(), Expr::Binary { op: BinOp::BitAnd, .. }),
+            matches!(
+                rhs.as_ref(),
+                Expr::Binary {
+                    op: BinOp::BitAnd,
+                    ..
+                }
+            ),
             "right of ^ is 3&4, got {:?}",
             rhs
         );
