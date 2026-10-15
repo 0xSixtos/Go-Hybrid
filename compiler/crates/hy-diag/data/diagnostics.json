@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated": "2026-10-14",
+  "updated": "2026-10-15",
   "format": "HYB-Exxxx registry (SPEC-LANGUAGE.md §9.6; append-only, never renumbered, never reused)",
   "categories": {
     "E0": "parse / lexical",
@@ -342,6 +342,20 @@
       ],
       "example": "match s { shape::circle => ... }   // reject: HYB-E5001 — missing square/triangle",
       "rule": "T"
+    },
+    {
+      "code": "HYB-E6001",
+      "name": "div-by-const-zero",
+      "category": "overflow-bounds",
+      "severity": "error",
+      "title": "division or modulo by constant zero",
+      "summary": "A `/` or `%` whose divisor is an integer literal `0` is rejected: Go refuses to compile that expression (`invalid operation: division by zero`), so an accepted Hybrid program would emit unbuildable Go (issue #149). Only the literal-constant case is in scope — a non-constant zero divisor stays a run-time panic, matching Go.",
+      "fixits": [
+        "replace the constant `0` divisor with a non-zero value",
+        "if the divisor is meant to be dynamic, bind it to a variable first — run-time division by zero is a panic, not a compile error"
+      ],
+      "example": "y := x / 0   // reject: HYB-E6001 — constant zero divisor; Go cannot build the emitted module",
+      "rule": "BUILDABLE"
     },
     {
       "code": "HYB-E7001",

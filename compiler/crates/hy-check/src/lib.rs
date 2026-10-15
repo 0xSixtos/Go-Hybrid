@@ -36,6 +36,7 @@
 //! every rejection teaches (O17 — fix-its come from the hy-diag registry);
 //! diagnostics are returned in source order.
 
+mod arith;
 mod closures;
 mod foreign;
 mod freeze;
@@ -386,6 +387,10 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         let mut uses = Vec::new();
         walk::own_uses(stmt, &mut uses);
         ck.check_uses(&st, &uses);
+
+        // Issue #149: `/` or `%` by a literal 0 must not be accepted —
+        // Go refuses to compile the emitted expression.
+        ck.check_stmt_const_zero_divisor(stmt);
 
         // Calls (A2 loan windows, A7 consumes + arg lending). A for-loop
         // ITERATE expression's borrow calls get loop-extent loans: the
