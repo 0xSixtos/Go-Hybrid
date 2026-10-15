@@ -16,6 +16,7 @@ FILES = (
     "README.md",
     "PLAN.md",
     "compiler/crates/hyb/src/main.rs",
+    "compiler/crates/hyb/build.rs",
 )
 
 
