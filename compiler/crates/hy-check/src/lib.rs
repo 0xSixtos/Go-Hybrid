@@ -576,6 +576,12 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         st.scope_pop();
     }
 
+    // #123: closure bodies sit outside Pass B (A5), so process_assign and
+    // process_call never see their writes — scan every FnLit for assign
+    // targets / `delete()` calls through a `const` root with the completed
+    // env (file consts + fn-local consts).
+    ck.check_closure_const_writes(&st, body);
+
     // Closure-boundary pass (closures.rs): task/send/select-send STATEMENTS
     // inside closure bodies are concurrency boundaries in the emitted Go —
     // checked here, fail-closed (O4.9), with the completed function env as

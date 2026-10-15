@@ -465,6 +465,136 @@ pub(crate) fn own_calls<'a>(stmt: &'a Stmt, out: &mut Vec<CallRef<'a>>) {
     }
 }
 
+/// Collect the `FnLit` expressions of THIS statement (#123). Closure BODIES
+/// are not descended here — each closure is handled as a unit by the caller
+/// (the A5 perimeter keeps flatten/uses/calls outside them).
+pub(crate) fn own_fnlits<'a>(stmt: &'a Stmt, out: &mut Vec<&'a Expr>) {
+    match stmt {
+        Stmt::Local(l) => {
+            for v in &l.values {
+                expr_fnlits(v, out);
+            }
+        }
+        Stmt::Assign { values, .. } => {
+            for v in values {
+                expr_fnlits(v, out);
+            }
+        }
+        Stmt::Expr { expr, .. } => expr_fnlits(expr, out),
+        Stmt::Send { chan, value, .. } => {
+            expr_fnlits(chan, out);
+            expr_fnlits(value, out);
+        }
+        Stmt::If { cond, .. } => expr_fnlits(cond, out),
+        Stmt::For { kind, .. } => match kind {
+            ForKind::While { cond } => expr_fnlits(cond, out),
+            ForKind::Range { lo, hi, .. } => {
+                expr_fnlits(lo, out);
+                expr_fnlits(hi, out);
+            }
+            ForKind::Iterate { expr, .. } => expr_fnlits(expr, out),
+            ForKind::Infinite => {}
+        },
+        Stmt::Return { values, .. } => {
+            for v in values {
+                expr_fnlits(v, out);
+            }
+        }
+        Stmt::Task { callee, args, .. } => {
+            expr_fnlits(callee, out);
+            for a in args {
+                expr_fnlits(&a.value, out);
+            }
+        }
+        Stmt::Managed { .. } => {}
+        Stmt::Match { subject, arms, .. } => {
+            expr_fnlits(subject, out);
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    expr_fnlits(g, out);
+                }
+            }
+        }
+        Stmt::Defer { call, .. } => expr_fnlits(call, out),
+        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Block { .. } => {}
+        Stmt::Select { arms, .. } => {
+            for arm in arms {
+                match &arm.kind {
+                    SelectArmKind::Send { chan, value } => {
+                        expr_fnlits(chan, out);
+                        expr_fnlits(value, out);
+                    }
+                    SelectArmKind::Recv { chan, .. } => expr_fnlits(chan, out),
+                    SelectArmKind::Default => {}
+                }
+            }
+        }
+    }
+}
+
+/// Collect every `FnLit` node reachable through `expr`'s own expression
+/// structure — the node itself is pushed, its body is NOT descended (the
+/// caller recurses into bodies through `own_fnlits` + flatten).
+pub(crate) fn expr_fnlits<'e>(expr: &'e Expr, out: &mut Vec<&'e Expr>) {
+    match expr {
+        Expr::FnLit { .. } => out.push(expr),
+        Expr::Ident { .. } | Expr::Lit { .. } => {}
+        Expr::Interp { parts, .. } => {
+            for p in parts {
+                if let InterpPart::Expr(e) = p {
+                    expr_fnlits(e, out);
+                }
+            }
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            expr_fnlits(lhs, out);
+            expr_fnlits(rhs, out);
+        }
+        Expr::Unary { operand, .. } => expr_fnlits(operand, out),
+        Expr::AddrOf { operand, .. } => expr_fnlits(operand, out),
+        Expr::Move { operand, .. } => expr_fnlits(operand, out),
+        Expr::Try { operand, .. } => expr_fnlits(operand, out),
+        Expr::Receive { chan, .. } => expr_fnlits(chan, out),
+        Expr::Index { base, index, .. } => {
+            expr_fnlits(base, out);
+            expr_fnlits(index, out);
+        }
+        Expr::Slice { base, lo, hi, .. } => {
+            expr_fnlits(base, out);
+            if let Some(lo) = lo {
+                expr_fnlits(lo, out);
+            }
+            if let Some(hi) = hi {
+                expr_fnlits(hi, out);
+            }
+        }
+        Expr::Field { base, .. } => expr_fnlits(base, out),
+        Expr::Call { callee, args, .. } => {
+            expr_fnlits(callee, out);
+            for a in args {
+                expr_fnlits(&a.value, out);
+            }
+        }
+        Expr::StructLit { fields, .. } => {
+            for f in fields {
+                expr_fnlits(&f.value, out);
+            }
+        }
+        Expr::SliceLit { items, .. } => {
+            for i in items {
+                expr_fnlits(i, out);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                expr_fnlits(k, out);
+                expr_fnlits(v, out);
+            }
+        }
+        Expr::Paren { inner, .. } => expr_fnlits(inner, out),
+    }
+}
+
 pub(crate) fn expr_calls<'e>(expr: &'e Expr, out: &mut Vec<CallRef<'e>>) {
     match expr {
         Expr::Call { callee, args, span } => {

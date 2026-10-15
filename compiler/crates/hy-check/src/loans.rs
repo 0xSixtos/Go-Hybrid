@@ -202,6 +202,9 @@ impl<'a> Checker<'a> {
                 if name == "delete" {
                     // A3: map delete is a map mutation
                     self.check_delete_conflict(st, cr, idx);
+                    // T22 (#123): a delete mutates the collection — a
+                    // `const` root is frozen exactly like an index write.
+                    self.check_delete_const(st, cr, &HashSet::new());
                 }
                 if self.fns.contains_key(&name) {
                     // A3 #111: the callee may insert/delete through the
@@ -1227,19 +1230,7 @@ impl<'a> Checker<'a> {
             .iter()
             .map(|t| match self.const_write_root(st, t) {
                 Some(name) => {
-                    let msg = format!(
-                        "cannot write to `{}` — it is a `const` (deeply immutable)",
-                        name
-                    );
-                    let notes = vec![
-                        "`const` is a compile-time constant: no rebind, no element write, no field store through it (SPEC-LANGUAGE T22)".to_string(),
-                        "a file-level `const` lowers to package-level state every task body reaches ambiently — an accepted write would be a data race with zero spawn-site evidence (issue #37)".to_string(),
-                        "use a `let`/`var` local and cross task boundaries with a proof (`move`/send), or guard shared updates with `managed(\"why this is safe\", \"mutex\"|\"atomic\"|\"actor\")`".to_string(),
-                    ];
-                    self.diags.push(
-                        Diagnostic::error("HYB-E3006", self.path.clone(), t.span, msg)
-                            .with_notes(notes),
-                    );
+                    self.emit_const_write_error(&name, t.span);
                     true
                 }
                 None => false,
@@ -1419,14 +1410,168 @@ impl<'a> Checker<'a> {
     /// all resolve through here (T22 / issue #37).
     fn const_write_root(&self, st: &FnState, p: &Place) -> Option<String> {
         match &p.kind {
-            PlaceKind::Ident(name) => self
-                .lookup_binding(st, name)
-                .filter(|b| b.immutable)
-                .map(|_| name.clone()),
+            PlaceKind::Ident(name) => {
+                if self
+                    .lookup_binding(st, name)
+                    .filter(|b| b.immutable)
+                    .is_some()
+                {
+                    return Some(name.clone());
+                }
+                // #123: a copy of a `const` (`alias := cells`, `let copy =
+                // cells`) points at the same backing storage, so writing
+                // through the copy IS a write to the const. Follow alias
+                // parents and may-share peers to the immutable root.
+                let mut seen: HashSet<String> = HashSet::new();
+                let mut stack = vec![name.clone()];
+                while let Some(n) = stack.pop() {
+                    if !seen.insert(n.clone()) {
+                        continue;
+                    }
+                    if let Some(parent) = st.aliases.get(&n) {
+                        if self
+                            .lookup_binding(st, parent)
+                            .filter(|b| b.immutable)
+                            .is_some()
+                        {
+                            return Some(parent.clone());
+                        }
+                        stack.push(parent.clone());
+                    }
+                    for peer in st.share_group(&n) {
+                        if seen.contains(&peer) {
+                            continue;
+                        }
+                        if self
+                            .lookup_binding(st, &peer)
+                            .filter(|b| b.immutable)
+                            .is_some()
+                        {
+                            return Some(peer);
+                        }
+                        stack.push(peer);
+                    }
+                }
+                None
+            }
             PlaceKind::Field { base, .. } | PlaceKind::Index { base, .. } => {
                 self.const_write_root(st, base)
             }
             _ => None,
+        }
+    }
+
+    /// HYB-E3006 — the shared T22 deep-immutability diagnostic (issue #37 /
+    /// #123): the write site's span, the resolved const in the message.
+    fn emit_const_write_error(&mut self, name: &str, span: Span) {
+        let msg = format!(
+            "cannot write to `{}` — it is a `const` (deeply immutable)",
+            name
+        );
+        let notes = vec![
+            "`const` is a compile-time constant: no rebind, no element write, no field store through it (SPEC-LANGUAGE T22)".to_string(),
+            "a file-level `const` lowers to package-level state every task body reaches ambiently — an accepted write would be a data race with zero spawn-site evidence (issue #37)".to_string(),
+            "use a `let`/`var` local and cross task boundaries with a proof (`move`/send), or guard shared updates with `managed(\"why this is safe\", \"mutex\"|\"atomic\"|\"actor\")`".to_string(),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E3006", self.path.clone(), span, msg).with_notes(notes),
+        );
+    }
+
+    /// #123: closure bodies sit outside Pass B (the A5 perimeter — flatten,
+    /// uses, and calls never descend into an `FnLit`), so `process_assign`
+    /// never sees a write to a `const` inside a closure. For every closure
+    /// reachable from the function body (any expression position), scan its
+    /// OWN statements for assign targets and `delete()` calls whose root
+    /// resolves to an immutable binding, with the completed fn env (file
+    /// consts resolve through `lookup_binding`; fn-local consts are still
+    /// in scope). The function's top-level statements are process_assign /
+    /// process_call's business — they are NOT rescanned here (no duplicate
+    /// diagnostics).
+    pub(crate) fn check_closure_const_writes(&mut self, st: &FnState, body: &Block) {
+        let flat = walk::flatten(body);
+        for (stmt, _idx) in &flat.stmts {
+            let mut fnlits = Vec::new();
+            walk::own_fnlits(stmt, &mut fnlits);
+            for flit in fnlits {
+                self.scan_closure_body(st, flit, &HashSet::new());
+            }
+        }
+    }
+
+    /// Scan one closure's body (`declared` = names shadowed between the
+    /// const and this scope — enclosing params/locals), then recurse into
+    /// every nested closure found in its statements.
+    fn scan_closure_body(&mut self, st: &FnState, flit: &Expr, declared: &HashSet<String>) {
+        let Expr::FnLit { params, body, .. } = crate::model::unwrap_parens(flit) else {
+            return;
+        };
+        let mut here = declared.clone();
+        here.extend(params.iter().map(|p| p.name.clone()));
+        let flat = walk::flatten(body);
+        for (s, _) in &flat.stmts {
+            if let Stmt::Local(l) = s {
+                here.extend(l.names.iter().cloned());
+            }
+        }
+        for (stmt, _idx) in &flat.stmts {
+            // write sites: rebinds, element/index writes, field stores,
+            // compound assigns (`+=`) — every Assign target root.
+            if let Stmt::Assign { targets, .. } = stmt {
+                for t in targets {
+                    if here.contains(t.root()) {
+                        continue;
+                    }
+                    if let Some(name) = self.const_write_root(st, t) {
+                        self.emit_const_write_error(&name, t.span);
+                    }
+                }
+            }
+            // `delete(const_map, k)` is a mutation too — the direct form is
+            // checked in process_call; a closure's own delete never gets
+            // there (#123).
+            let mut calls = Vec::new();
+            walk::own_calls(stmt, &mut calls);
+            for cr in &calls {
+                self.check_delete_const(st, cr, &here);
+            }
+            // nested closures — a NESTED closure's own locals shadow only at
+            // its level (flatten does not descend into FnLit bodies, so each
+            // level has collected only its own declarations so far).
+            let mut nested = Vec::new();
+            walk::own_fnlits(stmt, &mut nested);
+            for n in nested {
+                self.scan_closure_body(st, n, &here);
+            }
+        }
+    }
+
+    /// HYB-E3006 for `delete(root, ...)`: a delete mutates the collection,
+    /// so a `const` root is frozen exactly like an index write (T22).
+    /// `declared` is empty at direct call sites (no closure params apply —
+    /// enclosing scope shadowing falls out of the locals-first lookup).
+    fn check_delete_const(&mut self, st: &FnState, cr: &CallRef, declared: &HashSet<String>) {
+        let Expr::Ident { name, .. } = crate::model::unwrap_parens(cr.callee) else {
+            return;
+        };
+        if name.as_str() != "delete" {
+            return;
+        }
+        let Some(first) = cr.args.first() else {
+            return;
+        };
+        let Some(root) = first.value.root_ident() else {
+            return;
+        };
+        if declared.contains(root) {
+            return;
+        }
+        let place = Place {
+            kind: PlaceKind::Ident(root.to_string()),
+            span: first.value.span(),
+        };
+        if let Some(hit) = self.const_write_root(st, &place) {
+            self.emit_const_write_error(&hit, first.value.span());
         }
     }
 

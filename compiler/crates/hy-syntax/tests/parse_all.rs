@@ -1,11 +1,7 @@
 //! Integration test: EVERY must-parse file parses cleanly.
-<<<<<<< HEAD
-//!   * tests/checker-corpus/*.hy            (37 programs — the checker corpus)
-//!   * spikes/spike6-ownership/work/*.hy    (10 programs — Tier-0 rewrites)
-=======
-//!   * tests/checker-corpus/*.hy            (29 programs â€” the checker corpus)
+//!
+//!   * tests/checker-corpus/*.hy            (38 programs — the checker corpus)
 //!   * spikes/spike6-ownership/work/*.hy    (10 programs â€” Tier-0 rewrites)
->>>>>>> pr-117
 //!   * examples/01,02,03/program.hy         (MVP-0 target programs)
 //!
 //! plus the stretch examples 04â€“10 (same surface as the spikes; must parse
@@ -51,11 +47,7 @@ fn must_parse(path: &PathBuf) {
 #[test]
 fn checker_corpus_all_parse() {
     let files = hy_files_under("tests/checker-corpus");
-<<<<<<< HEAD
-    assert_eq!(files.len(), 37, "expected exactly 36 corpus programs",);
-=======
-    assert_eq!(files.len(), 29, "expected exactly 29 corpus programs",);
->>>>>>> pr-117
+    assert_eq!(files.len(), 38, "expected exactly 38 corpus programs",);
     for f in &files {
         must_parse(f);
     }
