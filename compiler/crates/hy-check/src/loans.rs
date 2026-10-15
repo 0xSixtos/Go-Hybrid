@@ -939,11 +939,11 @@ impl<'a> Checker<'a> {
     }
 
 
-    /// Does the local binding `name` denote a value that a shallow Go copy
-    /// would share mutable GC storage with? Locals/params only (`const`
-    /// values are file-level immutables, not freeze participants).
+    /// Does the binding `name` denote a value that a shallow Go copy
+    /// would share mutable GC storage with? Includes file-level `const`
+    /// composites (#125), which lower to package-level `var` in Go.
     fn binding_may_share(&self, st: &FnState, name: &str) -> bool {
-        st.env_lookup(name)
+        self.lookup_binding(st, name)
             .map(|b| self.shape_may_share(&b.shape))
             .unwrap_or(false)
     }
@@ -1193,6 +1193,11 @@ impl<'a> Checker<'a> {
     ) {
         st.aliases.remove(name);
         st.share_clear(name);
+        let non_owned_origin = if immutable && !shape.is_sendable_by_type() {
+            Some(format!("`const {}`", name))
+        } else {
+            None
+        };
         st.env_define(
             name,
             Binding {
@@ -1201,7 +1206,7 @@ impl<'a> Checker<'a> {
                 immutable,
                 managed_taint: managed, // O6.2: born inside `managed {}`
                 moved: None,
-                non_owned_origin: None,
+                non_owned_origin,
             },
         );
     }
@@ -1955,13 +1960,18 @@ impl<'a> Checker<'a> {
                 self.ty_of_expr(&empty, &c.value)
             }
         };
+        let non_owned_origin = if !shape.is_sendable_by_type() {
+            Some(format!("file-level `const {}`", c.name))
+        } else {
+            None
+        };
         Binding {
             shape,
             ty,
             immutable: true, // class 4: const values are immutable-by-type
             managed_taint: false,
             moved: None,
-            non_owned_origin: None,
+            non_owned_origin,
         }
     }
 }
@@ -2088,6 +2098,97 @@ mod tests {
                n, m = make_pair()\n\
                task worker(move m)\n\
                fmt.println(n)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn move_file_level_const_composite_rejects_with_e3004() {
+        let r = check(
+            "const m = map[string]int{\"init\": 0}\n\
+             fn worker(x map[string]int) { x[\"k\"] = 1 }\n\
+             fn main() {\n\
+               task worker(move m)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+            "expected HYB-E3004 for file-level const composite move, got {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn move_file_level_const_composite_post_move_use_also_emits_e3001() {
+        let r = check(
+            "const m = map[string]int{\"init\": 0}\n\
+             fn worker(x map[string]int) { x[\"k\"] = 1 }\n\
+             fn main() {\n\
+               task worker(move m)\n\
+               m[\"x\"] = 2\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+            "expected HYB-E3004 for file-level const composite move, got {:?}",
+            r.diagnostics
+        );
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3001"),
+            "expected HYB-E3001 on post-move read/write of file-level const, got {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn move_local_const_composite_rejects_with_e3004() {
+        let r = check(
+            "fn worker(x map[string]int) { x[\"k\"] = 1 }\n\
+             fn main() {\n\
+               const m = map[string]int{\"init\": 0}\n\
+               task worker(move m)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+            "expected HYB-E3004 for local const composite move, got {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn move_local_copy_of_file_level_const_composite_rejects_with_e3004() {
+        let r = check(
+            "struct holder { m map[string]int }\n\
+             const h = holder{m: map[string]int{\"init\": 0}}\n\
+             fn worker(x holder) { x.m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               h2 := h\n\
+               task worker(move h2)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+            "expected HYB-E3004 for local struct copy of file-level const composite, got {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn move_sendable_scalar_const_still_accepts() {
+        let r = check(
+            "const k = 42\n\
+             fn worker(n int) {}\n\
+             fn main() {\n\
+               const local_k = 7\n\
+               task worker(move k)\n\
+               task worker(move local_k)\n\
              }",
         );
         assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);

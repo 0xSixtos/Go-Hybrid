@@ -219,19 +219,23 @@ impl Emitter {
                 return Ok(());
             }
             LocalKind::Const => {
-                let value = self.emit_expr(
-                    l.values
-                        .first()
-                        .ok_or_else(|| EmitError::unsupported("`const` without an initializer"))?,
-                    0,
-                )?;
+                let first = l
+                    .values
+                    .first()
+                    .ok_or_else(|| EmitError::unsupported("`const` without an initializer"))?;
+                let value = self.emit_expr(first, 0)?;
+                let composite = matches!(
+                    first,
+                    Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
+                );
+                let kw = if composite { "var" } else { "const" };
                 let names = l.names.join(", ");
                 match &l.ty {
                     Some(t) => {
                         let ty = self.type_text(t);
-                        self.push(&format!("const {} {} = {}", names, ty, value));
+                        self.push(&format!("{} {} {} = {}", kw, names, ty, value));
                     }
-                    None => self.push(&format!("const {} = {}", names, value)),
+                    None => self.push(&format!("{} {} = {}", kw, names, value)),
                 }
                 return Ok(());
             }

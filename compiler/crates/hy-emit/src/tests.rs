@@ -1254,6 +1254,17 @@ fn diff_composite_const_lands_as_var() {
 }
 
 #[test]
+fn local_composite_const_lands_as_var() {
+    let go = emit("fn main() {\n    const thresholds = [10, 50]\n    fmt.println(\"{thresholds[0]}\")\n}");
+    assert!(
+        go.contains("var thresholds = []int{10, 50}"),
+        ":\n{}",
+        go
+    );
+    assert!(!go.contains("const thresholds"), ":\n{}", go);
+}
+
+#[test]
 fn diff_pointer_param_auto_address() {
     // corpus 09: `scale_then_register(e, …)` with `e *env` — an addressable
     // argument auto-addresses at a pointer param (Go's method-receiver

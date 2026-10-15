@@ -224,6 +224,16 @@ impl<'a> Checker<'a> {
                     kind,
                     desc: desc.clone(),
                 });
+            } else if let Some(cb) = self.consts.get(m).cloned() {
+                if !cb.shape.is_sendable_by_type() {
+                    let mut frozen = cb;
+                    frozen.moved = Some(MoveInfo {
+                        span,
+                        kind,
+                        desc: desc.clone(),
+                    });
+                    st.env.insert(m.clone(), frozen);
+                }
             }
         }
     }
@@ -286,8 +296,8 @@ impl<'a> Checker<'a> {
     /// be an exclusively owned local binding so freezing `x` (and its local
     /// aliases) freezes every live reference in the sending task. A function/
     /// closure parameter or receiver, an outer binding captured by a closure,
-    /// or a range variable over a non-channel collection remains aliased in
-    /// the caller / enclosing scope / collection, so moving it is rejected
+    /// a range variable over a non-channel collection, or a `const` composite
+    /// (#125) remains aliased outside the move site, so moving it is rejected
     /// with HYB-E3004 (`tier0_rule: "A1b"`).
     pub(crate) fn check_non_owned_move(
         &mut self,
@@ -298,7 +308,7 @@ impl<'a> Checker<'a> {
         let Some(b) = self.lookup_binding(st, name) else {
             return;
         };
-        if b.shape.is_sendable_by_type() || b.immutable || b.managed_taint {
+        if b.shape.is_sendable_by_type() || b.managed_taint {
             return;
         }
         let Some((origin, via_share)) = self.non_owned_origin_of(st, name) else {
