@@ -28,6 +28,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -131,7 +132,12 @@ def build_and_run(bin_path, hy_path, workdir, hazards=()):
         [binary], cwd=workdir, capture_output=True, text=True, timeout=60
     )
     if run.returncode != 0:
-        if documented_runtime_hazard(run.stderr, hazards):
+        # A Go fatal normally exits 2; GOTRACEBACK=crash aborts on Unix.
+        # Matching text must not hide a different exit or a killed process.
+        go_fatal_exit = run.returncode == 2 or (
+            os.name == "posix" and run.returncode == -signal.SIGABRT
+        )
+        if go_fatal_exit and documented_runtime_hazard(run.stderr, hazards):
             return True, "documented RUNTIME-HAZARD fatal (pre-registered)"
         return False, f"run exit {run.returncode}: {(run.stderr or run.stdout)[-200:]}"
     return True, "exit 0"
