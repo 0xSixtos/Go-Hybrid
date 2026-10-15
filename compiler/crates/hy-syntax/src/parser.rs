@@ -3269,6 +3269,25 @@ mod tests {
     }
 
     #[test]
+    fn while_is_reserved_not_silently_emitted() {
+        // `while x > 0 { … }` used to parse (while as a plain identifier +
+        // cond expr + orphan block) and emit the word `while` into Go —
+        // `go vet: undefined: while`, a broken build from accepted source
+        // (issue #103). Hybrid's while-form is `for cond { }`. Now `while`
+        // is a clean parse error naming the keyword, same as `mut`.
+        let src = "fn main() { while x > 0 { x += 1 } }";
+        let errs = match parse_file("t.hy", src) {
+            Ok(_) => panic!("while must fail at parse, not emit broken Go"),
+            Err(d) => d,
+        };
+        assert!(
+            errs.iter().any(|d| d.message.contains("`while`")),
+            "error should name the keyword: {:?}",
+            errs
+        );
+    }
+
+    #[test]
     fn interp_field_chain_and_calls() {
         // corpus 03: "processed={stats.processed} failures={stats.failures}"
         let f = parse_src(

@@ -113,6 +113,12 @@ const KEYWORDS: &[&str] = &[
     // `mut x := 3` silently emitted the word `mut` into Go — a broken
     // build from accepted source. Reserved so it fails at parse.
     "mut",
+    // `while` is the same trap one word over: Hybrid's while-form is
+    // `for cond { }` (ForKind::While). Unreserved, `while x > 0 { … }`
+    // parsed as ident `while` + expr + orphan block and emitted the word
+    // `while` into Go (`undefined: while` from go vet). Reserved so it
+    // fails at parse instead (issue #103).
+    "while",
 ];
 
 /// Lex a whole source file. On success the token stream ends with a single
