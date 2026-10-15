@@ -537,3 +537,37 @@ dated baseline remain unchanged. Verdict-level managed count is 2/28;
 the harness's unchanged historical as-written set {01, 03, 04} reports
 3/28, with the same population qualification noted above. Case 28 adds
 no `managed` block.
+
+## Additive corpus registration — 2026-10-15: buildability declarations (#134)
+
+Four cases derived from issue #134 before these files were run against the
+checker. They pin the accepted-subset contract that an accepted program
+must emit buildable Go (the same contract E6001/E6002 were registered
+under): Go's front-end rejects an unused `:=` binding, an unused import, a
+repeated name on the left of one `:=`, and a `:=` that declares no new
+variable at all. All four reject as the new code `HYB-E1002`
+(`unbuildable-declaration`, rule `BUILDABLE`, registered in
+`hy-diag/data/diagnostics.json`). Reject files name the exact diagnostic
+code in their header; a disagreement must be recorded and resolved, never
+hidden by changing an expected result.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 43 | 43-unused-define-reject | REJECT | BUILDABLE | `HYB-E1002` | `x := 5` is never read — the emitted Go is `declared and not used` |
+| 44 | 44-unused-import-reject | REJECT | BUILDABLE | `HYB-E1002` | the declared import is carried into the emitted header — `imported and not used` |
+| 45 | 45-repeated-define-name-reject | REJECT | BUILDABLE | `HYB-E1002` | `x, x := 1, 2` is `x repeated on left side of :=` |
+| 46 | 46-blank-define-reject | REJECT | BUILDABLE | `HYB-E1002` | `_ := 5` declares no new variable — `no new variables on left side of :=` |
+
+With this four-case addition the registered corpus is **46 programs:
+ACCEPT 11 · ACCEPT-MANAGED 2 · REJECT 33** (harness recompute: 46/46
+verdict agreement; tripwire 2/46 = 4.3% verdict-level, 3/46 = 6.5%
+as-written — not fired). None of the four files contains a `managed`
+block; the harness's historical as-written set {01, 03, 04} is unchanged,
+so the tripwire ratios only move with the larger total.
+
+The scope boundary is deliberate and recorded in the HYB-E1002 registry
+entry: an unused `rust/` import is NOT rejected (the emitter never writes
+it as a Go import, so it cannot fail `go build`); unused `var` /
+composite-`const` locals, select-receive names and match bindings stay
+outside this registration (the same Go error family, tracked separately);
+unread `for ... in` bindings are handled at emission (issue #139).
