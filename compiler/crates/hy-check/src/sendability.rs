@@ -78,9 +78,60 @@ impl<'a> Checker<'a> {
     // Classification
     // -----------------------------------------------------------------------
 
+    fn classify_move_ident(&self, st: &FnState, name: &str) -> Outcome {
+        let Some(b) = self.lookup_binding(st, name) else {
+            // Unresolved move operand is already recorded by the move-operand pass.
+            return Outcome::Ok;
+        };
+        if b.moved.is_some() {
+            return Outcome::Ok;
+        }
+        if b.managed_taint {
+            return Outcome::Managed {
+                desc: self.managed_desc(name, b),
+                risky: !b.shape.is_sendable_by_type(),
+            };
+        }
+        match &b.shape {
+            TypeShape::Unknown => Outcome::Unproven(UnprovenInfo {
+                value: name.to_string(),
+                reason: "its type did not resolve to a sendability class (no ascription and the initializer's type was unresolvable)".to_string(),
+            }),
+            TypeShape::Closure => Outcome::Rejected(RejectInfo {
+                value: name.to_string(),
+                ty: self.binding_ty_str(b),
+                notes: vec![
+                    "closures capture their environment by reference; moving a closure binding does not move or freeze its captured state, so closures are not sendable at spawn/send sites in Tier 0 (A5 perimeter)".to_string(),
+                ],
+            }),
+            TypeShape::BorrowHandle(_) => Outcome::Rejected(RejectInfo {
+                value: name.to_string(),
+                ty: self.binding_ty_str(b),
+                notes: vec![format!(
+                    "`{}` is a borrow handle (element view) — borrow loans are function-local and cannot be moved across tasks (O2/O7/O11); only own-handles transfer via `move`",
+                    name
+                )],
+            }),
+            TypeShape::ForeignOpaque(_) => Outcome::Rejected(RejectInfo {
+                value: name.to_string(),
+                ty: self.binding_ty_str(b),
+                notes: vec![format!(
+                    "`{}` is an opaque foreign value ({}) — foreign runtime/synchronization types cannot be moved across tasks (O4/A5)",
+                    name,
+                    self.binding_ty_str(b)
+                )],
+            }),
+            _ => Outcome::Ok,
+        }
+    }
+
     pub(crate) fn classify_value(&self, st: &FnState, expr: &Expr) -> Outcome {
-        // `move x` — class 3; the transfer marking + O5.4 validation happens at the site.
-        if matches!(unwrap_parens(expr), Expr::Move { .. }) {
+        // `move x` — class 3; validate that `x` resolves to a movable shape
+        // (never Unknown, Closure, BorrowHandle, or ForeignOpaque).
+        if let Expr::Move { operand, .. } = unwrap_parens(expr) {
+            if let Expr::Ident { name, .. } = unwrap_parens(operand) {
+                return self.classify_move_ident(st, name);
+            }
             return Outcome::Ok;
         }
         // literals and interpolated strings
@@ -599,6 +650,18 @@ impl<'a> Checker<'a> {
                 } else if !managed {
                     self.check_o54_non_ident_move(st, op, v.span());
                 }
+                if let Expr::Ident { name, .. } = op {
+                    match self.classify_move_ident(st, name) {
+                        Outcome::Ok => {}
+                        Outcome::Managed { desc, risky } => {
+                            if risky {
+                                managed_descs.push(desc);
+                            }
+                        }
+                        Outcome::Rejected(info) => rejects.push(info),
+                        Outcome::Unproven(info) => unprovens.push(info),
+                    }
+                }
                 continue;
             }
 
@@ -620,10 +683,6 @@ impl<'a> Checker<'a> {
                 } else if !managed {
                     self.check_o54_non_ident_move(st, op, mspan);
                 }
-            }
-
-            if matches!(crate::model::unwrap_parens(v), Expr::Move { .. }) {
-                continue;
             }
 
             match self.classify_value(st, v) {

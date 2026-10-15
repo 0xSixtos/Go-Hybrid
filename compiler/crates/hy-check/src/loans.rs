@@ -567,6 +567,57 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Record O5.2 alias links for pointer borrows (`p := &stats`, `slot := &m[k]`)
+    /// so moving `p` freezes the underlying mutable binding `stats` (#33).
+    pub(crate) fn record_local_borrow_aliases(&self, st: &mut FnState, l: &LocalDecl) {
+        if l.names.len() == l.values.len() {
+            for (name, value) in l.names.iter().zip(l.values.iter()) {
+                if move_operand_ident(value).is_none() {
+                    if let Some(op) = as_addr_of(unwrap_parens(value)) {
+                        if let Some(src) = op.root_ident() {
+                            if src != name {
+                                if let Some(b) = self.lookup_binding(st, src) {
+                                    if !b.shape.is_sendable_by_type() {
+                                        st.aliases.insert(name.clone(), src.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Record O5.2 alias links for pointer-borrow rebinds (`p = &stats`).
+    pub(crate) fn record_assign_borrow_aliases(
+        &self,
+        st: &mut FnState,
+        targets: &[Place],
+        op: AssignOp,
+        values: &[Expr],
+    ) {
+        if op == AssignOp::Assign && values.len() == targets.len() {
+            for (t, v) in targets.iter().zip(values.iter()) {
+                if let PlaceKind::Ident(name) = &t.kind {
+                    if move_operand_ident(v).is_none() {
+                        if let Some(addr_op) = as_addr_of(unwrap_parens(v)) {
+                            if let Some(src) = addr_op.root_ident() {
+                                if src != name {
+                                    if let Some(b) = self.lookup_binding(st, src) {
+                                        if !b.shape.is_sendable_by_type() {
+                                            st.aliases.insert(name.clone(), src.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Extend call-scoped borrow loans opened by the calls inside `value`
     /// to the last use of the view binding `name` (the A2 non-lexical
     /// window for define-stored element views).
