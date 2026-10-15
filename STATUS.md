@@ -9,3 +9,4 @@
 - Remaining open PRs (16, all with written triage + queued order): #132 (#131) · #121 (#120) · #159/#153 (#152) · #106 (#105, own review slot) · #99 (#98) · #67 (#66) · #84/88/93/115 (hole-by-hole verification vs the new seam) · #91+#96 (chan direction pair) · #113/#97 (rebase-and-merge) · #8 (rewrite invited)
 - Standing work: the triaged 16-PR queue (same conveyor discipline) · wildcard ledger's first community entries · release republish when the conveyor quiets
 - Last review gate: G3 PASSED 2026-10-13; community review is a standing input to the queue
+- Contributor candidate: shape check is read-only for programs + Cargo manifest; six offline CLI tests pass (baseline: five fail). Full Go/Rust and upstream CI remain unverified; base CI/Makefile indentation tracked by #172/#199.
