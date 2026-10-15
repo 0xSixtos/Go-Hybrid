@@ -197,6 +197,14 @@ pub(crate) struct Loan {
 pub(crate) struct FnState {
     /// The function's BASE scope: receiver, params, and top-level defines.
     pub env: HashMap<String, Binding>,
+    /// Saved alias maps for outer scopes when entering block scopes so an
+    /// inner shadowing define (`if true { m2 := 1 }`) cannot wipe outer
+    /// alias links (`m2 -> m`).
+    pub alias_scopes: Vec<HashMap<String, String>>,
+    /// Same discipline for the may-share edges (the seam's second freeze
+    /// map, pr-35): a shadowing define's `share_clear` must not survive the
+    /// block either — the snapshot restores at pop.
+    pub share_scopes: Vec<HashMap<String, HashSet<String>>>,
     /// Block scopes, innermost last (issue #14): a define inside a nested
     /// block lands in the top layer and DIES at block exit, so an inner
     /// `m := 1` can no longer overwrite the outer `m`'s binding and launder
@@ -226,11 +234,59 @@ impl FnState {
     /// Enter a block scope (walk.rs's Push events).
     pub(crate) fn scope_push(&mut self) {
         self.scopes.push(HashMap::new());
+        self.alias_scopes.push(self.aliases.clone());
+        self.share_scopes.push(self.may_share.clone());
     }
 
     /// Exit the innermost block scope (walk.rs's Pop events).
     pub(crate) fn scope_pop(&mut self) {
+        // Capture any moves on inner aliases before the inner scope and alias
+        // map are popped (handles the case where an inner alias `m2 := m` was
+        // moved while the outer root `m` was shadowed inside the block).
+        let mut inner_root_moves: Vec<(String, MoveInfo)> = Vec::new();
+        for (a, target) in &self.aliases {
+            let root = crate::freeze::resolve_alias(self, target);
+            if let Some(mv) = self.env_lookup(a).and_then(|b| b.moved.clone()) {
+                inner_root_moves.push((root, mv));
+            }
+        }
         self.scopes.pop();
+        if let Some(outer_aliases) = self.alias_scopes.pop() {
+            self.aliases = outer_aliases;
+            if let Some(outer_share) = self.share_scopes.pop() {
+                self.may_share = outer_share;
+            }
+            for (root, mv) in inner_root_moves {
+                if let Some(br) = self.env_lookup_mut(&root) {
+                    if br.moved.is_none() {
+                        br.moved = Some(mv);
+                    }
+                }
+            }
+            // If an outer binding was moved while one of its outer aliases
+            // was shadowed inside the block, propagate the freeze across the
+            // restored outer alias group now that the shadow has died.
+            let keys: Vec<String> = self.aliases.keys().cloned().collect();
+            for a in keys {
+                let root = crate::freeze::resolve_alias(self, &a);
+                let moved = self
+                    .env_lookup(&root)
+                    .and_then(|b| b.moved.clone())
+                    .or_else(|| self.env_lookup(&a).and_then(|b| b.moved.clone()));
+                if let Some(mv) = moved {
+                    if let Some(ba) = self.env_lookup_mut(&a) {
+                        if ba.moved.is_none() {
+                            ba.moved = Some(mv.clone());
+                        }
+                    }
+                    if let Some(br) = self.env_lookup_mut(&root) {
+                        if br.moved.is_none() {
+                            br.moved = Some(mv);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Innermost-first binding lookup (scopes, then the base env).

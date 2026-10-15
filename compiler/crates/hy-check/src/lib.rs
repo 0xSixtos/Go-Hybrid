@@ -501,7 +501,9 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     // the closure pass's capture view is the COMPLETED base env (A5) — a
     // capture of a block-local now resolves to nothing and fails closed
     // (HYB-E3005) at the boundary, exactly like any unresolvable name.
-    st.scopes.clear();
+    while !st.scopes.is_empty() {
+        st.scope_pop();
+    }
 
     // Closure-boundary pass (closures.rs): task/send/select-send STATEMENTS
     // inside closure bodies are concurrency boundaries in the emitted Go —
@@ -536,6 +538,163 @@ mod tests {
         let r = check("fn main() { x := 1 \n fmt.println(x) }");
         assert_eq!(r.verdict, Verdict::Accept);
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+
+    #[test]
+    fn shadow_scope_does_not_wipe_outer_alias_e3003() {
+        // An inner block shadowing `m2 := 1` must not wipe the outer alias
+        // `m2 -> m`: moving `m` after the block (or inside the block) must
+        // still freeze outer `m2` (HYB-E3003).
+        let r_after = check(
+            "fn worker(m map[string]int, done chan<- bool) { m[\"k\"] = 1\n done <- true }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               m2 := m\n\
+               if true {\n\
+                 m2 := 1\n\
+                 fmt.println(m2)\n\
+               }\n\
+               done := make(chan bool, 1)\n\
+               task worker(move m, done)\n\
+               m2[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(
+            r_after.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_after.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_after).as_deref(), Some("A1b"));
+        assert!(r_after.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        let r_inside = check(
+            "fn worker(m map[string]int, done chan<- bool) { m[\"k\"] = 1\n done <- true }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               m2 := m\n\
+               done := make(chan bool, 1)\n\
+               if true {\n\
+                 m2 := 1\n\
+                 fmt.println(m2)\n\
+                 task worker(move m, done)\n\
+               }\n\
+               m2[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(
+            r_inside.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_inside.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_inside).as_deref(), Some("A1b"));
+        assert!(r_inside.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+    }
+
+    #[test]
+    fn mutual_alias_rebind_cycle_still_freezes_on_move_e3003() {
+        // `m2 := m; m = m2` used to create a 2-cycle `m <-> m2` where 16
+        // hops of `resolve_alias` resolved `"m"` to `"m"` and `"m2"` to `"m2"`,
+        // leaving `m2` unfrozen after `move m`.
+        let r = check(
+            "fn worker(m map[string]int, done chan<- bool) { m[\"k\"] = 1\n done <- true }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               m2 := m\n\
+               m = m2\n\
+               done := make(chan bool, 1)\n\
+               task worker(move m, done)\n\
+               m2[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+    }
+
+    #[test]
+    fn same_statement_double_move_and_move_plus_read_reject_e3003() {
+        // Moving the same binding (or its alias) twice in one statement, or
+        // moving and reading it in the same multi-define, must reject with HYB-E3003.
+        let r_spawn = check(
+            "fn both(a map[string]int, b map[string]int) { a[\"k\"] = 1\n b[\"k\"] = 2 }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               task both(move m, move m)\n\
+             }",
+        );
+        assert_eq!(
+            r_spawn.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_spawn.diagnostics
+        );
+        assert!(r_spawn.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        let r_multi = check(
+            "fn worker(m map[string]int, done chan<- bool) { m[\"k\"] = 1\n done <- true }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               a, b := move m, move m\n\
+               done := make(chan bool, 1)\n\
+               task worker(move a, done)\n\
+               b[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(
+            r_multi.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_multi.diagnostics
+        );
+        assert!(r_multi.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        let r_move_and_read = check(
+            "fn worker(m map[string]int, done chan<- bool) { m[\"k\"] = 1\n done <- true }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               a, b := move m, m\n\
+               done := make(chan bool, 1)\n\
+               task worker(move a, done)\n\
+               b[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(
+            r_move_and_read.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_move_and_read.diagnostics
+        );
+        assert!(r_move_and_read
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3003"));
+
+        // Shadowing the outer root `m` (`m := 1`) inside a block before moving
+        // an alias `m2` of the outer `m` must still freeze the outer `m`.
+        let r_shadow_root = check(
+            "fn worker(m map[string]int, done chan<- bool) { m[\"k\"] = 1\n done <- true }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 1)\n\
+               if true {\n\
+                 m2 := m\n\
+                 m := 1\n\
+                 task worker(move m2, done)\n\
+                 _ = m\n\
+               }\n\
+               m[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(
+            r_shadow_root.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_shadow_root.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_shadow_root).as_deref(), Some("A1b"));
     }
 
     #[test]

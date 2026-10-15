@@ -12,13 +12,26 @@ use hy_diag::Diagnostic;
 use hy_syntax::Expr;
 use std::collections::HashSet;
 
-/// Follow an alias chain to its root (bounded: alias cycles are a parser
-/// bug, not a checker concern, but never loop forever on one).
+/// Follow an alias chain to its root. If a mutual rebind (`m2 := m; m = m2`)
+/// created a cycle in `st.aliases`, return the lexicographically smallest
+/// member of the cycle so every member of the cycle resolves to the same
+/// canonical root.
 pub(crate) fn resolve_alias(st: &FnState, name: &str) -> String {
     let mut cur = name.to_string();
+    let mut seen: Vec<String> = vec![cur.clone()];
     for _ in 0..16 {
         match st.aliases.get(&cur) {
-            Some(next) => cur = next.clone(),
+            Some(next) => {
+                if let Some(pos) = seen.iter().position(|s| s == next) {
+                    return seen[pos..]
+                        .iter()
+                        .min()
+                        .cloned()
+                        .unwrap_or_else(|| cur.clone());
+                }
+                cur = next.clone();
+                seen.push(cur.clone());
+            }
             None => break,
         }
     }
@@ -30,22 +43,61 @@ impl<'a> Checker<'a> {
     // Use-after-move / use-after-consume detection
     // -----------------------------------------------------------------------
 
-    /// Check one statement's uses against the frozen state. One diagnostic
-    /// per (statement, binding): the first use site is reported.
+    /// Check one statement's uses against the frozen state, including
+    /// same-statement double-moves (`task both(move m, move m)`) and
+    /// same-statement move-plus-read (`a, b := move m, m`).
     pub(crate) fn check_uses(&mut self, st: &FnState, uses: &[Use]) {
         let mut reported: HashSet<String> = HashSet::new();
+        let mut stmt_moves: Vec<(String, String, MoveInfo)> = Vec::new();
         for u in uses {
-            if !reported.insert(u.name.clone()) {
-                continue;
-            }
             let moved = match self.lookup_binding(st, &u.name) {
                 Some(b) => b.moved.clone(),
                 None => continue,
             };
-            let Some(mv) = moved else {
-                continue; // via_move uses of live bindings are transfers, exempt
-            };
-            self.emit_use_after_move(st, u, &mv);
+            if let Some(mv) = moved {
+                if reported.insert(u.name.clone()) {
+                    self.emit_use_after_move(st, u, &mv);
+                }
+                continue;
+            }
+            let root = resolve_alias(st, &u.name);
+            if let Some((_, _, prior_mv)) = stmt_moves.iter().find(|(_, r, _)| r == &root) {
+                if reported.insert(format!("{}@{}", u.name, u.span.start.line)) {
+                    self.emit_use_after_move(st, u, prior_mv);
+                }
+                continue;
+            }
+            if u.via_move {
+                stmt_moves.push((
+                    u.name.clone(),
+                    root,
+                    MoveInfo {
+                        span: u.span,
+                        kind: MoveKind::Moved,
+                        desc: format!("`move {}` earlier in the same statement", u.name),
+                    },
+                ));
+            }
+        }
+        // Also check if an earlier `non_via_move` read in the same statement
+        // preceded a `via_move` transfer of the same binding/alias group.
+        for u in uses {
+            if !u.via_move {
+                let root = resolve_alias(st, &u.name);
+                if let Some((mv_name, _, mv_info)) = stmt_moves
+                    .iter()
+                    .find(|(_, r, mv)| r == &root && mv.span != u.span)
+                {
+                    if self
+                        .lookup_binding(st, mv_name)
+                        .map(|b| !b.shape.is_sendable_by_type())
+                        .unwrap_or(false)
+                        && reported.insert(format!("{}@{}", u.name, u.span.start.line))
+                    {
+                        self.emit_use_after_move(st, u, mv_info);
+                    }
+                }
+            }
         }
     }
 
