@@ -11,3 +11,4 @@
 - Last review gate: G3 PASSED 2026-10-13; community review is a standing input to the queue
 - Contributor candidate: Kaggle payload quoting fixed with four offline regressions; 4/4 Windows and 66/66 Ubuntu tooling tests pass on c09e992. No live jobs or compiler validation claimed; owner CI/review pending.
 - Contributor candidate: shape check is read-only for programs + Cargo manifest; six offline CLI tests pass (baseline: five fail). Full Go/Rust and upstream CI remain unverified; base CI/Makefile indentation tracked by #172/#199 (both landed this session).
+- Contribution pending review: malformed managed-report guard; 13 targeted tests pass, subprocess reproduction confirms baseline preservation; compiler CI remains pending.
