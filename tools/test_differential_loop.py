@@ -3,6 +3,7 @@
 These exercise harness decisions, not Hybrid compiler correctness.
 Run: python3 -m unittest discover -s tools -p test_differential_loop.py -v
 """
+import os
 import pathlib
 import subprocess
 import sys
@@ -75,3 +76,62 @@ class RuntimeHazardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RelativeCorpusPathTests(unittest.TestCase):
+    """Accept-side builds chdir into a temp workspace; relative --corpus
+    paths must be resolved against the caller's cwd before that happens."""
+
+    def _write_fake_builder(self, builder: pathlib.Path):
+        # Opens argv[2] relative to the subprocess cwd (same contract as hyb).
+        builder.write_text(
+            f"#!{sys.executable}\n"
+            "import pathlib, sys\n"
+            "src = pathlib.Path(sys.argv[2])\n"
+            "if not src.is_file():\n"
+            "    sys.stderr.write(f'missing source: {src}')\n"
+            "    sys.exit(1)\n"
+            "out = pathlib.Path('a.out')\n"
+            f"out.write_text('#!{sys.executable}\\n')\n"
+            "out.chmod(0o755)\n",
+            encoding="utf-8",
+        )
+        builder.chmod(0o755)
+
+    def _run(self, *, relative_corpus: bool, relative_bin: bool = False):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            corpus = root / "corpus-dir"
+            corpus.mkdir()
+            (corpus / "01-ok.hy").write_text(
+                "// EXPECTED-VERDICT: ACCEPT\nfn main() {}\n", encoding="utf-8"
+            )
+            builder = root / "hyb"
+            self._write_fake_builder(builder)
+            bin_arg = builder.name if relative_bin else str(builder)
+            corpus_arg = corpus.name if relative_corpus else str(corpus)
+            previous = pathlib.Path.cwd()
+            try:
+                os.chdir(root)
+                return subprocess.run(
+                    [sys.executable, str(HARNESS), "--bin", bin_arg,
+                     "--corpus", corpus_arg],
+                    capture_output=True, text=True, timeout=10,
+                )
+            finally:
+                os.chdir(previous)
+
+    def test_relative_corpus_survives_build_chdir(self):
+        result = self._run(relative_corpus=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("FULL AGREEMENT", result.stdout)
+
+    def test_absolute_corpus_still_works(self):
+        result = self._run(relative_corpus=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("FULL AGREEMENT", result.stdout)
+
+    def test_relative_bin_and_corpus_together(self):
+        result = self._run(relative_corpus=True, relative_bin=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("FULL AGREEMENT", result.stdout)
