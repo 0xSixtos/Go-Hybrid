@@ -69,11 +69,18 @@ def checker_rejects(bin_path, hy_path):
         [bin_path, "check", hy_path, "--json"],
         capture_output=True, text=True, timeout=60,
     )
+    if proc.returncode not in (0, 1):
+        return False, f"unexpected checker exit {proc.returncode}"
     try:
         payload = json.loads(proc.stdout.strip())
     except json.JSONDecodeError:
         return False, "no/invalid checker JSON"
     summary = payload.get("summary", {})
+    if proc.returncode != 1:
+        return False, (
+            f"checker exit/verdict mismatch: exit {proc.returncode}, "
+            f"verdict={summary.get('verdict')}"
+        )
     diags = payload.get("diagnostics", [])
     errors = [d for d in diags if d.get("severity") == "error"]
     return (
