@@ -158,12 +158,21 @@ fn capture_called_only_before_move_accepts() {
          \x20   fmt.println(\"ok\")\n\
          }\n",
     );
+    // AMENDMENT (pr-110 integration, logged): the contributor's base predates
+    // fef40da's closure-boundary use checking, where this shape accepted.
+    // fef40da's rule is the one main ships: a closure may run at ANY time
+    // after its definition, so a use of a moved binding inside a closure
+    // body is checked against the COMPLETED environment — fail-closed
+    // (O4.9/A5), same as every unresolvable capture. NLL precision ("the
+    // closure provably cannot be called after the move") needs
+    // flow-sensitive closure-call analysis and is tracked as a PLAN
+    // follow-up; until then the conservative reject stands.
     assert!(
-        codes(&r).is_empty(),
-        "pre-move-only use must stay accepted: {:?}",
+        codes(&r).iter().any(|c| c == "HYB-E3003"),
+        "closure use of a moved binding rejects (fef40da, conservative): {:?}",
         r.diagnostics
     );
-    assert_eq!(r.verdict, Verdict::Accept);
+    assert_eq!(r.verdict, Verdict::Reject);
 }
 
 #[test]
@@ -182,12 +191,16 @@ fn primitive_capture_after_move_accepts() {
          \x20   f()\n\
          }\n",
     );
+    // AMENDMENT (pr-110 integration, logged): same fef40da rule as above —
+    // the closure-boundary pass cannot yet prove an int capture safe after
+    // the move (the write may race with nothing today, but proving THAT is
+    // the NLL follow-up). Conservative reject until the precision lands.
     assert!(
-        codes(&r).is_empty(),
-        "primitive captures do not share mutable GC storage: {:?}",
+        codes(&r).iter().any(|c| c == "HYB-E3003"),
+        "closure use of a moved (primitive) binding rejects (fef40da, conservative): {:?}",
         r.diagnostics
     );
-    assert_eq!(r.verdict, Verdict::Accept);
+    assert_eq!(r.verdict, Verdict::Reject);
 }
 
 #[test]
