@@ -327,21 +327,6 @@
       "rule": "T"
     },
     {
-      "code": "HYB-E6003",
-      "name": "const-init-not-constant",
-      "category": "overflow-bounds",
-      "severity": "error",
-      "title": "const initializer is not a constant expression",
-      "summary": "A `const` binding whose initializer is not a compile-time constant expression is rejected: the emitter keeps the Go `const` keyword for non-composite initializers, so `const c = get_val()` becomes unbuildable Go (`get_val() (value of type T) is not constant`). Composite literals already lower to `var` and are out of scope here (issue #188). Literals, constant arithmetic, references to other `const` bindings, and typed conversions of constant arguments remain accepted (issue #205).",
-      "fixits": [
-        "use a literal or a constant expression (`const c = 42`, `const c = 1 + 2`)",
-        "reference another `const` binding instead of a function call or variable",
-        "if the value is computed at run time, bind it with `:=` / `let` / `var` instead of `const`"
-      ],
-      "example": "const c = get_val()   // reject: HYB-E6003 — call is not a constant expression; Go cannot build the emitted module",
-      "rule": "BUILDABLE"
-    },
-    {
       "code": "HYB-E7001",
       "name": "boundary-pointer-field",
       "category": "boundary",
@@ -366,6 +351,21 @@
       ],
       "example": "rust_call(generic_map)   // reject: HYB-E7002 — instantiate first",
       "rule": "B"
+    },
+    {
+      "code": "HYB-E6003",
+      "name": "const-init-not-constant",
+      "category": "overflow-bounds",
+      "severity": "error",
+      "title": "const initializer is not a constant expression",
+      "summary": "A `const` binding whose initializer is not a compile-time constant expression is rejected: the emitter keeps the Go `const` keyword for non-composite initializers, so `const c = get_val()` becomes unbuildable Go (`get_val() (value of type T) is not constant`). Composite literals already lower to `var` and are out of scope here (issue #188). Literals, constant arithmetic, references to other `const` bindings, and typed conversions of constant arguments remain accepted (issue #205).",
+      "fixits": [
+        "use a literal or a constant expression (`const c = 42`, `const c = 1 + 2`)",
+        "reference another `const` binding instead of a function call or variable",
+        "if the value is computed at run time, bind it with `:=` / `let` / `var` instead of `const`"
+      ],
+      "example": "const c = get_val()   // reject: HYB-E6003 — call is not a constant expression; Go cannot build the emitted module",
+      "rule": "BUILDABLE"
     },
     {
       "code": "HYB-E8001",

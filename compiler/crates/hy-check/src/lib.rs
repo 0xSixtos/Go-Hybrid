@@ -146,10 +146,12 @@ fn build_tables(ck: &mut Checker<'_>) {
                 ck.packages.insert(root.to_string());
             }
             Decl::Const(c) => {
-                // Issue #205: `const c = get_val()` must not pass check then fail go build.
-                ck.check_const_init_is_constant(&c.name, &c.value, None);
                 let b = ck.const_binding(c);
                 ck.consts.insert(c.name.clone(), b);
+                // Issue #205: file-level `const c = get_val()` must not pass check then fail go build.
+                // Placed after insert so this hook sits below main's E6002 overflow check and
+                // 3-way-merges cleanly (same pattern as PR #191 relocated hooks).
+                ck.check_const_init_is_constant(&c.name, &c.value, None);
             }
             Decl::Struct(s) => {
                 // `type X = int` aliases parse as zero-field struct decls;
