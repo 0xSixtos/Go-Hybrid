@@ -10,3 +10,4 @@
 - Standing work: the triaged 16-PR queue (same conveyor discipline) · wildcard ledger's first community entries · release republish when the conveyor quiets
 - Last review gate: G3 PASSED 2026-10-13; community review is a standing input to the queue
 - Contributor candidate: Kaggle payload quoting fixed with four offline regressions; 4/4 Windows and 66/66 Ubuntu tooling tests pass on c09e992. No live jobs or compiler validation claimed; owner CI/review pending.
+- Contributor candidate: shape check is read-only for programs + Cargo manifest; six offline CLI tests pass (baseline: five fail). Full Go/Rust and upstream CI remain unverified; base CI/Makefile indentation tracked by #172/#199 (both landed this session).
