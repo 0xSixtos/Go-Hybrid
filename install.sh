@@ -98,8 +98,19 @@ else
 fi
 
 # --- extract ---
-mkdir -p "$INSTALL_DIR"
 tar xzf "$TMP/$ASSET" -C "$TMP"
+PACKAGE_DIR="$TMP/hybrid-${TAG}"
+# Validate the candidate before deleting a working installation during upgrade.
+if [ ! -f "$PACKAGE_DIR/hyb" ] || [ ! -d "$PACKAGE_DIR/runtime" ]; then
+    echo "install.sh: release is missing hyb or runtime; existing installation preserved" >&2
+    exit 1
+fi
+chmod +x "$PACKAGE_DIR/hyb"
+if ! HYB_RUNTIME_DIR="$PACKAGE_DIR/runtime" "$PACKAGE_DIR/hyb" explain E0002 >/dev/null 2>&1; then
+    echo "install.sh: release verification FAILED; existing installation preserved" >&2
+    exit 1
+fi
+mkdir -p "$INSTALL_DIR"
 rm -rf "$INSTALL_DIR/runtime" "$INSTALL_DIR/bin"
 cp -R "$TMP/hybrid-${TAG}/runtime" "$INSTALL_DIR/runtime"
 mkdir -p "$INSTALL_DIR/bin"

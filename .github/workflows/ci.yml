@@ -77,6 +77,7 @@ jobs:
           # Self-contained: builds a throwaway release archive, stubs the
           # downloader, and reads back the launcher's env/argv — no network.
           python3 tests/test_install_runtime.py
+          python3 tests/test_install_upgrade.py
 
   # The compiler (lands with MVP-0): pinned toolchains, full test suite,
   # corpus verdict agreement, and the walking-skeleton examples end-to-end.
