@@ -225,7 +225,6 @@
       "tier0_rule_id": "IMMUT"
     },
     {
-
       "code": "HYB-E3007",
       "name": "send-target-not-channel",
       "category": "ownership-sendability",
@@ -239,22 +238,6 @@
       "example": "noop() <- 1   // reject: HYB-E3007 — `noop()` is a void call, not a channel",
       "rule": "O4",
       "tier0_rule_id": "A1c"
-    },
-    {
-      "code": "HYB-E3010",
-      "name": "loop-label-out-of-scope",
-      "category": "resolve",
-      "severity": "error",
-      "title": "`break loop` / `continue loop` has no enclosing loop to target",
-      "summary": "The `loop` label on `break`/`continue` binds to the nearest enclosing `for`/`loop` statement (SPEC-LANGUAGE LX14). Outside any loop the label has no target: the emitter would lower it to `break hyLoop` / `continue hyLoop` against an undefined Go label, which fails `go vet`/`go build` with `invalid break label hyLoop`. Labels do not cross function or closure boundaries (Go's rule, inherited). Plain `break`/`continue` (no label) inside no loop is separately a parse-level concern; this check covers the labeled form wherever it appears in a checked function body.",
-      "fixits": [
-        "remove the `loop` label — plain `break`/`continue` already targets the innermost enclosing loop",
-        "move the statement inside the `for`/`loop` it is meant to exit",
-        "if the target is an OUTER loop from inside a nested one, keep `break loop` but ensure the statement is lexically inside that outer loop (the emitter labels the owning loop automatically)"
-      ],
-      "example": "fn main() { break loop }   // reject: HYB-E3010 — no enclosing loop",
-      "rule": "LX14",
-      "tier0_rule_id": "LABEL"
     },
     {
       "code": "HYB-E3101",
@@ -361,35 +344,6 @@
       "rule": "T"
     },
     {
-
-      "code": "HYB-E6001",
-      "name": "div-by-const-zero",
-      "category": "overflow-bounds",
-      "severity": "error",
-      "title": "division or modulo by constant zero",
-      "summary": "A `/` or `%` whose divisor is an integer literal `0` is rejected: Go refuses to compile that expression (`invalid operation: division by zero`), so an accepted Hybrid program would emit unbuildable Go (issue #149). Only the literal-constant case is in scope — a non-constant zero divisor stays a run-time panic, matching Go.",
-      "fixits": [
-        "replace the constant `0` divisor with a non-zero value",
-        "if the divisor is meant to be dynamic, bind it to a variable first — run-time division by zero is a panic, not a compile error"
-      ],
-      "example": "y := x / 0   // reject: HYB-E6001 — constant zero divisor; Go cannot build the emitted module"
-    },
-    {
-      "code": "HYB-E6002",
-      "name": "const-overflows-fixed-width",
-      "category": "overflow-bounds",
-      "severity": "error",
-      "title": "constant overflows its declared fixed-width type",
-      "summary": "A local or file-level binding whose declared type is a fixed-width integer and whose initializer is an integer constant outside that type's range is rejected: Go refuses to compile the emitted declaration (`cannot use N as T value (overflows)`), so an accepted Hybrid program would emit unbuildable Go (issue #148). Only the constant-initializer case is in scope — a variable operand stays a runtime truncation / conversion path (SPEC-LANGUAGE X4).",
-      "fixits": [
-        "use a constant that fits the declared type (e.g. `127` for `int8`, `255` for `uint8`/`byte`)",
-        "widen the declared type (e.g. `int16` / `int`) so the constant is representable",
-        "if truncation is intentional, convert from a variable (`x := 300; y := int8(x)`) — SPEC X4 defines runtime truncation for non-constant operands"
-      ],
-      "example": "var n int8 = 300   // reject: HYB-E6002 — 300 overflows int8; Go cannot build the emitted module",
-      "rule": "BUILDABLE"
-    },
-    {
       "code": "HYB-E7001",
       "name": "boundary-pointer-field",
       "category": "boundary",
@@ -427,7 +381,7 @@
         "keep or add a lock if the share is genuinely guarded",
         "accept the hatch knowingly: audit it via --report-managed"
       ],
-      "example": "managed(\"counter access guarded by a mutex\", \"mutex\") { task tally(counter) }   // warning: HYB-E8001 — unchecked share, counted",
+      "example": "managed { task tally(counter) }   // warning: HYB-E8001 — unchecked share, counted",
       "rule": "O6",
       "tier0_rule_id": "MANAGED"
     },
