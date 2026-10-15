@@ -765,12 +765,12 @@ fn match_guarded_some_with_wildcard_fallback() {
     let go = emit(
         "fn main() {\n    opt := some(3)\n    match opt {\n        some(v) if v > 10: {\n            fmt.println(\"big\")\n        }\n        _: {\n            fmt.println(\"fallback\")\n        }\n    }\n}\n",
     );
-    assert!(go.contains("hyMatched0 := false"), ":\n{}", go);
+    assert!(go.contains("hyMatched1 := false"), ":\n{}", go);
     assert!(go.contains("if hyMatch0.ok {"), ":\n{}", go);
     assert!(go.contains("if v > 10 {"), ":\n{}", go);
-    assert!(go.contains("hyMatched0 = true"), ":\n{}", go);
+    assert!(go.contains("hyMatched1 = true"), ":\n{}", go);
     assert!(go.contains("fmt.Println(\"big\")"), ":\n{}", go);
-    assert!(go.contains("if !hyMatched0 {"), ":\n{}", go);
+    assert!(go.contains("if !hyMatched1 {"), ":\n{}", go);
     assert!(go.contains("fmt.Println(\"fallback\")"), ":\n{}", go);
 }
 
@@ -780,14 +780,14 @@ fn match_guarded_some_with_none_and_wildcard() {
     let go = emit(
         "fn main() {\n    opt := some(3)\n    match opt {\n        some(v) if v > 10: {\n            fmt.println(\"big\")\n        }\n        none: {\n            fmt.println(\"none\")\n        }\n        _: {\n            fmt.println(\"fallback\")\n        }\n    }\n}\n",
     );
-    assert!(go.contains("hyMatched0 := false"), ":\n{}", go);
+    assert!(go.contains("hyMatched1 := false"), ":\n{}", go);
     assert!(go.contains("if hyMatch0.ok {"), ":\n{}", go);
     assert!(go.contains("if v > 10 {"), ":\n{}", go);
-    assert!(go.contains("hyMatched0 = true"), ":\n{}", go);
+    assert!(go.contains("hyMatched1 = true"), ":\n{}", go);
     assert!(go.contains("fmt.Println(\"big\")"), ":\n{}", go);
-    assert!(go.contains("if !hyMatched0 && !hyMatch0.ok {"), ":\n{}", go);
+    assert!(go.contains("if !hyMatched1 && !hyMatch0.ok {"), ":\n{}", go);
     assert!(go.contains("fmt.Println(\"none\")"), ":\n{}", go);
-    assert!(go.contains("if !hyMatched0 {"), ":\n{}", go);
+    assert!(go.contains("if !hyMatched1 {"), ":\n{}", go);
     assert!(go.contains("fmt.Println(\"fallback\")"), ":\n{}", go);
 }
 
