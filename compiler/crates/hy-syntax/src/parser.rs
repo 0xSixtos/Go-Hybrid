@@ -3286,7 +3286,6 @@ mod tests {
     }
 
     #[test]
-
     fn while_is_reserved_not_silently_emitted() {
         // `while x > 0 { … }` used to parse (while as a plain identifier +
         // cond expr + orphan block) and emit the word `while` into Go —
@@ -3300,8 +3299,13 @@ mod tests {
         };
         assert!(
             errs.iter().any(|d| d.message.contains("`while`")),
+            "error should name the keyword: {:?}",
+            errs
+        );
+    }
 
-fn default_select_arm_parses() {
+    #[test]
+    fn default_select_arm_parses() {
         // `default` was never in KEYWORDS, so at_kw("default") in
         // parse_select was dead code and a `default:` arm failed to parse
         // ("expected expression, found `:`") — issue #104. Reserving it

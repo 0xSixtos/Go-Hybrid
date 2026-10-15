@@ -116,7 +116,6 @@ impl Emitter {
             Stmt::Continue { label, .. } => {
                 match label {
                     Some(_) => {
-                    Some(_) => {
                         if self.for_depth == 0 && self.loop_labels.is_empty() {
                             return Err(EmitError::unsupported(
                                 "`continue loop` with no enclosing loop in this function or \

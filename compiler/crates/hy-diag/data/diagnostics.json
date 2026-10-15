@@ -221,8 +221,10 @@
       ],
       "example": "noop() <- 1   // reject: HYB-E3007 — `noop()` is a void call, not a channel",
       "rule": "O4",
-      "tier0_rule_id": "A1c",
-"code": "HYB-E3010",
+      "tier0_rule_id": "A1c"
+    },
+    {
+      "code": "HYB-E3010",
       "name": "loop-label-out-of-scope",
       "category": "resolve",
       "severity": "error",

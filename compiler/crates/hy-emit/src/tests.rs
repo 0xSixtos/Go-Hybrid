@@ -1394,6 +1394,12 @@ fn range_binding_mention_inside_a_closure_counts_as_read() {
         "a closure mention is still a read:\n{}",
         go
     );
+    assert!(
+        go.contains("%v") && go.contains("for _, v := range xs {"),
+        "the READ binding v must stay a real binding:\n{}",
+        go
+    );
+}
 
 // Loop-label scope (HYB-E3010 companion; issue: break/continue loop with no
 // enclosing loop / match-arm label propagation)
