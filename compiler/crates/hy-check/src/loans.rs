@@ -199,6 +199,14 @@ impl<'a> Checker<'a> {
                 }
             }
             Resolved::Fn { name } => {
+                // `copy(dst, src)` (#178): an element-wise slice copy
+                // duplicates the element *references* when the element type
+                // carries mutable GC storage, so the destination and source
+                // share it afterwards — a later `move` of either must freeze
+                // the other (O5.2). Primitive-element slices share nothing.
+                if name == "copy" {
+                    self.record_copy_may_share(st, cr);
+                }
                 if name == "delete" {
                     // A3: map delete is a map mutation
                     self.check_delete_conflict(st, cr, idx);
@@ -1039,6 +1047,40 @@ impl<'a> Checker<'a> {
     // `collect_ref_roots`, so a literal field that embeds a live binding —
     // bare (`holder{m: agg}`), projected (`holder{m: h1.m}`) or produced by
     // a call (`wrap{items: same(agg)}`) — is covered by one collector.
+
+    /// Record the may-share edge created by the builtin `copy(dst, src)`
+    /// (#178). For a slice whose ELEMENT carries mutable GC storage
+    /// (map / slice / pointer, or a struct/array of them) `copy` is
+    /// element-wise: it duplicates the element *references*, so `dst[i]`
+    /// and `src[i]` alias the same object, and a later `move` of either
+    /// binding must freeze the other (O5.2). A primitive-element slice
+    /// (`[]int`) copies by value and shares nothing, so no edge is recorded
+    /// and the positive control stays accepted.
+    fn record_copy_may_share(&self, st: &mut FnState, cr: &CallRef) {
+        let (Some(dst), Some(src)) = (cr.args.first(), cr.args.get(1)) else {
+            return;
+        };
+        // A slice shape is always a reference (`shape_may_share(Slice)` is
+        // unconditional), so consult the ELEMENT shape instead: only a
+        // reference-bearing element is copied by reference.
+        let TypeShape::Slice(elem) = self.shape_of_expr(st, unwrap_parens(&dst.value)) else {
+            return;
+        };
+        if !self.shape_may_share(&elem) {
+            return;
+        }
+        let mut dst_roots = Vec::new();
+        collect_ref_roots(&dst.value, &mut dst_roots);
+        let mut src_roots = Vec::new();
+        collect_ref_roots(&src.value, &mut src_roots);
+        for d in &dst_roots {
+            for s in &src_roots {
+                if d != s && self.binding_may_share(st, d) && self.binding_may_share(st, s) {
+                    st.share_edge(d, s);
+                }
+            }
+        }
+    }
 
     /// Record a binding-level alias created by `name := value` (#38).
     ///
