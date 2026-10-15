@@ -1347,7 +1347,7 @@ impl Emitter {
                                 self.push(&format!("}} else if {} {{", gt));
                             }
                             self.indent += 1;
-                            if *binding != *primary_binding {
+                            if binding.as_str() != primary_binding.as_str() {
                                 self.push(&format!("{} := {}", binding, primary_binding));
                             }
                             for st in &arm.body.stmts {
@@ -1358,7 +1358,7 @@ impl Emitter {
                         None => {
                             self.push("} else {");
                             self.indent += 1;
-                            if *binding != *primary_binding {
+                            if binding.as_str() != primary_binding.as_str() {
                                 self.push(&format!("{} := {}", binding, primary_binding));
                             }
                             for st in &arm.body.stmts {
@@ -1398,7 +1398,7 @@ impl Emitter {
                 }
                 self.indent += 1;
                 self.push(&format!("{} = true", matched_temp));
-                if *binding != *primary_binding {
+                if binding.as_str() != primary_binding.as_str() {
                     self.push(&format!("{} := {}", binding, primary_binding));
                 }
                 for st in &arm.body.stmts {
