@@ -72,8 +72,9 @@ renumbered).
 | 26 | 26-call-return-alias-freeze | REJECT | A1b | an alias that comes back through a function call (`alias := same(agg)`, `same` returns its map argument) is still a live alias of `agg` — the checker has no interprocedural summary proving the return is fresh, so `results <- move agg` freezes it too; the write through `alias` is use-after-move (issue #38; before the fix the call return was treated as fresh storage and the program was accepted with 0 diagnostics while `go -race` reported a DATA RACE) |
 | 27 | 27-const-write-reject | REJECT | IMMUT | a file-level `const` slice takes an element write (W1) and a whole-binding rebind (W2) while the emitter lowers the const to a package-level `var` — two spawned tasks reach the same backing array with NOTHING crossing the spawn site, so O4 never fires and `hyb check` reported 0 diagnostics against `go run -race` evidence (issue #37; T22 deep immutability — the write rejection was the missing check; the accept side is pinned in hy-check/tests/const_write.rs) |
 | 28 | 28-closure-capture-move | REJECT | A1b | a closure that captures a reference-bearing outer binding is a live ALIAS of its storage: `ch <- move a` transfers the map, but a later `f()` writes through the capture — on main the program was ACCEPT with 0 diagnostics while the receiver and the closure wrote the same map (`go run -race` WARNING: DATA RACE, issue #109); the fix links the closure binding to its captures with may-share edges so the move freezes `f` (alias-read twin of 20's alias-write form; accept/precision side pinned in hy-check/tests/capture_freeze.rs) |
+| 29 | 29-a3-interproc-window | REJECT | A3 | the insert that invalidates the live `&m["a"]` slot loan is spelled one FRAME away — `bump(m, "fresh")` inserts in its own frame while main's non-lexical window is live — the same runtime event as 08's direct insert (which rejects HYB-E3102); on main this form was ACCEPT with 0 diagnostics while the direct twin rejected (issue #111, with alias and closure-body siblings plus a wrong-result runtime proof: a helper delete resurrected by the loan's store-back); the fix matches A3 events across share-group peers, callee parameters (bounded, fail-closed), and closure call sites (legal twins pinned in hy-check/tests/a3_interproc.rs) |
 
-**Distribution: ACCEPT 8 · ACCEPT-MANAGED 2 · REJECT 18 — 28 programs.**
+**Distribution: ACCEPT 8 · ACCEPT-MANAGED 2 · REJECT 19 — 29 programs.**
 (19 and 20 were added by the lead during integration on 2026-10-12 — still
 BEFORE any checker existed; see the pre-registration statement. 21, 22, 23
 and 24 are post-checker corpus GROWTH from the bounty track, added
@@ -97,7 +98,12 @@ table above spells them. 28 is the issue-#109 closure-capture freeze
 live alias of the captured storage), then pinned against the fix — the
 report came with `hyb check` ACCEPT / `go run -race` DATA RACE evidence,
 so the hand-derived REJECT and the reproduction were one step, in that
-order.
+order. 29 is the issue-#111 interprocedural A3 program (2026-10-15):
+verdict derived from O8's own text first ("any map insert/delete inside
+the window" — no frame scoping) and pinned against the fix; the report
+came with the direct-twin contrast (corpus 08 / direct delete reject,
+these accept) and a runtime wrong-result reproduction, hand-derived
+REJECT first, per the same discipline.
 
 ## Reading-distinguishing power (what Spike 6's corpus could not do)
 
