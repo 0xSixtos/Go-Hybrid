@@ -12,3 +12,4 @@
 - Contributor candidate: Kaggle payload quoting fixed with four offline regressions; 4/4 Windows and 66/66 Ubuntu tooling tests pass on c09e992. No live jobs or compiler validation claimed; owner CI/review pending.
 - Contributor candidate: shape check is read-only for programs + Cargo manifest; six offline CLI tests pass (baseline: five fail). Full Go/Rust and upstream CI remain unverified; base CI/Makefile indentation tracked by #172/#199 (both landed this session).
 - Contribution pending review: malformed managed-report guard; 13 targeted tests pass, subprocess reproduction confirms baseline preservation; compiler CI remains pending.
+- Contribution under review (2026-10-15): corpus harness validates JSON envelope shapes and supplied diagnostic counts; focused Python tests 14/14, top-level tools tests 70/70 in a normal clone. Full pinned compiler/corpus validation pending CI (local rustc SIGBUS).
