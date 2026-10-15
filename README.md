@@ -235,7 +235,12 @@ issues are tagged. Docs, adversarial test corpora, diagnostic wording, and
 example programs are all high-leverage right now. There is a **$500 bounty
 pool** over the top 10 contributions each cycle: reproduced soundness bugs
 and useful improvements alike, with severity tiers and a Hall of Fame —
-the full rules are in [BOUNTY.md](BOUNTY.md). The project follows an
+the full rules are in [BOUNTY.md](BOUNTY.md). **The Wildcard Track adds
+another $500 per cycle** for revolutionary, contrarian, high-risk ideas a
+normal feature bounty would reject — no prototype required, breaking
+changes and rewrites explicitly allowed, failures published as learnings
+(and paid): ledger and solicitation calendar in [MOONSHOT.md](MOONSHOT.md).
+The project follows an
 evidence-first protocol: hypotheses are pre-registered before measurement,
 failures are reported plainly, and tests are never weakened to pass — see
 [AGENTS.md](AGENTS.md) for how the repo works. Security reports start at
