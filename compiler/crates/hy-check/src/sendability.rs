@@ -556,6 +556,95 @@ impl<'a> Checker<'a> {
             .push(Diagnostic::error("HYB-E4001", self.path.clone(), span, msg).with_notes(notes));
     }
 
+    /// N1 for composite literals: `job{m: nil}` with a map-typed field used
+    /// to pass the checker — classify_composite has no per-field type
+    /// context, so the bare-nil check at the five direct-flow sites never
+    /// saw the nested `nil`. The fix follows the N1 doctrine (a TYPE
+    /// contract, emitted even inside `managed`): every literal carries its
+    /// own type context (the struct def, the map's value type, the slice's
+    /// element type), so a `nil` whose slot resolves to a non-nilable shape
+    /// is a type error right there — boundary or not.
+    pub(crate) fn check_composite_nils(&mut self, st: &FnState, value: &Expr) {
+        match unwrap_parens(value) {
+            Expr::StructLit { ty, fields, .. } => {
+                // the literal's own ascription wins; else infer from the env
+                // (an ascribed define `var j jobT = jobT{...}` names the
+                // struct twice — same answer)
+                let sname = ty.as_ref().and_then(|t| match t {
+                    hy_syntax::TypeExpr::Named { name, .. } => Some(name.clone()),
+                    _ => None,
+                });
+                if let Some(sname) = sname.or_else(|| {
+                    let shape = self.shape_of_expr(st, value);
+                    match shape {
+                        TypeShape::Struct(Some(n)) => Some(n),
+                        _ => None,
+                    }
+                }) {
+                    if let Some(def) = self.structs.get(&sname).cloned() {
+                        for f in fields {
+                            if let Some((_, fty)) = def.iter().find(|(n, _)| n == &f.name) {
+                                if Checker::is_nil_literal(&f.value) {
+                                    let fshape = self.shape_of_type(fty);
+                                    if !Checker::is_nilable_shape(&fshape) {
+                                        self.emit_nil_type_error_text(
+                                            &fshape,
+                                            fty.render(),
+                                            f.value.span(),
+                                            &format!("the field `{}.{}`", sname, f.name),
+                                        );
+                                    }
+                                    continue;
+                                }
+                                self.check_composite_nils(st, &f.value);
+                            }
+                        }
+                    }
+                }
+            }
+            Expr::MapLit { value: vty, entries, .. } => {
+                let vshape = self.shape_of_type(vty);
+                let vty_text = vty.render();
+                for (k, v) in entries {
+                    if Checker::is_nil_literal(v) && !Checker::is_nilable_shape(&vshape) {
+                        self.emit_nil_type_error_text(
+                            &vshape,
+                            vty_text.clone(),
+                            v.span(),
+                            &format!("the map value slot `{}`", vty_text),
+                        );
+                        continue;
+                    }
+                    self.check_composite_nils(st, v);
+                    self.check_composite_nils(st, k);
+                }
+            }
+            Expr::SliceLit { elem, items, .. } => {
+                if let Some(ety) = elem {
+                    let eshape = self.shape_of_type(ety);
+                    let ety_text = ety.render();
+                    for it in items {
+                        if Checker::is_nil_literal(it) && !Checker::is_nilable_shape(&eshape) {
+                            self.emit_nil_type_error_text(
+                                &eshape,
+                                ety_text.clone(),
+                                it.span(),
+                                &format!("the element slot `{}`", ety_text),
+                            );
+                            continue;
+                        }
+                        self.check_composite_nils(st, it);
+                    }
+                } else {
+                    for it in items {
+                        self.check_composite_nils(st, it);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Check-site processing (A1c / O6 suppression + lint)
     // -----------------------------------------------------------------------
@@ -611,6 +700,10 @@ impl<'a> Checker<'a> {
         }
 
         for (vi, v) in values.iter().enumerate() {
+            // N1 for composite literals: a literal that crosses the boundary
+            // with nested nils (`task worker(jobT{m: nil})`) is a TYPE error
+            // at its own slot — emitted even inside `managed` (HYB-E4001).
+            self.check_composite_nils(st, v);
             // N1 (rule N): a bare `nil` is not a classifiable sendability
             // value — it either lands on a type that HAS a nil (error,
             // foreign; N2) or it is a type error (HYB-E4001). With no
