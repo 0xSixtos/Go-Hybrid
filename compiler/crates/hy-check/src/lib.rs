@@ -1120,7 +1120,17 @@ mod tests {
              }",
         );
         assert_eq!(r_closure.verdict, Verdict::Reject);
-        assert_eq!(first_error_rule(&r_closure).as_deref(), Some("A1c"));
+        // AMENDMENT (pr-110 seam): the closure-capture share edge makes the
+        // freeze fire at the MOVE (A1b/E3003) BEFORE the spawn-boundary
+        // A1c/E3001 — both rules must be present, A1b now first. The old
+        // assertion pinned A1c-first because the capture edge did not exist.
+        assert_eq!(first_error_rule(&r_closure).as_deref(), Some("A1b"));
+        assert!(r_closure
+            .diagnostics
+            .iter()
+            .any(|d| d.tier0_rule.as_deref() == Some("A1c")),
+            "the spawn-boundary A1c diagnostic must still fire: {:?}",
+            r_closure.diagnostics);
 
         let r_ptr = check(
             "struct st { n int }\n\

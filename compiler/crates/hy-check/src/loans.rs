@@ -965,6 +965,9 @@ impl<'a> Checker<'a> {
                         if self.binding_may_share(st, root) {
                             st.share_edge(name, root);
                         }
+                    }
+                }
+            }
             // #109: a closure value holds live references to every outer
             // binding its body captures — invoking it after a `move` of a
             // captured binding is the alias-read/alias-write form of the
