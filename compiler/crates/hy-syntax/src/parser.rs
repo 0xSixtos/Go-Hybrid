@@ -3306,12 +3306,24 @@ mod tests {
             panic!("bitxor at top, got {:?}", values[0])
         };
         assert!(
-            matches!(lhs.as_ref(), Expr::Binary { op: BinOp::BitOr, .. }),
+            matches!(
+                lhs.as_ref(),
+                Expr::Binary {
+                    op: BinOp::BitOr,
+                    ..
+                }
+            ),
             "left of ^ is 1|2, got {:?}",
             lhs
         );
         assert!(
-            matches!(rhs.as_ref(), Expr::Binary { op: BinOp::BitAnd, .. }),
+            matches!(
+                rhs.as_ref(),
+                Expr::Binary {
+                    op: BinOp::BitAnd,
+                    ..
+                }
+            ),
             "right of ^ is 3&4, got {:?}",
             rhs
         );
