@@ -119,6 +119,14 @@ const KEYWORDS: &[&str] = &[
     // `while` into Go (`undefined: while` from go vet). Reserved so it
     // fails at parse instead (issue #103).
     "while",
+    // Select-arm words (issue #104 + pr-22/pr-108 seam): `case` is
+    // RESERVED — Go-style `case <-ch:` used to silently parse as a Send
+    // on ident `case` and emit `case case <- ch:` (invalid Go); now it
+    // fails cleanly at parse. `default` is deliberately NOT reserved:
+    // pr-22's contextual design (a select-arm head only, before `:`)
+    // keeps channels named `default` legal — see SPEC-LANGUAGE LX14's
+    // select paragraph.
+    "case",
 ];
 
 /// Lex a whole source file. On success the token stream ends with a single
