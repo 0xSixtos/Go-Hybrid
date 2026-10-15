@@ -355,8 +355,10 @@
         "replace the constant `0` divisor with a non-zero value",
         "if the divisor is meant to be dynamic, bind it to a variable first — run-time division by zero is a panic, not a compile error"
       ],
-      "example": "y := x / 0   // reject: HYB-E6001 — constant zero divisor; Go cannot build the emitted module",
-"code": "HYB-E6002",
+      "example": "y := x / 0   // reject: HYB-E6001 — constant zero divisor; Go cannot build the emitted module"
+    },
+    {
+      "code": "HYB-E6002",
       "name": "const-overflows-fixed-width",
       "category": "overflow-bounds",
       "severity": "error",
