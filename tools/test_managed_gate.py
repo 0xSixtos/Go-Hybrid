@@ -63,8 +63,46 @@ class ManagedGateTests(unittest.TestCase):
         self.assert_mapping_error('fn main() {}', [block('missing')])
 
     def test_extra_source_candidate_is_not_paired_with_wrong_report(self):
-        self.assert_mapping_error('// mentions managed("not code", "other")\nmanaged("a", "other") {}',
+        self.assert_mapping_error('managed("extra", "other") {}\nmanaged("a", "other") {}',
                                   [block('a')])
+
+    def test_comments_and_strings_do_not_spoof_source_line(self):
+        # Issue #119: comments and string literals mentioning managed(...) must
+        # be ignored by the lexical scan, and whitespace between `managed` and
+        # `(` must still match the real statement line.
+        src = '\n'.join([
+            'fn main() {',
+            '  // managed("not executable", "other")',
+            '  /* managed("block comment", "other") */',
+            '  s := "managed(\\"str\\", \\"other\\")"',
+            '  r := `managed("raw", "other")`',
+            '  managed ("reviewed", "other") {}',
+            '}',
+        ])
+        found = self.audit(src, [block('reviewed')])
+        self.assertEqual([key.rsplit(':', 1)[1] for key in found], ['6'])
+
+    def test_moving_block_below_comment_changes_baseline_key(self):
+        # Issue #119 reproducer: moving a spaced `managed (...)` block while a
+        # preceding comment mentions `managed(` must change the recorded line.
+        before = '\n'.join([
+            'fn main() {',
+            '  // managed("not executable", "other")',
+            '  managed ("reviewed", "other") {}',
+            '}',
+        ])
+        after = '\n'.join([
+            'fn main() {',
+            '  // managed("not executable", "other")',
+            '  x := 1',
+            '  y := 2',
+            '  managed ("reviewed", "other") {}',
+            '}',
+        ])
+        found_before = self.audit(before, [block('reviewed')])
+        found_after = self.audit(after, [block('reviewed')])
+        self.assertEqual([key.rsplit(':', 1)[1] for key in found_before], ['3'])
+        self.assertEqual([key.rsplit(':', 1)[1] for key in found_after], ['5'])
 
     def test_invalid_category_still_fails_closed(self):
         with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as error:
