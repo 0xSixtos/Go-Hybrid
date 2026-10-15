@@ -26,7 +26,12 @@
 //!     `managed` suppression/lint (HYB-E8001).
 //!   * `freeze.rs`  — A1b/A7 (O5 freeze-after-move, O13 consume).
 //!   * `loans.rs`   — A2/A3/A6/LOAN-ESCAPE + the environment updates.
-//!   * `const_overflow.rs` — HYB-E6002: constant init outside a fixed-width declared type.
+//!   * `const_overflow.rs` — HYB-E6002: constant init outside a fixed-width declared type
+//!     (issue #148; #201-B extends the fold to constant expressions and float→int).
+//!   * `emit_guard.rs` — HYB-E2006/E1003/E2007/E6005/E6004: expression and
+//!     declaration guards that keep accepted programs emitting buildable Go
+//!     (issue #201: incomparable `==`, package-level redeclarations,
+//!     invalid receivers, negative shift counts, bad array lengths).
 //!   * this file    — Pass B: the per-statement driver and the verdict.
 //!
 //! Tier-0 discipline (O4.9, rule FC — human directive 2026-10-13): the
@@ -40,6 +45,7 @@
 mod arith;
 mod const_overflow;
 mod closures;
+mod emit_guard;
 mod foreign;
 mod freeze;
 mod loans;
@@ -153,16 +159,49 @@ fn build_tables(ck: &mut Checker<'_>) {
                 if let Some(ty) = &c.ty {
                     ck.check_const_overflow_init(&c.name, ty, &c.value);
                 }
+                ck.declare_pkg_name(&c.name, "const", c.span);
                 let b = ck.const_binding(c);
                 ck.consts.insert(c.name.clone(), b);
             }
             Decl::Struct(s) => {
+                // Issue #201-C: package-scope names are unique across
+                // fns / consts / structs (Go's single package block).
+                ck.declare_pkg_name(&s.name, "struct", s.span);
                 // `type X = int` aliases parse as zero-field struct decls;
                 // they are not containers — leave them unresolved (Unknown
                 // is permissive, and alias-of-primitive values must never
                 // classify as mutable GC structs).
                 if s.fields.is_empty() {
                     continue;
+                }
+                // Issue #201-C: duplicate field names in one struct are
+                // `a redeclared in this block` in the emitted Go.
+                let mut seen_fields: std::collections::HashSet<&str> =
+                    std::collections::HashSet::new();
+                for f in &s.fields {
+                    if !seen_fields.insert(f.name.as_str()) {
+                        ck.diags.push(
+                            Diagnostic::error(
+                                "HYB-E1003",
+                                ck.path.clone(),
+                                f.span,
+                                format!(
+                                    "field `{}` redeclared in struct `{}` (HYB-E1003)",
+                                    f.name, s.name
+                                ),
+                            )
+                            .with_notes(vec![
+                                format!(
+                                    "why: Go rejects a struct with two `{}` fields (`{} redeclared in this block`), so an accepted Hybrid program would emit unbuildable Go (issue #201)",
+                                    f.name, f.name
+                                ),
+                                format!(
+                                    "fix: rename one of the `{}` fields — each struct field name must be unique",
+                                    f.name
+                                ),
+                            ]),
+                        );
+                    }
                 }
                 ck.structs.insert(
                     s.name.clone(),
@@ -176,11 +215,52 @@ fn build_tables(ck: &mut Checker<'_>) {
                 // Only top-level functions belong in `ck.fns` (methods have a
                 // receiver and must not overwrite or impersonate top-level fns).
                 if f.receiver.is_none() {
+                    ck.declare_pkg_name(&f.name, "fn", f.span);
                     ck.fns.insert(f.name.clone(), f);
+                } else {
+                    // Issue #201-C/D: method-set dup + receiver validity.
+                    ck.declare_method(f);
                 }
             }
-            Decl::Enum(_) => {}
-            Decl::TypeAlias(_) => {}
+            Decl::Enum(e) => ck.declare_pkg_name(&e.name, "enum", e.span),
+            Decl::TypeAlias(a) => ck.declare_pkg_name(&a.name, "type", a.span),
+        }
+    }
+
+    // Issue #201-E pass 2: array-length validity over every DECLARED type,
+    // after all file-level consts are known (`[n]int` where `n` is a const).
+    for d in &file.decls {
+        match d {
+            Decl::Const(c) => {
+                if let Some(ty) = &c.ty {
+                    ck.check_type_expr(ty);
+                }
+            }
+            Decl::Struct(s) => {
+                for f in &s.fields {
+                    ck.check_type_expr(&f.ty);
+                }
+            }
+            Decl::Fn(f) => {
+                if let Some(r) = &f.receiver {
+                    ck.check_type_expr(&r.ty);
+                }
+                for p in &f.params {
+                    ck.check_type_expr(&p.ty);
+                }
+                for r in &f.results {
+                    ck.check_type_expr(&r.ty);
+                }
+            }
+            Decl::TypeAlias(a) => ck.check_type_expr(&a.ty),
+            Decl::Enum(e) => {
+                for v in &e.variants {
+                    if let Some(p) = &v.payload {
+                        ck.check_type_expr(p);
+                    }
+                }
+            }
+            Decl::Import { .. } => {}
         }
     }
 }
@@ -398,6 +478,10 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         // Issue #149: `/` or `%` by a literal 0 must not be accepted —
         // Go refuses to compile the emitted expression.
         ck.check_stmt_const_zero_divisor(stmt);
+
+        // Issue #201: expression/type guards (incomparable `==`,
+        // constant negative shifts, local array-length ascriptions).
+        ck.check_stmt_emit_guard(&st, stmt);
 
         // Calls (A2 loan windows, A7 consumes + arg lending). A for-loop
         // ITERATE expression's borrow calls get loop-extent loans: the
