@@ -306,6 +306,11 @@ impl Emitter {
                     self.handler_writer = Some(name);
                 }
                 self.fnlit_depth += 1;
+                // Labels do not cross func boundaries: a labeled break/continue
+                // must find its loop INSIDE the literal — reset the depth so
+                // an outer loop's count cannot bless a closure-nested label.
+                let saved_for_depth = self.for_depth;
+                self.for_depth = 0;
                 let mut out = String::from("func(");
                 out.push_str(&rendered_params);
                 out.push_str(") ");
@@ -335,6 +340,7 @@ impl Emitter {
                 let closure_body = std::mem::take(&mut self.body);
                 self.body = main_body;
                 self.fnlit_depth -= 1;
+                self.for_depth = saved_for_depth;
                 self.handler_writer = saved_writer;
                 self.bindings.retain(|k, _| known.contains(k));
                 out.push_str(&closure_body);

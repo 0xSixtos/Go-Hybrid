@@ -1291,6 +1291,7 @@ fn diff_duplicate_hyerr_assign_gone() {
 }
 
 // ---------------------------------------------------------------------------
+
 // The unbound-crate refusal (the adoption-audit flate2 follow-up)
 // ---------------------------------------------------------------------------
 
@@ -1393,4 +1394,62 @@ fn range_binding_mention_inside_a_closure_counts_as_read() {
         "a closure mention is still a read:\n{}",
         go
     );
+
+// Loop-label scope (HYB-E3010 companion; issue: break/continue loop with no
+// enclosing loop / match-arm label propagation)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn match_arm_labeled_break_labels_enclosing_loop() {
+    // stmt_has_loop_break used to skip Stmt::Match, so a `break loop` inside
+    // a match arm left the loop unlabeled and the emitted `break hyLoop`
+    // failed go vet (invalid break label). The arm is not a new loop — the
+    // enclosing loop must carry the hyLoop label.
+    let go = emit(
+        "fn main() {\n    o := some(1)\n    loop {\n        match o {\n            some(v) => if v > 0 { break loop }\n            none => {}\n        }\n    }\n}\n",
+    );
+    assert!(go.contains("hyLoop:"), "label missing:\n{}", go);
+    assert!(go.contains("break hyLoop"), ":\n{}", go);
+}
+
+#[test]
+fn match_arm_labeled_continue_labels_enclosing_while_for() {
+    let go = emit(
+        "fn main() {\n    o := some(1)\n    x := 1\n    for x > 0 {\n        match o {\n            some(v) => if v > 0 { continue loop }\n            none => {}\n        }\n    }\n}\n",
+    );
+    assert!(go.contains("hyLoop:"), "label missing:\n{}", go);
+    assert!(go.contains("continue hyLoop"), ":\n{}", go);
+}
+
+#[test]
+fn closure_labeled_break_without_closure_loop_refuses_emit() {
+    // Labels do not cross func boundaries: a closure-nested `break loop`
+    // with no loop INSIDE the literal cannot target the outer frame's label
+    // (Go rejects it too). The checker's Tier-0 walk skips closure bodies,
+    // so the emitter is the backstop — refuse instead of emitting
+    // `break hyLoop` against an undefined label.
+    let file = parse_file(
+        "t.hy",
+        "fn main() {\n    f := fn() {\n        break loop\n    }\n    f()\n}\n",
+    )
+    .expect("parse");
+    match super::emit_go(&file) {
+        Ok(g) => panic!("expected unsupported error, got:\n{}", g),
+        Err(e) => assert!(
+            e.message.contains("no enclosing loop"),
+            "message should name the missing loop: {}",
+            e.message
+        ),
+    }
+}
+
+#[test]
+fn closure_with_own_loop_labeled_break_emits() {
+    // Control: a closure that owns its loop labels itself and emits fine.
+    let go = emit(
+        "fn main() {\n    f := fn() {\n        loop {\n            break loop\n        }\n    }\n    f()\n}\n",
+    );
+    assert!(go.contains("hyLoop:"), "label missing:\n{}", go);
+    assert!(go.contains("break hyLoop"), ":\n{}", go);
+
 }

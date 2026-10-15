@@ -89,11 +89,19 @@ impl Emitter {
                 Ok(())
             }
             Stmt::Break { label, .. } => {
-                // `break loop` → Go label of the enclosing loop in THIS
-                // function (`loop` is a Go keyword; the target is the
-                // innermost labeled loop, per LX14).
+                // `break loop` → the Go label of the innermost labeled
+                // loop in THIS function (pr-136's per-loop labels), refused
+                // when no enclosing loop exists at all (pr-101: the label
+                // would have no target — the checker rejects fn bodies with
+                // HYB-E3010; this guards closure bodies).
                 match label {
                     Some(_) => {
+                        if self.for_depth == 0 && self.loop_labels.is_empty() {
+                            return Err(EmitError::unsupported(
+                                "`break loop` with no enclosing loop in this function or closure \
+                                 — the loop label would have no target (LX14)",
+                            ));
+                        }
                         let name = self
                             .loop_labels
                             .last()
@@ -108,6 +116,13 @@ impl Emitter {
             Stmt::Continue { label, .. } => {
                 match label {
                     Some(_) => {
+                    Some(_) => {
+                        if self.for_depth == 0 && self.loop_labels.is_empty() {
+                            return Err(EmitError::unsupported(
+                                "`continue loop` with no enclosing loop in this function or \
+                                 closure — the loop label would have no target (LX14)",
+                            ));
+                        }
                         let name = self
                             .loop_labels
                             .last()
@@ -1058,7 +1073,10 @@ impl Emitter {
             }
         };
         self.push(&head);
-        self.emit_block_body(&body.stmts)?;
+        self.for_depth += 1;
+        let body_r = self.emit_block_body(&body.stmts);
+        self.for_depth -= 1;
+        body_r?;
         self.push("}");
         if label.is_some() {
             self.loop_labels.pop();
@@ -1094,6 +1112,13 @@ impl Emitter {
             Stmt::For { .. } => false, // nested loop labels itself
             Stmt::Block { block, .. } | Stmt::Managed { body: block, .. } => {
                 self.block_has_loop_break(block)
+            }
+            Stmt::Match { arms, .. } => {
+                // A labeled break/continue inside a match arm still targets
+                // THIS loop (the arm is not a new loop) — without this arm
+                // the loop skipped its `hyLoop:` label and the emitted
+                // `break hyLoop` failed go vet (invalid break label).
+                arms.iter().any(|a| self.block_has_loop_break(&a.body))
             }
             Stmt::Select { arms, .. } => arms.iter().any(|a| self.block_has_loop_break(&a.body)),
             _ => false,
