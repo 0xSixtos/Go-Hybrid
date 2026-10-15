@@ -424,3 +424,27 @@ Stage Summary:
 - The bounty program works end to end on real traffic: announcement to merged soundness fix in one session, with the verify-first discipline held throughout
 - The checker is strictly stronger now: the documented-but-unenforced E3004 case is enforced, and no diagnostic teaches retired syntax
 - Standing work remains exactly: community replies as they arrive + bounty triage
+
+---
+Task ID: session-27 (the stale family + the audit follow-ups + the conveyor)
+Agent: Super Z (main)
+Task: Owner directive — rebase the stale family (#28/#30/#32/#34) onto current main; land the composite-nil/flate2/pin-drift follow-ups; continue the open-PR conveyor.
+
+Work Log:
+- Fresh sandbox: Go 1.26.9 → /home/z/tools/go; Rust 1.99.0 via rustup minimal. Baselines on 8fb9238: cargo 290/0 · corpus 27/27 · differential FULL · examples 10/10 · check OK.
+- Stale family, maintainer-assisted rebase (each PR verified hole-by-hole FIRST):
+  - #28: 5/6 shapes already covered by pr-35's may-share; the live hole (composite literal embedding a PROJECTION, holder{m: h1.m}) ported through record_literal_ref's recursion; PR's parallel alias machinery documented as subsumed; tests landed with the A1b assertion adjusted to the seam's contract. Pushed to the fork (maintainerCanModify), CI approved, merged 73b3e49.
+  - #30: all four holes live (closure pass never ran check_uses; select-arm bodies never collected). Ported as authored; tests unmodified. Merged e12adff.
+  - #32: shadow-wipe/double-move/move+read live; cycle + shadowed-root already covered by may-share. Ported + extended symmetrically (share_scopes for may_share — main's freeze verdicts ride pr-35 edges). Merged d542690.
+  - #34: all four laundering shapes live. Applied as authored (classify_move_ident + borrow-alias recorders). Merged 7063e33.
+  - CI green on every rebased head before merge; merge seams verified (297/0 at the last); PRs now MERGED on GitHub; each author got a detailed seam-resolution comment.
+- Follow-up (a) composite-nil (Batch X): check_composite_nils — struct-field/map-value/slice-elem slot-typed nil rejection (recursive, managed-transparent), wired at define/rebind/return/check_site; corpus 28 + 6-shape unit test; parse pin 27→28. Merged 6c6b66a.
+- Follow-up (b) flate2 early-fail (Batch Y): UNBOUND_RUST_CRATES + EmitError::unbound_crate — both shapes (bare call via emit_call's gate, explicit import) refuse at emit with the honest message; check stays type-pure (corpus 14's A7 fixture intact); +2 emit tests; stray a.out.go swept + gitignored. Merged fa45fda/bb8dba6.
+- Follow-up (c) pin-drift guard (Batch Z): hyb/build.rs — rerun-if-env-changed (stale-bake fix) + compile-time refusal when the building rustc != the baked pin, with the three honest ways out; fails open on unparseable rustc; check-versions syncs DEFAULT_PIN. All three behaviors verified (pass/refuse/explicit-match). Merged 84a5e3c.
+- Conveyor: #41/#56/#58/#59 closed as landed-with-credit (heads were rebased copies; landing SHAs posted). Dup pairs: #80+#83 → ported #83's message+corpus with #80's root-group union (issue #75 repro now rejects "may-share peer of parameter"); #81+#82 identical commits → exit-code contract in both harnesses; #78+#86 → #86's E3007 registry design won, #78 credited. pr-24 rebased onto today's seam and merged (loop back-edge, fixes #23). pr-74 ported (Call arm in record_may_share — struct-laundering + generic-identity forms; corpus renumbered 31). #74/#80/#81/#82/#83/#86/#78 closed with credit.
+- CI incident + root cause: Batch X's corpus row declared "REJECT N1" before E4001's registry entry carried tier0_rule_id — 6 CI runs red from 6c6b66a; pr-24's rebase added the registry line and CI recovered (fed3ebd → green through 91c6172). Local lesson recorded: my `| tail` gates masked the harness exit code; re-verified all gates with pipefail (exit 0 for real).
+
+Stage Summary:
+- corpus 31/31 · cargo 322/0 · clippy 0 · differential FULL (21 reject-side) · examples 10/10 · main CI green at every push since fed3ebd.
+- PLAN follow-up row marked LANDED with the decision-log entry; STATUS rewritten.
+- Remaining queue (14, next session): #8 #22 #63 #64 #65 #67 #68 #70 #71 #76 #84 #85 #88 #90 — same discipline: repro-verify on main first (several may already be fixed by today's landings), port-or-close with credit, gates WITHOUT piped tails.
