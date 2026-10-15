@@ -26,6 +26,7 @@
 //!     `managed` suppression/lint (HYB-E8001).
 //!   * `freeze.rs`  — A1b/A7 (O5 freeze-after-move, O13 consume).
 //!   * `loans.rs`   — A2/A3/A6/LOAN-ESCAPE + the environment updates.
+//!   * `builtins.rs` — HYB-E2001 defer-non-call + HYB-E2005 builtin args (issue #187).
 //!   * this file    — Pass B: the per-statement driver and the verdict.
 //!
 //! Tier-0 discipline (O4.9, rule FC — human directive 2026-10-13): the
@@ -44,6 +45,7 @@ mod model;
 mod sendability;
 mod shape;
 mod walk;
+mod builtins;
 
 use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
 
@@ -355,6 +357,10 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         let mut uses = Vec::new();
         walk::own_uses(stmt, &mut uses);
         ck.check_uses(&st, &uses);
+
+        // Issue #187: defer must be a call (HYB-E2001); literal/arity
+        // misuse of make/len/cap/delete/close/new (HYB-E2005).
+        ck.check_stmt_builtins(stmt);
 
         // Calls (A2 loan windows, A7 consumes + arg lending). A for-loop
         // ITERATE expression's borrow calls get loop-extent loans: the
