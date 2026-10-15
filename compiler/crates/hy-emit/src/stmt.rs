@@ -722,6 +722,26 @@ impl Emitter {
         op: AssignOp,
         values: &[Expr],
     ) -> Result<(), EmitError> {
+        // `x := &m[k]` / `x := &s.field` — the O8 map-slot loan. Go cannot
+        // take a map-index address; the ownership model's answer (O9: Go-heap
+        // reads are copies) lowers to copy-read now + store-back at the
+        // declaring block's end. A plain `&x` (local var address) is legal
+        // Go and stays verbatim.
+        if targets.len() == 1 && values.len() == 1 && op == AssignOp::Assign {
+            if let Expr::AddrOf { operand, .. } = &values[0] {
+                if matches!(operand.as_ref(), Expr::Index { .. } | Expr::Field { .. }) {
+                    if let PlaceKind::Ident(name) = &targets[0].kind {
+                        let place = self.emit_expr(operand, 0)?;
+                        self.push(&format!("{} = {}", name, place));
+                        if let Some(frame) = self.loan_frames.last_mut() {
+                            frame.push((name.clone(), place));
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
         let op_text = match op {
             AssignOp::Assign => "=",
             AssignOp::AddAssign => "+=",

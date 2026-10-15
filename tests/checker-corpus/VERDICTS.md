@@ -79,6 +79,8 @@ renumbered).
 | 29 | 29-struct-param-share-move-reject | REJECT | A1b | a shallow struct copy of a PARAMETER (`h2 := h`, struct carrying a map) is a may-share peer but not a reference alias, so `check_non_owned_move` (which consulted the binding's own origin and its alias-chain root only) accepted `task worker(move h2, done)` with 0 diagnostics while `go run` hit `fatal error: concurrent map writes` (issue #75; the map twin `m2 := m` was already rejected via alias+origin inheritance — identical storage-identity argument; array twin is corpus 30, pure-local accept pinned in hy-check/tests/param_share_move.rs) |
 | 30 | 30-array-param-share-move-reject | REJECT | A1b | ARRAY twin of 29: a shallow fixed-array copy of a parameter (`a2 := a`, `[2]map[string]int`) recurses to a map element shape so it may-shares, but a fixed array is not a reference alias and recorded no origin — same pre-fix OK(0)/`go run` fatal split, same fix (move-time scan of the may-share component for a non-owned origin) |
 | 31 | 31-generic-call-return-alias-freeze | REJECT | A1b | an alias that comes back through a GENERIC call (`alias := same(agg)` where `same[t any](m t) t` returns its argument) is still a live alias of `agg` — the result shape resolves through the type parameter to Unknown, which is not a reference alias, so 26's alias recording and the may-share recorder (which had no Call arm) both skipped it: before the fix `hyb check` reported 0 diagnostics while `go run` hit `fatal error: concurrent map writes` (issue #73; generic twin of 26 — the struct-result sibling `h2 := alias_holder(h1)` is pinned in the hy-check unit tests, one root cause) |
+| 32 | 32-a3-assign-map-slot-invalidated | REJECT | A3 | re-assignment `x = &m[k]` opens a map-slot loan window just like define `x := &m[k]` — before the fix only LocalDecl registered MapSlot loans, leaving assignments untracked so map inserts during active assignment loans passed with 0 diagnostics (issue #138) |
+
 
 | 32 | 32-closure-local-alias-move-reject | REJECT | A1b | a local rebind inside a closure (`alias := m`, where `m` is a captured outer map) is an alias of non-owned state, but `check_closure_boundaries` called `define_binding` without `record_alias` or `record_may_share`, wiping origin and alias links — before the fix `task worker(move alias, done)` was accepted with 0 diagnostics while `go run -race` produced concurrent map writes (issue #137) |
 
@@ -95,6 +97,9 @@ renumbered).
 | 41 | 41-wrapper-alias-own-move-control | ACCEPT | — | the FALSE-POSITIVE GUARD for 32: the same wrapper alias is held and read BEFORE the owned move, and neither `agg` nor `alias` is used after it — holding an alias is legal, only a use after the freeze violates O5.2, so a widened alias collector must keep this program accepted (accept-side control; pairs with 32 the way 23 pairs with 22) |
 
 **Distribution: ACCEPT 11 · ACCEPT-MANAGED 2 · REJECT 27 — 41 programs.**
+
+
+**Distribution: ACCEPT 12 · ACCEPT-MANAGED 2 · REJECT 28 — 42 programs.**
 
 (19 and 20 were added by the lead during integration on 2026-10-12 — still
 BEFORE any checker existed; see the pre-registration statement. 21, 22, 23

@@ -1224,6 +1224,27 @@ impl<'a> Checker<'a> {
         _span: Span,
         idx: usize,
     ) {
+        // A3 loan creation on assignment: `x = &m[k]`
+        if op == AssignOp::Assign && targets.len() == values.len() {
+            for (t, v) in targets.iter().zip(values.iter()) {
+                if let PlaceKind::Ident(name) = &t.kind {
+                    if let Some(path) = walk::addr_of_index_base_path(v) {
+                        let binding = name.clone();
+                        let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
+                        st.loans.push(Loan {
+                            target: LoanTarget::MapSlot {
+                                binding: binding.clone(),
+                                path,
+                            },
+                            created: idx,
+                            last,
+                            span: v.span(),
+                            desc: format!("`{} = {}`", binding, v.render()),
+                        });
+                    }
+                }
+            }
+        }
         // T22 (issue #37): `const` is deeply immutable — a rebind, an
         // element/index write, or a field store whose ROOT resolves to a
         // `const` binding is HYB-E3006. `Binding::immutable` is set iff
@@ -2137,9 +2158,17 @@ mod tests {
             "expected HYB-E3004 for file-level const composite move, got {:?}",
             r.diagnostics
         );
+        // AMENDMENT (pr-128 integration, logged): on the merged seam the
+        // post-move write is named by E3003 (use-after-move, the fef40da-era
+        // use checker) and E3006 (const deep immutability, pr-44) — the
+        // contributor's E3001 expectation assumed its base's boundary pass
+        // would name it. The requirement stays "the post-move violation is
+        // diagnosed": either use-after-move or the const-write guard.
         assert!(
-            r.diagnostics.iter().any(|d| d.code == "HYB-E3001"),
-            "expected HYB-E3001 on post-move read/write of file-level const, got {:?}",
+            r.diagnostics
+                .iter()
+                .any(|d| d.code == "HYB-E3001" || d.code == "HYB-E3003"),
+            "expected a post-move violation diagnostic (E3001 or E3003), got {:?}",
             r.diagnostics
         );
     }
