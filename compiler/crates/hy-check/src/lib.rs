@@ -325,7 +325,13 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         *span,
                         "managed block has no category — name the invariant being bypassed (HYB-E0003)",
                     )
-
+                    .with_notes(vec![
+                        "the category tells reviewers WHICH invariant the block bypasses and feeds `--report-managed`; without it the hatch cannot be audited".to_string(),
+                        format!(
+                            "fix: pass a category as the second argument, e.g. `managed(\"why this is safe\", \"mutex\") {{ ... }}`; valid categories: {}",
+                            MANAGED_CATEGORIES.join(", ")
+                        ),
+                    ]),
                 );
             } else if !MANAGED_CATEGORIES.contains(&category.as_str()) {
                 ck.diags.push(
@@ -333,7 +339,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         "HYB-E0004",
                         ck.path.clone(),
                         *span,
-                        format!("unknown managed category `\"{}\"` (HYB-E0004)", category),
+                        format!("unknown managed category `\"{}\"` — use one of the listed categories, or `\"other\"` with the specifics in the reason (HYB-E0004)", category),
                     )
                     .with_notes(vec![
                         format!(
@@ -1548,6 +1554,48 @@ mod tests {
             .find(|d| d.code == "HYB-E0004")
             .unwrap();
         assert!(e4.notes[0].contains("mutex"), "fix-it lists the set");
+    }
+
+    #[test]
+    fn managed_e0003_e0004_wording_teaches_the_fix() {
+        // Regression pin: the no-category E0003 note and the E0004 headline
+        // must tell the user HOW to fix it, not just what is wrong.
+        let body = "fn tally(counts map[string]int) { counts[\"a\"]++ }\n\
+                    fn main() {\n\
+                      managed {\n\
+                        counts := map[string]int{}\n\
+                        task tally(counts)\n\
+                      }\n\
+                    }";
+        let r = check(body);
+        let e3 = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "HYB-E0003" && d.message.contains("no category"))
+            .expect("no-category E0003");
+        assert!(
+            e3.notes.iter().any(|n| n.contains("--report-managed")),
+            "{:?}",
+            e3.notes
+        );
+        assert!(
+            e3.notes.iter().any(|n| n.contains("fix: pass a category")
+                && n.contains("managed(\"why this is safe\", \"mutex\")")
+                && n.contains("valid categories:")),
+            "{:?}",
+            e3.notes
+        );
+
+        let r = check(&body.replace("managed {", "managed(\"r\", \"misc\") {"));
+        let e4 = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "HYB-E0004")
+            .expect("E0004");
+        assert_eq!(
+            e4.message,
+            "unknown managed category `\"misc\"` \u{2014} use one of the listed categories, or `\"other\"` with the specifics in the reason (HYB-E0004)"
+        );
     }
 
     #[test]
