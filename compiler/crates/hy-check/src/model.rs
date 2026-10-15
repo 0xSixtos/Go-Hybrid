@@ -247,14 +247,23 @@ impl FnState {
 
     /// Exit the innermost block scope (walk.rs's Pop events).
     pub(crate) fn scope_pop(&mut self) {
-        // Capture any moves on inner aliases before the inner scope and alias
-        // map are popped (handles the case where an inner alias `m2 := m` was
-        // moved while the outer root `m` was shadowed inside the block).
+        // Capture any moves on inner aliases or may-share peers before the
+        // inner scope and alias/share maps are popped (handles the case where
+        // an inner alias/holder was moved while an outer peer was shadowed).
         let mut inner_root_moves: Vec<(String, MoveInfo)> = Vec::new();
         for (a, target) in &self.aliases {
             let root = crate::freeze::resolve_alias(self, target);
             if let Some(mv) = self.env_lookup(a).and_then(|b| b.moved.clone()) {
                 inner_root_moves.push((root, mv));
+            }
+        }
+        for a in self.may_share.keys() {
+            if let Some(mv) = self.env_lookup(a).and_then(|b| b.moved.clone()) {
+                for peer in self.share_group(a) {
+                    let root = crate::freeze::resolve_alias(self, &peer);
+                    inner_root_moves.push((peer, mv.clone()));
+                    inner_root_moves.push((root, mv.clone()));
+                }
             }
         }
         self.scopes.pop();
@@ -289,6 +298,40 @@ impl FnState {
                     if let Some(br) = self.env_lookup_mut(&root) {
                         if br.moved.is_none() {
                             br.moved = Some(mv);
+                        }
+                    }
+                }
+            }
+            // Issue #195: also propagate freeze across the restored outer
+            // `may_share` connected components (and their alias chains) so a
+            // shadowed struct-embedded map or slice peer cannot escape the
+            // move of its holder once the inner shadow scope exits.
+            let share_keys: Vec<String> = self.may_share.keys().cloned().collect();
+            for k in share_keys {
+                let root = crate::freeze::resolve_alias(self, &k);
+                let moved = self
+                    .env_lookup(&k)
+                    .and_then(|b| b.moved.clone())
+                    .or_else(|| self.env_lookup(&root).and_then(|b| b.moved.clone()));
+                if let Some(mv) = moved {
+                    let mut group: Vec<String> = self.share_group(&k).into_iter().collect();
+                    group.push(k.clone());
+                    group.push(root);
+                    let seeded = group.clone();
+                    for member in &seeded {
+                        let mroot = crate::freeze::resolve_alias(self, member);
+                        group.push(mroot.clone());
+                        for a in self.aliases.keys() {
+                            if crate::freeze::resolve_alias(self, a) == mroot {
+                                group.push(a.clone());
+                            }
+                        }
+                    }
+                    for peer in group {
+                        if let Some(bp) = self.env_lookup_mut(&peer) {
+                            if bp.moved.is_none() {
+                                bp.moved = Some(mv.clone());
+                            }
                         }
                     }
                 }
@@ -346,12 +389,19 @@ impl FnState {
     }
 
     /// Drop `name`'s may-share edges: a whole-binding rebind re-owns the
-    /// binding, so it leaves the old sharing component.
+    /// binding, so it leaves the old sharing component while preserving
+    /// transitive sharing links among its remaining peers.
     pub(crate) fn share_clear(&mut self, name: &str) {
         if let Some(peers) = self.may_share.remove(name) {
-            for p in peers {
-                if let Some(set) = self.may_share.get_mut(&p) {
+            let peer_list: Vec<String> = peers.into_iter().collect();
+            for p in &peer_list {
+                if let Some(set) = self.may_share.get_mut(p) {
                     set.remove(name);
+                }
+            }
+            for i in 0..peer_list.len() {
+                for j in (i + 1)..peer_list.len() {
+                    self.share_edge(&peer_list[i], &peer_list[j]);
                 }
             }
         }
