@@ -381,7 +381,7 @@
         "keep or add a lock if the share is genuinely guarded",
         "accept the hatch knowingly: audit it via --report-managed"
       ],
-      "example": "managed { task tally(counter) }   // warning: HYB-E8001 — unchecked share, counted",
+      "example": "managed(\"counter access guarded by a mutex\", \"mutex\") { task tally(counter) }   // warning: HYB-E8001 — unchecked share, counted",
       "rule": "O6",
       "tier0_rule_id": "MANAGED"
     },

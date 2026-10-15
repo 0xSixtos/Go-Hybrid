@@ -128,6 +128,27 @@ fn closure_callee_inside_managed_takes_the_hatch() {
         .any(|d| d.code == "HYB-E8001" && d.severity == Severity::Warning));
 }
 
+#[test]
+fn explain_e8001_example_warns_without_reject() {
+    let r = check(
+        "fn tally(counter map[string]int) {}\n\
+         fn main() {\n\
+             counter := map[string]int{}\n\
+             managed(\"counter access guarded by a mutex\", \"mutex\") { task tally(counter) }\n\
+         }\n",
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+    assert!(
+        codes(&r).is_empty(),
+        "expected zero errors for E8001 example; got {:?}",
+        codes(&r)
+    );
+    assert!(r
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "HYB-E8001" && d.severity == Severity::Warning));
+}
+
 // ---------------------------------------------------------------------------
 // N1 — nil has exactly two homes (error, foreign); everywhere else E4001
 // ---------------------------------------------------------------------------
