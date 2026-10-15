@@ -95,7 +95,9 @@ def classify_got(summary, diags):
     warnings = [d for d in diags if d.get("severity") == "warning"]
     managed_lint = [d for d in warnings if d.get("code") == "HYB-E8001"]
     verdict = summary.get("verdict", "?")
-    first_rule = errors[0].get("tier0_rule") if errors else None
+    # Parser/type errors need not carry a Tier-0 rule. None must mean no
+    # errors, otherwise an inconsistent accept summary can pass the corpus.
+    first_rule = (errors[0].get("tier0_rule") or "<unclassified-error>") if errors else None
     return verdict, first_rule, managed_lint
 
 
