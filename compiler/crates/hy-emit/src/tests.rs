@@ -599,6 +599,56 @@ fn inclusive_range_and_labeled_break() {
 }
 
 #[test]
+fn sibling_labeled_loops_get_distinct_go_labels() {
+    // Two SIBLING loops that each own a `break loop` are both legal source
+    // (LX14 binds each label to its own loop), but a fixed `hyLoop` name
+    // emitted two declarations → `go vet`: "label hyLoop already declared",
+    // so an accepted program could never build.
+    let go = emit(
+        "fn main() {\n    for i in 0..2 {\n        break loop\n    }\n    for j in 0..2 {\n        break loop\n    }\n}\n",
+    );
+    assert_eq!(
+        go.matches("hyLoop:").count(),
+        1,
+        "outer label keeps the canonical name:\n{}",
+        go
+    );
+    assert_eq!(
+        go.matches("hyLoop1:").count(),
+        1,
+        "the sibling gets a fresh label:\n{}",
+        go
+    );
+    assert!(!go.contains("hyLoop2"), "no wasted label counter:\n{}", go);
+    assert!(go.contains("break hyLoop\n"), ":\n{}", go);
+    assert!(go.contains("break hyLoop1\n"), ":\n{}", go);
+}
+
+#[test]
+fn nested_labeled_loops_break_their_own_loop() {
+    // A labeled `break loop` inside a NESTED loop targets the nested loop
+    // (LX14), so each level carries its own label and each break must name
+    // the one it is lexically inside.
+    let go = emit(
+        "fn main() {\n    for i in 0..2 {\n        for j in 0..2 {\n            break loop\n        }\n        break loop\n    }\n}\n",
+    );
+    assert_eq!(go.matches("hyLoop:").count(), 1, ":\n{}", go);
+    assert_eq!(go.matches("hyLoop1:").count(), 1, ":\n{}", go);
+    assert_eq!(
+        go.matches("break hyLoop1").count(),
+        1,
+        "the nested break names the nested loop:\n{}",
+        go
+    );
+    assert_eq!(
+        go.matches("break hyLoop\n").count(),
+        1,
+        "the outer break names the outer loop:\n{}",
+        go
+    );
+}
+
+#[test]
 fn exclusive_range_stays_exclusive() {
     let go = emit("fn main() {\n    for i in 0..n {\n    }\n}\n");
     assert!(go.contains("for i := 0; i < n; i++ {"), ":\n{}", go);
