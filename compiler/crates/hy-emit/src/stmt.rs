@@ -89,18 +89,32 @@ impl Emitter {
                 Ok(())
             }
             Stmt::Break { label, .. } => {
-                // `break loop` → Go label `hyLoop` (`loop` is a Go keyword).
-                // The enclosing loop labels itself when it owns a labeled
-                // break — see emit_for.
+                // `break loop` → Go label of the enclosing loop in THIS
+                // function (`loop` is a Go keyword; the target is the
+                // innermost labeled loop, per LX14).
                 match label {
-                    Some(_) => self.push("break hyLoop"),
+                    Some(_) => {
+                        let name = self
+                            .loop_labels
+                            .last()
+                            .cloned()
+                            .unwrap_or_else(|| "hyLoop".to_string());
+                        self.push(&format!("break {}", name));
+                    }
                     None => self.push("break"),
                 }
                 Ok(())
             }
             Stmt::Continue { label, .. } => {
                 match label {
-                    Some(_) => self.push("continue hyLoop"),
+                    Some(_) => {
+                        let name = self
+                            .loop_labels
+                            .last()
+                            .cloned()
+                            .unwrap_or_else(|| "hyLoop".to_string());
+                        self.push(&format!("continue {}", name));
+                    }
                     None => self.push("continue"),
                 }
                 Ok(())
@@ -908,10 +922,32 @@ impl Emitter {
         // inside a nested loop — that one labels itself) makes this loop the
         // Go label target: `hyLoop:` + the for head, `break hyLoop` inside.
         let needs_label = self.block_has_loop_break(body);
+        // Two sibling loops each owning a `break loop` would both declare
+        // `hyLoop:` — Go rejects that (`label hyLoop already declared`), and
+        // no emission can fix a duplicate declaration, so each labeled loop
+        // takes a fresh name (`hyLoop`, `hyLoop1`, …). The label is pushed
+        // BEFORE the body renders (so the breaks inside pick it up) and
+        // pushed/pop popped around the body.
+        let label = if needs_label {
+            // A per-function counter, not the stack depth: sibling loops
+            // unwind the stack between them, so depth would hand both the
+            // same name.
+            let n = self.loop_label_n;
+            self.loop_label_n += 1;
+            let name = if n == 0 {
+                "hyLoop".to_string()
+            } else {
+                format!("hyLoop{}", n)
+            };
+            self.loop_labels.push(name.clone());
+            Some(name)
+        } else {
+            None
+        };
         // gofmt puts a loop label on its OWN line (`hyLoop:` then the for
         // head one level in) — emit it as a separate line, never inline.
-        if needs_label {
-            self.push("hyLoop:");
+        if let Some(l) = &label {
+            self.push(&format!("{}:", l));
         }
         let head = match kind {
             ForKind::Infinite => "for {".to_string(),
@@ -1001,6 +1037,9 @@ impl Emitter {
         self.push(&head);
         self.emit_block_body(&body.stmts)?;
         self.push("}");
+        if label.is_some() {
+            self.loop_labels.pop();
+        }
         Ok(())
     }
 

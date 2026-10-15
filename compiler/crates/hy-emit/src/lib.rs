@@ -333,6 +333,17 @@ pub struct Emitter {
     /// The enclosing fn's single result type IF it is an option (`option[v]`)
     /// — `return none` lowers to that type's zero value.
     cur_option_result: Option<String>,
+    /// Go label of the loop currently open in THIS function (innermost last).
+    /// `hyLoop` is a fixed name, so two sibling loops that each own a labeled
+    /// `break loop` would emit two `hyLoop:` declarations and the module would
+    /// fail to build (`label hyLoop already declared`). Each labeled loop
+    /// pushes its own name (`hyLoop`, `hyLoop1`, …), and the labeled
+    /// break/continue about to render takes the innermost one.
+    loop_labels: Vec<String>,
+    /// Per-function counter handing each labeled loop a distinct name
+    /// (`hyLoop`, `hyLoop1`, …) so sibling loops never declare two labels
+    /// with the same name.
+    loop_label_n: usize,
     /// Map-slot loans (O8): `x := &m[k]` cannot be a Go map-index address,
     /// so it lowers to a COPY read now + store-back at the loan's block end
     /// (O9's honesty: Go-heap reads are copies). Frames are block-scoped:
@@ -394,6 +405,8 @@ impl Emitter {
             fnlit_depth: 0,
             assoc_fns: BTreeSet::new(),
             cur_option_result: None,
+            loop_labels: Vec::new(),
+            loop_label_n: 0,
             loan_frames: Vec::new(),
             handler_writer: None,
             pending_fnlit_conv: None,
@@ -665,6 +678,8 @@ impl Emitter {
         self.bindings.clear();
         self.temp_n = 0;
         self.try_temps.clear();
+        self.loop_labels.clear();
+        self.loop_label_n = 0;
 
         // Associated functions (`lru_cache.new`) mangle to
         // `lru_cache_new` — Go has no dotted identifiers. Call sites mangle
