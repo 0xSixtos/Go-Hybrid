@@ -436,8 +436,16 @@ pub(crate) struct Checker<'a> {
     pub path: String,
     /// struct name -> (field name, field type) — file-level struct decls.
     pub structs: HashMap<String, Vec<(String, TypeExpr)>>,
+    /// enum name -> declared variant names in source order (T13/T14 HYB-E5001).
+    pub enums: HashMap<String, Vec<String>>,
+    /// enum name -> whether the first variant is payload-free (N3 HYB-E4002).
+    pub enum_has_zero_value: HashMap<String, bool>,
+    /// type alias name -> target TypeExpr.
+    pub type_aliases: HashMap<String, TypeExpr>,
     /// fn name -> decl (return-type inference for single-value defines).
     pub fns: HashMap<String, &'a FnDecl>,
+    /// (receiver base type name, method name) -> decl (method return-type inference).
+    pub method_decls: HashMap<(String, String), &'a FnDecl>,
     /// file-level consts (immutable, visible in every fn).
     pub consts: HashMap<String, Binding>,
     /// Known foreign package prefixes (imports ∪ the builtin table).
@@ -478,7 +486,11 @@ impl<'a> Checker<'a> {
             file,
             path: file.path.clone(),
             structs: HashMap::new(),
+            enums: HashMap::new(),
+            enum_has_zero_value: HashMap::new(),
+            type_aliases: HashMap::new(),
             fns: HashMap::new(),
+            method_decls: HashMap::new(),
             consts: HashMap::new(),
             packages: HashSet::new(),
             pkg_names: HashMap::new(),

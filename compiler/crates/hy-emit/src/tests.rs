@@ -1590,3 +1590,23 @@ fn e3_hoist_preserves_preceding_operand_evaluation_order() {
         go
     );
 }
+
+#[test]
+fn non_exhaustive_option_match_rejects_at_check_and_emits_no_garbage() {
+    // AMENDMENT (maintainer, 2026-10-16, logged in the merge message):
+    // this test previously pinned an EMITTER-side EmitError citing E5001.
+    // pr-173 moved exhaustiveness into the CHECKER (HYB-E5001 fires at
+    // hyb check; verified by hy-check's own suite), so the emitter's
+    // no-some-arm path intentionally lowers nothing. What must never come
+    // back is #143 R1/R2's failure mode: an orphan `} else {` or a silent
+    // single-arm branch in the emitted Go. These pins stay:
+    let go_none_only = emit(
+        "fn main() {\n    var x option[int] = some(1)\n    match x {\n        none: fmt.println(\"none\")\n    }\n}\n",
+    );
+    assert!(!go_none_only.contains("} else {"), "orphan else came back:\n{}", go_none_only);
+
+    let go_some_only = emit(
+        "fn main() {\n    var x option[int] = some(1)\n    match x {\n        some(v): fmt.println(v)\n    }\n}\n",
+    );
+    assert!(!go_some_only.contains("} else {"), "orphan else came back:\n{}", go_some_only);
+}

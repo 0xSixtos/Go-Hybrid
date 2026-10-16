@@ -1725,7 +1725,6 @@ impl Emitter {
             ));
         }
 
-        self.hoist_tries_expr(subject)?;
         let temp = self.next_temp("hyMatch");
         let s = self.emit_expr(subject, 0)?;
         self.push(&format!("{} := {}", temp, s));
@@ -1756,7 +1755,6 @@ impl Emitter {
                 self.push(&format!("if {}.ok {{", temp));
                 self.indent += 1;
                 self.push(&format!("{} := {}.val", binding, temp));
-<<<<<<< HEAD
                 for st in &arm.body.stmts {
                     self.emit_stmt(st)?;
                 }
@@ -1819,13 +1817,9 @@ impl Emitter {
             let primary_binding = some_arms[0].0;
             self.push(&format!("{} := {}.val", primary_binding, temp));
             for (i, (binding, arm)) in some_arms.iter().enumerate() {
+                self.hoist_tries_expr(arm.guard.as_ref().unwrap())?;
                 let gt = self.emit_expr(arm.guard.as_ref().unwrap(), 0)?;
                 if i == 0 {
-=======
-                if let Some(g) = &arm.guard {
-                    self.hoist_tries_expr(g)?;
-                    let gt = self.emit_expr(g, 0)?;
->>>>>>> main
                     self.push(&format!("if {} {{", gt));
                 } else {
                     self.push(&format!("}} else if {} {{", gt));
