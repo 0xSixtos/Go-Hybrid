@@ -442,6 +442,14 @@ pub(crate) struct Checker<'a> {
     pub consts: HashMap<String, Binding>,
     /// Known foreign package prefixes (imports ∪ the builtin table).
     pub packages: HashSet<String>,
+    /// Package-scope names (issue #201-C): top-level fns / consts / structs
+    /// share one namespace in Go — a second declaration of the same name is
+    /// `X redeclared in this block`. Keyed by name, value = declaring kind.
+    pub pkg_names: HashMap<String, &'static str>,
+    /// Declared methods (issue #201-C): (receiver base type, method name) —
+    /// methods live in the receiver's method set, not package scope, so
+    /// `box.get` twice is an error while `fn get` + `box.get` is legal.
+    pub methods: HashSet<(String, String)>,
     /// Emitted diagnostics (unsorted; check_file sorts by span).
     pub diags: Vec<Diagnostic>,
     // --report-managed counters (O6.3)
@@ -473,6 +481,8 @@ impl<'a> Checker<'a> {
             fns: HashMap::new(),
             consts: HashMap::new(),
             packages: HashSet::new(),
+            pkg_names: HashMap::new(),
+            methods: HashSet::new(),
             diags: Vec::new(),
             managed_blocks: 0,
             sites_via_managed: 0,
