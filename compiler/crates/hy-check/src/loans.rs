@@ -199,13 +199,24 @@ impl<'a> Checker<'a> {
                 }
             }
             Resolved::Fn { name } => {
+                // `copy(dst, src)` (#178): an element-wise slice copy
+                // duplicates the element *references* when the element type
+                // carries mutable GC storage, so the destination and source
+                // share it afterwards — a later `move` of either must freeze
+                // the other (O5.2). Primitive-element slices share nothing.
+                if name == "copy" {
+                    self.record_copy_may_share(st, cr);
+                }
                 if name == "delete" {
                     // A3: map delete is a map mutation
                     self.check_delete_conflict(st, cr, idx);
-                    // T22 (#123): a delete mutates the collection — a
-                    // `const` root is frozen exactly like an index write.
+                }
+                if name == "delete" || name == "copy" {
+                    // T22 (#123/#188): a delete or copy mutates its first
+                    // argument — a `const` root is frozen like an index write.
                     self.check_delete_const(st, cr, &HashSet::new());
                 }
+                self.check_call_const_writes(st, cr, &HashSet::new());
                 if self.fns.contains_key(&name) {
                     // A3 #111: the callee may insert/delete through the
                     // argument — that event runs inside THIS call site's
@@ -220,7 +231,9 @@ impl<'a> Checker<'a> {
                     self.check_a3_closure_call(st, cr, idx, &name);
                 }
             }
-            Resolved::None => {}
+            Resolved::None => {
+                self.check_call_const_writes(st, cr, &HashSet::new());
+            }
         }
     }
 
@@ -764,6 +777,17 @@ impl<'a> Checker<'a> {
         }
         if l.values.len() == 1 && l.names.len() > 1 {
             // multi-value define from one expression
+            // Issue #146: `n int, ok = <-ch` / shared ascription on a receive.
+            if let Some(t) = &l.ty {
+                let want = self.shape_of_type(t);
+                self.check_recv_elem_against_target(
+                    st,
+                    &l.values[0],
+                    &want,
+                    l.values[0].span(),
+                    &format!("receive into `{}`", l.names[0]),
+                );
+            }
             let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
             let tys = self.multi_value_tys(st, &l.values[0], l.names.len());
             for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
@@ -806,6 +830,19 @@ impl<'a> Checker<'a> {
                 // type context (the struct def / map value / slice elem) —
                 // the nested nil needs no ascription to reject (HYB-E4001).
                 self.check_composite_nils(st, value);
+                // Issue #146: typed receive `n int = <-ch` against `chan job`
+                // used to accept and then fail `go build`. Compare the
+                // ascription against the channel element when both resolve.
+                if let Some(t) = &l.ty {
+                    let want = self.shape_of_type(t);
+                    self.check_recv_elem_against_target(
+                        st,
+                        value,
+                        &want,
+                        value.span(),
+                        &format!("receive into `{}`", name),
+                    );
+                }
                 // Ascription fills the gaps (O4.9 escape: "make the type
                 // visible to the checker"): when the initializer's shape
                 // does not resolve, the declared type decides. When inference
@@ -1039,6 +1076,40 @@ impl<'a> Checker<'a> {
     // `collect_ref_roots`, so a literal field that embeds a live binding —
     // bare (`holder{m: agg}`), projected (`holder{m: h1.m}`) or produced by
     // a call (`wrap{items: same(agg)}`) — is covered by one collector.
+
+    /// Record the may-share edge created by the builtin `copy(dst, src)`
+    /// (#178). For a slice whose ELEMENT carries mutable GC storage
+    /// (map / slice / pointer, or a struct/array of them) `copy` is
+    /// element-wise: it duplicates the element *references*, so `dst[i]`
+    /// and `src[i]` alias the same object, and a later `move` of either
+    /// binding must freeze the other (O5.2). A primitive-element slice
+    /// (`[]int`) copies by value and shares nothing, so no edge is recorded
+    /// and the positive control stays accepted.
+    fn record_copy_may_share(&self, st: &mut FnState, cr: &CallRef) {
+        let (Some(dst), Some(src)) = (cr.args.first(), cr.args.get(1)) else {
+            return;
+        };
+        // A slice shape is always a reference (`shape_may_share(Slice)` is
+        // unconditional), so consult the ELEMENT shape instead: only a
+        // reference-bearing element is copied by reference.
+        let TypeShape::Slice(elem) = self.shape_of_expr(st, unwrap_parens(&dst.value)) else {
+            return;
+        };
+        if !self.shape_may_share(&elem) {
+            return;
+        }
+        let mut dst_roots = Vec::new();
+        collect_ref_roots(&dst.value, &mut dst_roots);
+        let mut src_roots = Vec::new();
+        collect_ref_roots(&src.value, &mut src_roots);
+        for d in &dst_roots {
+            for s in &src_roots {
+                if d != s && self.binding_may_share(st, d) && self.binding_may_share(st, s) {
+                    st.share_edge(d, s);
+                }
+            }
+        }
+    }
 
     /// Record a binding-level alias created by `name := value` (#38).
     ///
@@ -1334,6 +1405,17 @@ impl<'a> Checker<'a> {
             // with nested nils (`j = jobT{m: nil}`) carries its own type
             // context (HYB-E4001).
             self.check_composite_nils(st, v);
+            // Issue #146: `n = <-ch` where `n` has a known type and `ch` is
+            // `chan T` with incompatible T.
+            if let Some(want) = self.place_shape(st, t) {
+                self.check_recv_elem_against_target(
+                    st,
+                    v,
+                    &want,
+                    v.span(),
+                    &format!("receive into `{}`", t.render()),
+                );
+            }
         }
 
         // whole-binding rebind: `rows = append(rows, ...)`, parallel
@@ -1558,13 +1640,15 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            // `delete(const_map, k)` is a mutation too — the direct form is
-            // checked in process_call; a closure's own delete never gets
-            // there (#123).
+            // `delete(const_map, k)` / `copy(const_slice, src)` and calls that
+            // mutate a passed `const` argument are mutations too — the direct
+            // form is checked in process_call; a closure's own calls never get
+            // there (#123/#188).
             let mut calls = Vec::new();
             walk::own_calls(stmt, &mut calls);
             for cr in &calls {
                 self.check_delete_const(st, cr, &here);
+                self.check_call_const_writes(st, cr, &here);
             }
             // nested closures — a NESTED closure's own locals shadow only at
             // its level (flatten does not descend into FnLit bodies, so each
@@ -1577,32 +1661,404 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// HYB-E3006 for `delete(root, ...)`: a delete mutates the collection,
-    /// so a `const` root is frozen exactly like an index write (T22).
-    /// `declared` is empty at direct call sites (no closure params apply —
-    /// enclosing scope shadowing falls out of the locals-first lookup).
+    /// HYB-E3006 for `delete(root, ...)` and `copy(dst, ...)`: both builtins
+    /// mutate their first argument in place, so a `const` root is frozen
+    /// exactly like an index write (T22). `declared` is empty at direct call
+    /// sites (no closure params apply — enclosing scope shadowing falls out of
+    /// the locals-first lookup).
     fn check_delete_const(&mut self, st: &FnState, cr: &CallRef, declared: &HashSet<String>) {
         let Expr::Ident { name, .. } = crate::model::unwrap_parens(cr.callee) else {
             return;
         };
-        if name.as_str() != "delete" {
+        if name.as_str() != "delete" && name.as_str() != "copy" {
             return;
         }
         let Some(first) = cr.args.first() else {
             return;
         };
-        let Some(root) = first.value.root_ident() else {
-            return;
-        };
-        if declared.contains(root) {
-            return;
-        }
-        let place = Place {
-            kind: PlaceKind::Ident(root.to_string()),
-            span: first.value.span(),
-        };
-        if let Some(hit) = self.const_write_root(st, &place) {
+        if let Some(hit) = self.const_arg_root(st, &first.value, declared) {
             self.emit_const_write_error(&hit, first.value.span());
+        }
+    }
+
+    /// Resolve a call argument expression to a `const` root when the argument
+    /// passes mutable reference storage (map, slice, pointer, `&const_val`, or
+    /// a struct/array carrying reference fields) backed by that `const` (#188).
+    fn const_arg_root(
+        &self,
+        st: &FnState,
+        expr: &Expr,
+        declared: &HashSet<String>,
+    ) -> Option<String> {
+        let inner = crate::model::unwrap_parens(expr);
+        if let Some(addr_op) = as_addr_of(inner) {
+            let root = addr_op.root_ident()?;
+            if declared.contains(root) {
+                return None;
+            }
+            let place = Place {
+                kind: PlaceKind::Ident(root.to_string()),
+                span: expr.span(),
+            };
+            return self.const_write_root(st, &place);
+        }
+        let arg_shape = self.shape_of_expr(st, inner);
+        if !(self.shape_may_share(&arg_shape) || matches!(arg_shape, TypeShape::Unknown)) {
+            return None;
+        }
+        let mut roots = Vec::new();
+        collect_ref_roots(inner, &mut roots);
+        if roots.is_empty() {
+            if let Some(r) = inner.root_ident() {
+                roots.push(r.to_string());
+            }
+        }
+        for root in roots {
+            if declared.contains(&root) {
+                continue;
+            }
+            let place = Place {
+                kind: PlaceKind::Ident(root),
+                span: expr.span(),
+            };
+            if let Some(hit) = self.const_write_root(st, &place) {
+                return Some(hit);
+            }
+        }
+        None
+    }
+
+    /// Issue #188: interprocedural T22 enforcement (`HYB-E3006`). When a
+    /// `const` composite with reference storage (or `&const_val`) is passed to
+    /// a function or closure that mutates that parameter (via index/field
+    /// store, `delete`, `copy`, channel send, task spawn, or transitive call),
+    /// reject the call site with `HYB-E3006` (`cannot write to const`).
+    /// Read-only helpers (`len(shared_map)`, `count(shared_map)`) do not
+    /// mutate the parameter and remain accepted.
+    fn check_call_const_writes(&mut self, st: &FnState, cr: &CallRef, declared: &HashSet<String>) {
+        let callee = crate::model::unwrap_parens(cr.callee);
+        if let Expr::Ident { name, .. } = callee {
+            if name == "delete" || name == "copy" || A3_PURE_FNS.contains(&name.as_str()) {
+                return;
+            }
+        }
+        let mut hits: Vec<(String, Span)> = Vec::new();
+        for (i, a) in cr.args.iter().enumerate() {
+            let Some(const_name) = self.const_arg_root(st, &a.value, declared) else {
+                continue;
+            };
+            let mutates = match callee {
+                Expr::Ident { name, .. } => {
+                    if declared.contains(name) {
+                        true
+                    } else if let Some(decl) = self.fns.get(name) {
+                        match decl.params.get(i) {
+                            Some(p) => self.fn_mutates_const_param(decl, &p.name, 0),
+                            None => true,
+                        }
+                    } else if self
+                        .lookup_binding(st, name)
+                        .map(|b| matches!(b.shape, TypeShape::Closure))
+                        .unwrap_or(false)
+                    {
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Expr::FnLit { params, body, .. } => match params.get(i) {
+                    Some(p) => {
+                        let mut aliases = HashSet::new();
+                        aliases.insert(p.name.clone());
+                        self.block_mutates_const_param(body, &mut aliases, 0)
+                    }
+                    None => true,
+                },
+                _ => false,
+            };
+            if mutates {
+                hits.push((const_name, a.value.span()));
+            }
+        }
+        for (const_name, span) in hits {
+            self.emit_const_write_error(&const_name, span);
+        }
+    }
+
+    fn fn_mutates_const_param(&self, decl: &FnDecl, param: &str, depth: usize) -> bool {
+        if depth > 4 {
+            return true;
+        }
+        let Some(body) = &decl.body else {
+            return false;
+        };
+        let mut aliases = HashSet::new();
+        aliases.insert(param.to_string());
+        self.block_mutates_const_param(body, &mut aliases, depth)
+    }
+
+    fn block_mutates_const_param(
+        &self,
+        block: &Block,
+        aliases: &mut HashSet<String>,
+        depth: usize,
+    ) -> bool {
+        for s in &block.stmts {
+            if self.stmt_mutates_const_param(s, aliases, depth) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn expr_reaches_const_aliases(expr: &Expr, aliases: &HashSet<String>) -> bool {
+        let inner = crate::model::unwrap_parens(expr);
+        if let Some(addr_op) = as_addr_of(inner) {
+            if let Some(r) = addr_op.root_ident() {
+                if aliases.contains(r) {
+                    return true;
+                }
+            }
+        }
+        if let Some(r) = inner.root_ident() {
+            if aliases.contains(r) {
+                return true;
+            }
+        }
+        let mut roots = Vec::new();
+        collect_ref_roots(inner, &mut roots);
+        roots.iter().any(|r| aliases.contains(r))
+    }
+
+    fn stmt_mutates_const_param(
+        &self,
+        stmt: &Stmt,
+        aliases: &mut HashSet<String>,
+        depth: usize,
+    ) -> bool {
+        match stmt {
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                for t in targets {
+                    if matches!(t.kind, PlaceKind::Index { .. } | PlaceKind::Field { .. })
+                        && aliases.contains(t.root())
+                    {
+                        return true;
+                    }
+                }
+                for v in values {
+                    if self.expr_fnlit_mutates_const_param(v, aliases, depth) {
+                        return true;
+                    }
+                }
+                if targets.len() == values.len() {
+                    for (t, v) in targets.iter().zip(values.iter()) {
+                        if let PlaceKind::Ident(name) = &t.kind {
+                            if Self::expr_reaches_const_aliases(v, aliases) {
+                                aliases.insert(name.clone());
+                            } else {
+                                aliases.remove(name);
+                            }
+                        }
+                    }
+                }
+            }
+            Stmt::Local(l) => {
+                for v in &l.values {
+                    if self.expr_fnlit_mutates_const_param(v, aliases, depth) {
+                        return true;
+                    }
+                }
+                if l.values.is_empty() {
+                    for name in &l.names {
+                        aliases.remove(name);
+                    }
+                } else if l.names.len() == l.values.len() {
+                    for (name, v) in l.names.iter().zip(l.values.iter()) {
+                        if Self::expr_reaches_const_aliases(v, aliases) {
+                            aliases.insert(name.clone());
+                        } else {
+                            aliases.remove(name);
+                        }
+                    }
+                }
+            }
+            Stmt::Send { value, .. } => {
+                if Self::expr_reaches_const_aliases(value, aliases) {
+                    return true;
+                }
+            }
+            Stmt::Task { callee, args, span } => {
+                if args
+                    .iter()
+                    .any(|a| Self::expr_reaches_const_aliases(&a.value, aliases))
+                {
+                    return true;
+                }
+                let cr = CallRef {
+                    callee,
+                    args,
+                    span: *span,
+                };
+                if self.call_mutates_const_param(&cr, aliases, depth) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        let mut calls = Vec::new();
+        walk::own_calls(stmt, &mut calls);
+        for cr in &calls {
+            if self.call_mutates_const_param(cr, aliases, depth) {
+                return true;
+            }
+        }
+        match stmt {
+            Stmt::If {
+                init,
+                then,
+                otherwise,
+                ..
+            } => {
+                let mut branch_aliases = aliases.clone();
+                if let Some(i) = init {
+                    if self.stmt_mutates_const_param(i, &mut branch_aliases, depth) {
+                        return true;
+                    }
+                }
+                let mut then_aliases = branch_aliases.clone();
+                if self.block_mutates_const_param(then, &mut then_aliases, depth) {
+                    return true;
+                }
+                if let Some(o) = otherwise {
+                    let mut else_aliases = branch_aliases;
+                    if self.stmt_mutates_const_param(o, &mut else_aliases, depth) {
+                        return true;
+                    }
+                }
+            }
+            Stmt::For { body, .. }
+            | Stmt::Managed { body, .. }
+            | Stmt::Block { block: body, .. } => {
+                let mut body_aliases = aliases.clone();
+                if self.block_mutates_const_param(body, &mut body_aliases, depth) {
+                    return true;
+                }
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    let mut arm_aliases = aliases.clone();
+                    if self.block_mutates_const_param(&arm.body, &mut arm_aliases, depth) {
+                        return true;
+                    }
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                for arm in arms {
+                    if let hy_syntax::SelectArmKind::Send { value, .. } = &arm.kind {
+                        if Self::expr_reaches_const_aliases(value, aliases) {
+                            return true;
+                        }
+                    }
+                    let mut arm_aliases = aliases.clone();
+                    if self.block_mutates_const_param(&arm.body, &mut arm_aliases, depth) {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn expr_fnlit_mutates_const_param(
+        &self,
+        e: &Expr,
+        aliases: &HashSet<String>,
+        depth: usize,
+    ) -> bool {
+        match e {
+            Expr::FnLit { params, body, .. } => {
+                let mut inner_aliases = aliases.clone();
+                for p in params {
+                    inner_aliases.remove(&p.name);
+                }
+                if inner_aliases.is_empty() {
+                    false
+                } else {
+                    self.block_mutates_const_param(body, &mut inner_aliases, depth)
+                }
+            }
+            Expr::Paren { inner, .. }
+            | Expr::Move { operand: inner, .. }
+            | Expr::Try { operand: inner, .. }
+            | Expr::Unary { operand: inner, .. }
+            | Expr::AddrOf { operand: inner, .. } => {
+                self.expr_fnlit_mutates_const_param(inner, aliases, depth)
+            }
+            Expr::Call { callee, args, .. } => {
+                self.expr_fnlit_mutates_const_param(callee, aliases, depth)
+                    || args
+                        .iter()
+                        .any(|a| self.expr_fnlit_mutates_const_param(&a.value, aliases, depth))
+            }
+            Expr::Index { base, index, .. }
+            | Expr::Binary {
+                lhs: base,
+                rhs: index,
+                ..
+            } => {
+                self.expr_fnlit_mutates_const_param(base, aliases, depth)
+                    || self.expr_fnlit_mutates_const_param(index, aliases, depth)
+            }
+            _ => false,
+        }
+    }
+
+    fn call_mutates_const_param(
+        &self,
+        cr: &CallRef,
+        aliases: &HashSet<String>,
+        depth: usize,
+    ) -> bool {
+        let arg_reaches_alias =
+            |a: &hy_syntax::CallArg| Self::expr_reaches_const_aliases(&a.value, aliases);
+        match crate::model::unwrap_parens(cr.callee) {
+            Expr::Ident { name, .. } => {
+                if name == "delete" || name == "copy" {
+                    return cr.args.first().map(&arg_reaches_alias).unwrap_or(false);
+                }
+                if A3_PURE_FNS.contains(&name.as_str()) {
+                    return false;
+                }
+                if let Some(decl) = self.fns.get(name) {
+                    for (i, a) in cr.args.iter().enumerate() {
+                        if !arg_reaches_alias(a) {
+                            continue;
+                        }
+                        match decl.params.get(i) {
+                            Some(p) => {
+                                if self.fn_mutates_const_param(decl, &p.name, depth + 1) {
+                                    return true;
+                                }
+                            }
+                            None => return true,
+                        }
+                    }
+                    return false;
+                }
+                cr.args.iter().any(&arg_reaches_alias)
+            }
+            Expr::Field { base, .. } => {
+                if let Expr::Ident { name: pkg, .. } = &**base {
+                    if A3_PURE_PKGS.contains(&pkg.as_str()) {
+                        return false;
+                    }
+                }
+                cr.args.iter().any(&arg_reaches_alias)
+            }
+            _ => cr.args.iter().any(&arg_reaches_alias),
         }
     }
 
@@ -2013,6 +2469,9 @@ mod tests {
 
     #[test]
     fn multi_return_assign_preserves_second_result_shape_and_rejects_spawn() {
+        // Fixture seam-fix for #134: `n` is only stored to (a bare `=`
+        // target is not a Go read), so `_ = n` keeps the snippet a valid
+        // program and the E3001 spawn check first.
         let r = check(
             "fn make_pair() (int, map[string]int) {\n\
                m := map[string]int{\"init\": 0}\n\
@@ -2023,6 +2482,7 @@ mod tests {
                m := map[string]int{\"init\": 0}\n\
                n := 0\n\
                n, m = make_pair()\n\
+               _ = n\n\
                task worker(m)\n\
              }",
         );
