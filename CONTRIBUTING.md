@@ -11,6 +11,14 @@ Thank you for helping.
   with an EXPECTED-VERDICT line), diagnostic wording, example programs.
 - Soundness bugs have their own track: see [SECURITY.md](SECURITY.md) and
   the [BOUNTY.md](BOUNTY.md) pool.
+- **Crazy ideas have a funded home too**: the Wildcard Track pays for
+  revolutionary, contrarian, high-risk proposals a normal feature bounty
+  would reject — **no prototype required**, breaking changes, rewrites,
+  and "impossible" ideas explicitly allowed, and failures are published as
+  learnings (and paid). Submit via the
+  [`wildcard` template](https://github.com/limitlessprojects/Go-Hybrid/issues/new?template=wildcard.yml);
+  the ledger, the review calendar, and the failure wall live in
+  [MOONSHOT.md](MOONSHOT.md).
 
 ## Setup
 

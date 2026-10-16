@@ -94,7 +94,11 @@ a regression test in the corpus before the fix lands, and the fix note in
 the next release's changelog. **There is now a formal bounty behind this
 protocol: a $500 pool over the top 10 contributions, paid only on a
 reproduced accepted-but-unsound regression** — full rules, severity tiers,
-and the Hall of Fame live in [BOUNTY.md](BOUNTY.md).
+and the Hall of Fame live in [BOUNTY.md](BOUNTY.md). **The program also
+carries a $500 Wildcard Track** for revolutionary, contrarian, high-risk
+ideas that a normal feature bounty would reject — no prototype required,
+breaking changes and rewrites explicitly allowed, failure-with-knowledge a
+valid (and paid) outcome, all outcomes published: [MOONSHOT.md](MOONSHOT.md).
 
 ## Known limits of this document
 

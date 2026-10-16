@@ -9,9 +9,9 @@ documented as such in the job note:
   INVARIANT 1 (no hang):    `hyb check` on ANY input terminates within the
                             per-case timeout (the 2026-10-14 sync_stmt/
                             sync_decl force-progress fix is what this pins).
-  INVARIANT 2 (no crash):   exit code is never 101 (Rust panic), 134 (abort),
-                            139 (segv) — malformed input produces clean
-                            HYB-E0002 diagnostics instead.
+  INVARIANT 2 (no crash):   exit code is 0 (accept) or 1 (clean reject);
+                            any other code, including negative POSIX signal
+                            codes, fails the case.
   INVARIANT 3 (no ICE):     stdout/stderr never contains "panicked at" or
                             "internal compiler error".
 
@@ -52,7 +52,6 @@ NEST_SHAPES = [
     "managed {{ {body} }}",
 ]
 
-CRASH_CODES = {101, 134, 139, 137}  # panic, abort, segv, oom-kill marker
 BAD_TEXT = ("panicked at", "internal compiler error", "stack overflow")
 
 
@@ -101,6 +100,7 @@ def gen_nest(rng):
 
 
 def check_one(hyb, src, workdir, timeout):
+    """Return (failure, accepted) from one checker execution."""
     path = os.path.join(workdir, "case.hy")
     with open(path, "w", encoding="utf-8") as f:
         f.write(src)
@@ -110,13 +110,13 @@ def check_one(hyb, src, workdir, timeout):
             text=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return "HANG"
-    if r.returncode in CRASH_CODES:
-        return f"CRASH exit={r.returncode}"
+        return "HANG", False
+    if r.returncode not in (0, 1):
+        return f"UNEXPECTED exit={r.returncode}", False
     blob = (r.stdout + r.stderr).lower()
     if any(b in blob for b in BAD_TEXT):
-        return f"ICE: {(r.stdout + r.stderr)[:120]}"
-    return None
+        return f"ICE: {(r.stdout + r.stderr)[:120]}", False
+    return None, r.returncode == 0
 
 
 def main():
@@ -148,12 +148,12 @@ def main():
                 src = gen_mutate(rng, corpus)
             else:
                 src = gen_nest(rng)
-            bad = check_one(args.hyb, src, workdir, args.timeout)
+            bad, accepted = check_one(args.hyb, src, workdir, args.timeout)
             if bad:
                 failures.append((i, kind, bad, src[:200]))
                 if len(failures) >= 10:
                     break
-            elif probe_clean(args.hyb, workdir, args.timeout):
+            elif accepted:
                 ok_accepts += 1
             else:
                 clean_rejects += 1
@@ -166,15 +166,6 @@ def main():
             print(f"  case {i} (kind {kind}): {bad}\n    {head!r}")
         raise SystemExit(1)
     print("hyfuzz: all invariants held (no hangs, no crashes, no ICEs)")
-
-
-def probe_clean(hyb, workdir, timeout):
-    """True iff the last case checked accepted (exit 0)."""
-    probe = subprocess.run(
-        [hyb, "check", os.path.join(workdir, "case.hy")],
-        capture_output=True, text=True, timeout=timeout,
-    )
-    return probe.returncode == 0
 
 
 if __name__ == "__main__":

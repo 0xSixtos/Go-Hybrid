@@ -88,18 +88,29 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 echo "==> downloading $ASSET"
 fetch "$BASE_URL/$ASSET" "$TMP/$ASSET"
-if fetch "$BASE_URL/$ASSET.sha256" "$TMP/$ASSET.sha256" 2>/dev/null; then
-    ( cd "$TMP" && sha256sum -c "$ASSET.sha256" >/dev/null 2>&1 ) \
-        || ( cd "$TMP" && shasum -a 256 -c "$ASSET.sha256" >/dev/null 2>&1 ) \
-        || { echo "install.sh: sha256 MISMATCH — aborting (do not use the download)" >&2; exit 1; }
-    echo "==> sha256 verified"
-else
-    echo "==> note: no sha256 asset published for this release; skipping verification"
+if ! fetch "$BASE_URL/$ASSET.sha256" "$TMP/$ASSET.sha256"; then
+    echo "install.sh: could not download $ASSET.sha256 — aborting before installation; retry when the checksum asset is available" >&2
+    exit 1
 fi
+( cd "$TMP" && sha256sum -c "$ASSET.sha256" >/dev/null 2>&1 ) \
+    || ( cd "$TMP" && shasum -a 256 -c "$ASSET.sha256" >/dev/null 2>&1 ) \
+    || { echo "install.sh: sha256 MISMATCH — aborting (do not use the download)" >&2; exit 1; }
+echo "==> sha256 verified"
 
 # --- extract ---
-mkdir -p "$INSTALL_DIR"
 tar xzf "$TMP/$ASSET" -C "$TMP"
+PACKAGE_DIR="$TMP/hybrid-${TAG}"
+# Validate the candidate before deleting a working installation during upgrade.
+if [ ! -f "$PACKAGE_DIR/hyb" ] || [ ! -d "$PACKAGE_DIR/runtime" ]; then
+    echo "install.sh: release is missing hyb or runtime; existing installation preserved" >&2
+    exit 1
+fi
+chmod +x "$PACKAGE_DIR/hyb"
+if ! HYB_RUNTIME_DIR="$PACKAGE_DIR/runtime" "$PACKAGE_DIR/hyb" explain E0002 >/dev/null 2>&1; then
+    echo "install.sh: release verification FAILED; existing installation preserved" >&2
+    exit 1
+fi
+mkdir -p "$INSTALL_DIR"
 rm -rf "$INSTALL_DIR/runtime" "$INSTALL_DIR/bin"
 cp -R "$TMP/hybrid-${TAG}/runtime" "$INSTALL_DIR/runtime"
 mkdir -p "$INSTALL_DIR/bin"
@@ -107,11 +118,18 @@ cp "$TMP/hybrid-${TAG}/hyb" "$INSTALL_DIR/bin/hyb"
 chmod +x "$INSTALL_DIR/bin/hyb"
 
 # --- launcher (bakes the install path; runtime override still wins) ---
+# Encode the path as a shell literal; the launcher parses it again later.
+# The closing quote also preserves trailing newlines in command substitution.
+shell_quote() {
+    printf "'"
+    printf '%s' "$1" | sed "s/'/'\\\\''/g"
+    printf "'"
+}
 mkdir -p "$BIN_DIR"
 cat > "$BIN_DIR/hyb" <<LAUNCH
 #!/bin/sh
 # Hybrid launcher (installed by install.sh) — wires the packaged runtime.
-HYB_HOME="$INSTALL_DIR"
+HYB_HOME=$(shell_quote "$INSTALL_DIR")
 [ -n "\${HYB_INSTALL_DIR:-}" ] && HYB_HOME="\$HYB_INSTALL_DIR"
 export HYB_RUNTIME_DIR="\${HYB_RUNTIME_DIR:-\$HYB_HOME/runtime}"
 exec "\$HYB_HOME/bin/hyb" "\$@"

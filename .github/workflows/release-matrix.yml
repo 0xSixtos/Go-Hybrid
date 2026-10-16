@@ -99,6 +99,18 @@ jobs:
             echo "arm64 $p: PASS"
           done
           echo "arm64 go runtime suite PASS (5 packages)"
+      - name: Go runtime suite on macOS (native bridge regression)
+        if: matrix.pkg-os == 'darwin'
+        run: |
+          set -e
+          suite="$(mktemp -d)"
+          trap 'rm -rf "$suite"' EXIT
+          mkdir -p "$suite/lib"
+          printf 'module hybrid.program\n\ngo 1.26\n' > "$suite/go.mod"
+          cp -R runtime/go/. "$suite/"
+          cp runtime/rust/hyrt/target/release/libhyrt.a "$suite/lib/"
+          cd "$suite"
+          CGO_ENABLED=1 go test -count=1 ./...
       - name: Go runtime suite on windows (row 17 regression — the bridge smoke)
         # The Win64 trampoline port's fleet regression: call_win64.s is
         # assembled, linked against the GNU-flavored staticlib through mingw

@@ -30,6 +30,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use hy_syntax::*;
 
+mod rangebind;
+mod constconv;
 mod shapes;
 use shapes::{import_path_of, lookup_conversion, lookup_rust_crate, lookup_unbound_crate, Conversion};
 
@@ -327,12 +329,29 @@ pub struct Emitter {
     in_main_closure: bool,
     /// Inside a function literal (closure) — `?` binds to ITS results.
     fnlit_depth: usize,
+    /// Enclosing `for`/`loop` depth in the CURRENT function/closure frame.
+    /// A labeled `break loop`/`continue loop` at depth 0 has no Go label
+    /// target (labels do not cross func boundaries) — emit refuses instead
+    /// of emitting `break hyLoop` against an undefined label (backstop for
+    /// closure bodies, which the Tier-0 flat walk skips).
+    for_depth: usize,
     /// Dotted associated-fn names declared in this file
     /// (`lru_cache.new`) — call sites mangle to `lru_cache_new[...]`.
     assoc_fns: BTreeSet<String>,
     /// The enclosing fn's single result type IF it is an option (`option[v]`)
     /// — `return none` lowers to that type's zero value.
     cur_option_result: Option<String>,
+    /// Go label of the loop currently open in THIS function (innermost last).
+    /// `hyLoop` is a fixed name, so two sibling loops that each own a labeled
+    /// `break loop` would emit two `hyLoop:` declarations and the module would
+    /// fail to build (`label hyLoop already declared`). Each labeled loop
+    /// pushes its own name (`hyLoop`, `hyLoop1`, …), and the labeled
+    /// break/continue about to render takes the innermost one.
+    loop_labels: Vec<String>,
+    /// Per-function counter handing each labeled loop a distinct name
+    /// (`hyLoop`, `hyLoop1`, …) so sibling loops never declare two labels
+    /// with the same name.
+    loop_label_n: usize,
     /// Map-slot loans (O8): `x := &m[k]` cannot be a Go map-index address,
     /// so it lowers to a COPY read now + store-back at the loan's block end
     /// (O9's honesty: Go-heap reads are copies). Frames are block-scoped:
@@ -354,6 +373,10 @@ pub struct Emitter {
     /// E3 expression-form hoists (Batch G): Try span start → the hoisted
     /// temp. emit_expr's Try branch substitutes the temp; cleared per fn.
     try_temps: BTreeMap<(u32, u32), String>,
+    /// Hoisted expression temps (keyed by AST node address) for short-circuit
+    /// `&&`/`||` containing `?` and preceding operands whose evaluation order
+    /// must be preserved before a hoisted `?`.
+    expr_temps: BTreeMap<usize, String>,
     /// Package mode (example 09): the emitted `package` clause, the prefix
     /// binding-package imports use, and whether `pub fn` exports.
     package_name: String,
@@ -392,13 +415,17 @@ impl Emitter {
             temp_n: 0,
             in_main_closure: false,
             fnlit_depth: 0,
+            for_depth: 0,
             assoc_fns: BTreeSet::new(),
             cur_option_result: None,
+            loop_labels: Vec::new(),
+            loop_label_n: 0,
             loan_frames: Vec::new(),
             handler_writer: None,
             pending_fnlit_conv: None,
             cur_fn_conv_result: None,
             try_temps: BTreeMap::new(),
+            expr_temps: BTreeMap::new(),
             package_name: "main".to_string(),
             binding_prefix: "hybrid.program".to_string(),
             export_pub: false,
@@ -665,6 +692,9 @@ impl Emitter {
         self.bindings.clear();
         self.temp_n = 0;
         self.try_temps.clear();
+        self.loop_labels.clear();
+        self.loop_label_n = 0;
+        self.expr_temps.clear();
 
         // Associated functions (`lru_cache.new`) mangle to
         // `lru_cache_new` — Go has no dotted identifiers. Call sites mangle
@@ -1048,6 +1078,10 @@ impl Emitter {
             Expr::MapLit { entries, .. } => entries
                 .iter()
                 .any(|(k, v)| self.expr_has_try(k) || self.expr_has_try(v)),
+            Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                InterpPart::Expr(x) => self.expr_has_try(x),
+                InterpPart::Lit(_) => false,
+            }),
             Expr::FnLit { body, .. } => self.block_has_try(body),
             Expr::Paren { inner, .. } => self.expr_has_try(inner),
             _ => false,
@@ -1128,7 +1162,12 @@ impl Emitter {
                 .join(".");
             format!("{}.{}", root, joined)
         } else {
-            name.to_string()
+            // A SPEC primitive spelling maps to its Go equivalent
+            // (`u16` -> `uint16`); anything else stays verbatim. Issue #147.
+            match shapes::go_primitive_name(name) {
+                Some(go) => go.to_string(),
+                None => name.to_string(),
+            }
         }
     }
 
@@ -1144,6 +1183,10 @@ impl Emitter {
             TypeExpr::Named { name, .. } if !name.contains('.') => match name.as_str() {
                 "bool" => "false".into(),
                 "string" => "\"\"".into(),
+                // A SPEC primitive spelling takes its own zero value
+                // (`var n u16` -> `var n uint16 = 0`, not `*new(u16)`).
+                // Issue #147.
+                _ if shapes::go_primitive_name(name).is_some() => "0".into(),
                 "byte" | "rune" | "int" | "int8" | "int16" | "int32" | "int64" | "uint"
                 | "uint8" | "uint16" | "uint32" | "uint64" | "uintptr" | "float32" | "float64"
                 | "complex64" | "complex128" => "0".into(),

@@ -87,7 +87,7 @@ def kaggle_submit(jobdir):
         src = f.read()
     if INJECT_MARKER not in src:
         sys.exit("worker/script.py missing inject marker")
-    injected = src.replace(INJECT_MARKER, "JOB_JSON = r'''" + payload + "'''")
+    injected = src.replace(INJECT_MARKER, "JOB_JSON = " + repr(payload))
     with open(script, "w") as f:
         f.write(injected)
     with open(os.path.join(WORKER_DIR, "job.json"), "w") as f:  # per SPEC §2 protocol
@@ -225,8 +225,16 @@ def main():
         sys.exit(kaggle_wait(minutes, sys.argv[4] if len(sys.argv) > 4 else None))
     elif tier == "kaggle" and action == "fetch" and len(sys.argv) == 4:
         kaggle_fetch(os.path.abspath(sys.argv[3]))
-    elif tier == "actions" and action == "dispatch" and len(sys.argv) >= 7:
-        actions_dispatch(sys.argv[3], sys.argv[4], sys.argv[5], int(sys.argv[6]), int(sys.argv[7]))
+    elif tier == "actions" and action == "dispatch" and len(sys.argv) == 8:
+        try:
+            shards, maxparallel = int(sys.argv[6]), int(sys.argv[7])
+        except ValueError:
+            print("actions dispatch requires positive integers for shards and maxparallel", file=sys.stderr)
+            sys.exit(2)
+        if shards <= 0 or maxparallel <= 0:
+            print("actions dispatch requires positive integers for shards and maxparallel", file=sys.stderr)
+            sys.exit(2)
+        actions_dispatch(sys.argv[3], sys.argv[4], sys.argv[5], shards, maxparallel)
     elif tier == "actions" and action == "watch":
         actions_watch(int(sys.argv[4]) if len(sys.argv) > 4 else None)
     elif tier == "actions" and action == "fetch" and len(sys.argv) == 5:

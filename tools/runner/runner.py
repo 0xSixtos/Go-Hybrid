@@ -24,8 +24,8 @@ The job.json schema (version 1):
 Behavior:
   * Always writes summary.json (even on failure) with: job, sha, tier, hardware report,
     toolchain versions, per-command exit codes + durations, wall clock.
-  * Commands run under timeout; failures do not stop later commands (fail-soft) unless
-    "hard": true.
+  * Steps run under timeout; failures do not stop later steps (fail-soft) unless
+    "hard": true. A hard setup failure skips all commands and still writes a summary.
   * "cwd": "repo" means relative to the cloned repo checkout.
   * Output files land in the results dir (default: $RESULTS_DIR or ./results).
   * Never panics; all errors become entries in summary.json.
@@ -142,27 +142,37 @@ def main():
         print("[{}] {} {}: exit={} {:.1f}s".format(UTC(), kind, name, code, dur), flush=True)
 
     # sanity: verify we are at the pinned SHA when a repo checkout exists
+    sha_ok = True
     if os.path.isdir(os.path.join(repo_dir, ".git")):
-        code, _, out = run_cmd("git rev-parse HEAD", 10, cwd=repo_dir)
+        code, _, out = run_cmd(["git", "rev-parse", "HEAD"], 10, cwd=repo_dir)
         at = out.strip()
         want = job.get("sha")
-        if want in (None, "HEAD", ""):
+        if code != 0:
+            sha_ok = False
+            record("sha-check", "check", 1, 0.0, "failed to resolve HEAD: {}".format(out.strip()))
+        elif want in (None, "HEAD", ""):
             record("sha-check", "check", 0, 0.0, "job pins HEAD; at {}".format(at[:12]))
         elif at != want:
             # shallow clones of a SHA may differ if fetch fell back to a branch; log loudly
+            sha_ok = False
             record("sha-check", "check", 1, 0.0, "repo at {} but job pins {}".format(at, want))
         else:
             record("sha-check", "check", 0, 0.0, "at {}".format(at))
 
-    for step in job.get("setup", []):
-        cwd = repo_dir if step.get("cwd") == "repo" else (step.get("cwd") or None)
-        code, dur, out = run_cmd(step["run"], step.get("timeout", 600), cwd=cwd)
-        record(step["name"], "setup", code, dur, out)
-        if code != 0 and step.get("hard"):
-            summary["ok"] = False
-            break
+    hard_setup_failed = False
+    if not sha_ok:
+        print("[{}] check sha-check: failed, skipping setup and commands".format(UTC()), flush=True)
+    else:
+        for step in job.get("setup", []):
+            cwd = repo_dir if step.get("cwd") == "repo" else (step.get("cwd") or None)
+            code, dur, out = run_cmd(step["run"], step.get("timeout", 600), cwd=cwd)
+            record(step["name"], "setup", code, dur, out)
+            if code != 0 and step.get("hard"):
+                hard_setup_failed = True
+                break
 
-    for step in job.get("commands", []):
+    commands = [] if (hard_setup_failed or not sha_ok) else job.get("commands", [])
+    for step in commands:
         cwd = repo_dir if step.get("cwd") == "repo" else (step.get("cwd") or None)
         code, dur, out = run_cmd(step["run"], step.get("timeout", 600), cwd=cwd)
         record(step["name"], "cmd", code, dur, out)

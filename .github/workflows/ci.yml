@@ -5,7 +5,8 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   pull_request:
 
 permissions:
@@ -21,10 +22,23 @@ jobs:
       - name: Python syntax + self-tests
         run: |
           set -e
-          python3 -m py_compile tools/runner/runner.py tools/job.py worker/script.py
+
+          python3 -m py_compile tools/runner/runner.py tools/job.py worker/script.py tools/corpus_harness.py tools/test_corpus_harness.py
+          python3 -m unittest discover -s tools/fuzz -p 'test_hyfuzz.py'
+          python3 -m unittest discover -s tools/runner -p test_runner.py -v
           python3 -m unittest discover -s tools -p test_managed_gate.py -v
           python3 -m unittest discover -s tools -p test_differential_loop.py -v
+          python3 -m unittest discover -s tools -p test_run_examples.py -v
+          python3 -m unittest discover -s tools -p test_workload_shape.py -v
           python3 -m unittest discover -s tools -p test_empty_corpus.py -v
+          python3 -m unittest discover -s tools -p test_runner_sha.py -v
+          python3 -m unittest discover -s tools -p test_check_versions.py -v
+          python3 -m unittest discover -s tools -p test_differential_reject_rule.py -v
+<<<<<<< HEAD
+          python3 -m py_compile tools/runner/runner.py tools/job.py worker/script.py tools/corpus_harness.py tools/test_corpus_harness.py
+=======
+>>>>>>> main
+          python3 -m unittest discover -s tools -p test_corpus_harness.py -v
           # runner self-test: execute a trivial inline job end-to-end
           mkdir -p /tmp/selftest && cd /tmp/selftest
           cat > job.json <<'EOF'
@@ -69,7 +83,7 @@ jobs:
           # CI does not invoke make. A dry-run parses the whole file.
           make -n examples >/dev/null 2>&1 || { echo "MAKEFILE SYNTAX BROKEN (recipes must be TAB-indented)"; exit 1; }
           echo "hygiene OK"
-      - name: Installer launcher honours HYB_RUNTIME_DIR (offline)
+      - name: Installer runtime and checksum verification (offline)
         run: |
           set -e
           # install.sh's generated launcher must keep a caller-provided
@@ -77,6 +91,8 @@ jobs:
           # Self-contained: builds a throwaway release archive, stubs the
           # downloader, and reads back the launcher's env/argv — no network.
           python3 tests/test_install_runtime.py
+          python3 tests/test_install_checksums.py
+          python3 tests/test_install_upgrade.py
 
   # The compiler (lands with MVP-0): pinned toolchains, full test suite,
   # corpus verdict agreement, and the walking-skeleton examples end-to-end.
@@ -105,7 +121,7 @@ jobs:
           set -e
           cd compiler
           cargo test --workspace --quiet
-      - name: Checker corpus verdict agreement (24/24 + tripwire)
+      - name: Checker corpus verdict agreement (28/28 + tripwire)
         run: |
           set -e
           cd compiler && cargo build -p hyb --quiet
@@ -170,6 +186,12 @@ jobs:
           # pool, and go vet checks the whole runtime module.
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./hybridge/
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./hybridge/
+          # Darwin must also assemble on every PR; native Rust crossings and
+          # guard-page checks run on macOS in the release matrix.
+          for arch in arm64 amd64; do
+            GOOS=darwin GOARCH="$arch" CGO_ENABLED=0 go build ./hybridge/
+            GOOS=darwin GOARCH="$arch" CGO_ENABLED=0 go vet ./hybridge/
+          done
           # row 18: the workload triplet's shapes are emitted by shape.py —
           # drift between the generator and the committed programs fails CI.
           # Absolute path: this step `cd /tmp/goci` above, so a repo-relative

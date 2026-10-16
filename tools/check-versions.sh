@@ -29,30 +29,46 @@ DRIFT=0
 fail() { echo "FAIL: $*"; DRIFT=1; }
 pass() { echo "ok:   $*"; }
 
+# Versions are matched as LITERALS with a version boundary on both sides.
+# A bare `grep -q "Go 1.26.9"` treats each `.` as "any character" and also
+# matches a longer version (`Go 1.26.90`, or `Go 1.26.12` when the pin is
+# 1.26.1), so a stale artifact could pass the drift check.
+re_escape() { printf '%s' "$1" | sed 's/[][\.^$*+?(){}|/]/\\&/g'; }
+# has_version FILE PREFIX VERSION: FILE contains PREFIX+VERSION (literal),
+# not glued to a longer word before it and not followed by more version
+# characters (a sentence-ending `.` is fine).
+has_version() {
+    local file="$1" prefix="$2" version="$3"
+    local pat
+    pat="(^|[^0-9A-Za-z_.])$(re_escape "$prefix$version")([^0-9A-Za-z_.]|\\.([^0-9]|$)|$)"
+    grep -qE "$pat" "$file"
+}
+
 echo "pins: $PINNED_GO / rust $PINNED_RUST (tools/env.sh)"
 
 # --- 2. Cross-reference every version-bearing artifact ----------------------
-grep -q "Go $GO_VER" README.md \
+has_version README.md "Go " "$GO_VER" \
     && pass "README.md names Go $GO_VER" \
     || fail "README.md does not name Go $GO_VER"
-grep -q "Rust $PINNED_RUST" README.md \
+has_version README.md "Rust " "$PINNED_RUST" \
     && pass "README.md names Rust $PINNED_RUST" \
     || fail "README.md does not name Rust $PINNED_RUST"
 
-grep -q "\"$PINNED_GO\"" compiler/crates/hyb/src/main.rs \
+grep -qF "\"$PINNED_GO\"" compiler/crates/hyb/src/main.rs \
     && pass "hyb default pin matches ($PINNED_GO)" \
     || fail "hyb default pin (compiler/crates/hyb/src/main.rs) != $PINNED_GO"
-grep -q "\"$PINNED_RUST\"" compiler/crates/hyb/src/main.rs \
+grep -qF "\"$PINNED_RUST\"" compiler/crates/hyb/src/main.rs \
     && pass "hyb default pin matches (rust $PINNED_RUST)" \
     || fail "hyb default pin (compiler/crates/hyb/src/main.rs) != rust $PINNED_RUST"
 grep -q "const DEFAULT_PIN: &str = \"$PINNED_RUST\"" compiler/crates/hyb/build.rs \
     && pass "hyb drift-guard default matches (rust $PINNED_RUST)" \
     || fail "hyb build.rs DEFAULT_PIN != rust $PINNED_RUST (the guard would refuse honest builds)"
 
-grep -q "$PINNED_GO" PLAN.md \
+# PLAN.md: the environment row itself, not any historical mention in the log.
+grep -qxF -- "- Go: **$PINNED_GO**" <(sed -E 's/^(- Go: \*\*[^*]*\*\*).*/\1/' PLAN.md) \
     && pass "PLAN.md environment row names $PINNED_GO" \
     || fail "PLAN.md does not name $PINNED_GO"
-grep -q "$PINNED_RUST" PLAN.md \
+grep -qxF -- "- Rust: **$PINNED_RUST**" <(sed -E 's/^(- Rust: \*\*[^*]*\*\*).*/\1/' PLAN.md) \
     && pass "PLAN.md environment row names rust $PINNED_RUST" \
     || fail "PLAN.md does not name rust $PINNED_RUST"
 

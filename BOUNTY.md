@@ -1,8 +1,11 @@
 # 💰 The Hybrid Bounty
 
-We pay for **real soundness bugs** and **useful improvements** in Hybrid.
-The pool is **$500** per cycle, split across the **top 10 most meaningful
-contributions**. Open to humans and AI: we judge the report, not the author.
+We pay for **real soundness bugs**, **useful improvements**, and
+**revolutionary ideas** in Hybrid. The main pool is **$500** per cycle,
+split across the **top 10 most meaningful contributions** — and the
+**Wildcard Track adds another $500** per cycle for the kind of idea a
+normal feature bounty would reject. Open to humans and AI: we judge the
+report, not the author.
 
 The maintainer keeps the final say on whether a report qualifies, its tier,
 and its payout. Every decision gets a written reason in the issue.
@@ -22,7 +25,7 @@ announced in the release notes and listed in the Hall of Fame below.
 
 ## What qualifies
 
-Two tracks, ranked together:
+Two tracks ranked together, plus a third that stands apart:
 
 1. **Soundness bugs (the main track).** A program Hybrid **accepts** but
    that is **unsound**: a data race on shared mutable state crossing a task
@@ -33,6 +36,13 @@ Two tracks, ranked together:
 2. **Useful improvements.** Fixes, adversarial corpus tests, diagnostic
    wording, docs, tooling. Meaningful beats large; a small fix with a test
    outranks a big idea with no repro.
+3. **Wildcard proposals — a separate track with its own $500.**
+   Revolutionary, contrarian, high-risk ideas that the ladder would
+   otherwise filter out. No prototype required; breaking changes,
+   new paradigms, rewrites, and "impossible" ideas explicitly allowed;
+   **failure is a valid outcome if it produces knowledge, and every
+   outcome — including failures — is published.** Full rules, ledger, and
+   the learnings log: [MOONSHOT.md](MOONSHOT.md); quick version below.
 
 ## Severity tiers
 
@@ -87,13 +97,47 @@ only door to a payout.
 
 1. **Bugs:** open an issue with the
    [`soundness` template](https://github.com/limitlessprojects/Go-Hybrid/issues/new?template=soundness.yml).
-   **Improvements:** a normal issue or a PR.
+   **Improvements:** a normal issue or a PR. **Wildcard proposals:** the
+   [`wildcard` template](https://github.com/limitlessprojects/Go-Hybrid/issues/new?template=wildcard.yml).
 2. Include: what happens, what should happen, the exact commit, and the
-   smallest repro (a `.hy` file or a test).
+   smallest repro (a `.hy` file or a test) — wildcards instead name the
+   sacred cow they kill and how we would falsify the idea.
 3. We aim to **acknowledge within 48 hours** with a first verdict:
    accepted, needs info, or duplicate, with reasons.
 4. Fix PRs must pass CI on our side, then get final review.
 5. Winners are announced when a cycle closes, in the release notes and here.
+
+## Track 3 — the Wildcard Track, quick version
+
+**Purpose: incentivize revolutionary, contrarian, high-risk ideas that a
+normal feature bounty would reject.** We are hunting for breakthroughs,
+not incremental improvements — the unique approaches or additions that
+could make a paradigm shift without breaking everything, or that are worth
+it even when they do (the cost-to-ROI call is ours; your job is honesty
+about the cost).
+
+- **Budget: another $500 per cycle**, separate from the ladder. One
+  wildcard winner per cycle: **$250 when the proposal is accepted into the
+  ledger, $250 when its learning is published — success or failure alike.**
+  A fast, honest failure collects its second half; publishing the failure
+  *is* the deliverable.
+- **No working prototype required.** This is purely a place for us to
+  analyze people's crazy ideas and thoughts. A well-argued paragraph is a
+  complete submission.
+- **Breaking changes, new paradigms, rewrites, and "impossible" ideas are
+  explicitly allowed.** Say which sacred cow dies and why — SPEC.md,
+  GUARANTEES.md, and the `.hy`/`.go` split are all fair game.
+- **Everything is published:** the ledger, the review schedule, the
+  milestones, the payouts, and the learnings — including the failure wall —
+  live in [MOONSHOT.md](MOONSHOT.md).
+- **We actively solicit, not just wait:** each cycle names the assumptions
+  we most want attacked (see the solicitation calendar in MOONSHOT.md).
+- **Ops run by the project's AI maintainer:** proposal intake (triage
+  within 48 hours, same as bugs), review scheduling (a public monthly
+  review window), milestone tracking (the MOONSHOT ledger is the single
+  source of truth), and payout preparation — with the maintainer keeping
+  the final say and every decision getting a written reason, same as the
+  ladder.
 
 ## Scope
 
