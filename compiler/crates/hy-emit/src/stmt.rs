@@ -963,6 +963,22 @@ impl Emitter {
         BindingKind::Plain
     }
 
+    /// Whether an expression evaluates to a channel type (param, typed local,
+    /// make(chan ...), or a function returning a channel). Channel ranges in
+    /// Go permit only one iteration variable and bind the received value directly.
+    fn is_channel_expr(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Ident { name, .. } => {
+                matches!(self.bindings.get(name), Some(BindingKind::Chan))
+            }
+            Expr::Paren { inner, .. } => self.is_channel_expr(inner),
+            Expr::Call { .. } | Expr::Try { .. } => {
+                self.binding_kind_of(e) == BindingKind::Chan
+            }
+            _ => false,
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Assignment
     // -----------------------------------------------------------------------
@@ -1374,12 +1390,7 @@ impl Emitter {
                             // Go's single-var range binds the index (slices/
                             // maps) or the value (channels) — hence the Chan
                             // hint check.
-                            let over_chan = match expr {
-                                Expr::Ident { name, .. } => {
-                                    matches!(self.bindings.get(name), Some(BindingKind::Chan))
-                                }
-                                _ => false,
-                            };
+                            let over_chan = self.is_channel_expr(expr);
                             if over_chan {
                                 format!("for {} := range {} {{", vars[0], e)
                             } else {
@@ -1405,6 +1416,11 @@ impl Emitter {
                         }
                     }
                     2 => {
+                        if self.is_channel_expr(expr) {
+                            return Err(EmitError::unsupported(
+                                "cannot range over channel with two iteration variables: channels permit only one iteration variable (SPEC-LANGUAGE.md LX13)",
+                            ));
+                        }
                         // Go rejects a range binding the body never reads
                         // (`declared and not used`), and `for _, _ :=` is
                         // itself invalid (`no new variables on left side of

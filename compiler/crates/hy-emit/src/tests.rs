@@ -812,6 +812,56 @@ fn single_var_iterate_over_chan_binds_value() {
 }
 
 #[test]
+fn single_var_iterate_over_chan_typed_var_binds_value() {
+    let go = emit("fn f() {\n    var ch chan int\n    for v in ch {\n        _ = v\n    }\n}\n");
+    assert!(
+        go.contains("for v := range ch {"),
+        "typed chan var direct range:\n{}",
+        go
+    );
+}
+
+#[test]
+fn single_var_iterate_over_chan_call_binds_value() {
+    let go = emit("fn get_chan() chan int {\n    return make(chan int, 1)\n}\n\nfn f() {\n    for v in get_chan() {\n        _ = v\n    }\n}\n");
+    assert!(
+        go.contains("for v := range get_chan() {"),
+        "channel call range binds received value:\n{}",
+        go
+    );
+}
+
+#[test]
+fn single_var_iterate_over_chan_paren_binds_value() {
+    let go = emit("fn f(ch chan int) {\n    for v in (ch) {\n        _ = v\n    }\n}\n");
+    assert!(
+        go.contains("for v := range (ch) {") || go.contains("for v := range ch {"),
+        "channel paren range binds received value:\n{}",
+        go
+    );
+}
+
+#[test]
+fn single_var_iterate_over_chan_make_call_binds_value() {
+    let go = emit("fn f() {\n    for v in make(chan int, 2) {\n        _ = v\n    }\n}\n");
+    assert!(
+        go.contains("for v := range make(chan int, 2) {"),
+        "inline make chan range binds received value:\n{}",
+        go
+    );
+}
+
+#[test]
+fn two_var_iterate_over_chan_is_rejected() {
+    let err = emit_err("fn f(ch chan int) {\n    for a, b in ch {\n        _ = a\n        _ = b\n    }\n}\n");
+    assert!(
+        err.contains("cannot range over channel with two iteration variables"),
+        "expected two-var chan range rejection, got:\n{}",
+        err
+    );
+}
+
+#[test]
 fn set_insert_uses_prelude() {
     let go = emit(
         "type node_id = int\n\nfn f() bool {\n    seen := set[node_id]{}\n    return seen.insert(3)\n}\n",
