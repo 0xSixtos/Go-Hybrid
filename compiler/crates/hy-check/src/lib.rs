@@ -46,6 +46,7 @@ mod loans;
 mod model;
 mod sendability;
 mod shape;
+mod tuple;
 mod walk;
 
 use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
@@ -398,6 +399,10 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         // Issue #149: `/` or `%` by a literal 0 must not be accepted —
         // Go refuses to compile the emitted expression.
         ck.check_stmt_const_zero_divisor(stmt);
+
+        // T23: a multi-value call bound to the wrong number of names
+        // (`p := minmax(3, 9)`) — Go refuses the emitted binding.
+        ck.check_stmt_multi_value(&st, stmt);
 
         // Calls (A2 loan windows, A7 consumes + arg lending). A for-loop
         // ITERATE expression's borrow calls get loop-extent loans: the
