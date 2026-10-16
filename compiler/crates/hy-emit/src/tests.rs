@@ -862,6 +862,73 @@ fn two_var_iterate_over_chan_is_rejected() {
 }
 
 #[test]
+fn single_var_iterate_over_make_slice_binds_element() {
+    let go = emit("fn f() {\n    for x in make([]int, 5) {\n        _ = x\n    }\n}\n");
+    assert!(
+        go.contains("for _, x := range make([]int, 5) {"),
+        "make slice range must bind element (for _, x := range ...):\n{}",
+        go
+    );
+    assert!(
+        !go.contains("for x := range make([]int, 5) {"),
+        "make slice range must not be lowered as channel range:\n{}",
+        go
+    );
+}
+
+#[test]
+fn single_var_iterate_over_make_slice_variable_binds_element() {
+    let go = emit("fn f() {\n    s := make([]int, 5)\n    for x in s {\n        _ = x\n    }\n}\n");
+    assert!(
+        go.contains("for _, x := range s {"),
+        "make slice variable range must bind element (for _, x := range s):\n{}",
+        go
+    );
+    assert!(
+        !go.contains("for x := range s {"),
+        "make slice variable must not be recorded as channel binding:\n{}",
+        go
+    );
+}
+
+#[test]
+fn single_var_iterate_over_map_variable_does_not_lower_as_channel() {
+    let go = emit("fn f() {\n    m := map[string]int{}\n    for k in m {\n        _ = k\n    }\n}\n");
+    assert!(
+        go.contains("for _, k := range m {"),
+        "map variable must not be lowered as channel:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("for k := range m {"),
+        "map variable single-var range must not be lowered as channel range:\n{}",
+        go
+    );
+}
+
+#[test]
+fn single_var_iterate_over_make_map_literal_does_not_lower_as_channel() {
+    let go = emit("fn f() {\n    m := make(map[string]int{})\n    for k in m {\n        _ = k\n    }\n}\n");
+    assert!(
+        go.contains("for _, k := range m {"),
+        "make(map) variable must not be lowered as channel:\n{}",
+        go
+    );
+}
+
+
+#[test]
+fn two_var_iterate_over_make_slice_allowed() {
+    let go = emit("fn f() {\n    for i, x in make([]int, 5) {\n        _ = i\n        _ = x\n    }\n}\n");
+    assert!(
+        go.contains("for i, x := range make([]int, 5) {"),
+        "two-var range over make slice must be allowed:\n{}",
+        go
+    );
+}
+
+
+#[test]
 fn set_insert_uses_prelude() {
     let go = emit(
         "type node_id = int\n\nfn f() bool {\n    seen := set[node_id]{}\n    return seen.insert(3)\n}\n",

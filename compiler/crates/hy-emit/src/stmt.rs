@@ -912,12 +912,12 @@ impl Emitter {
     }
 
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
-        let call = match e {
+        let (call, args) = match e {
             Expr::Try { operand, .. } => match operand.as_ref() {
-                Expr::Call { callee, .. } => callee.as_ref(),
+                Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
                 _ => return BindingKind::Plain,
             },
-            Expr::Call { callee, .. } => callee.as_ref(),
+            Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
             _ => return BindingKind::Plain,
         };
         if let Expr::Field { base, name, .. } = call {
@@ -955,10 +955,20 @@ impl Emitter {
             }
         }
         // make(chan …) → Chan (single-var range emits the value directly).
+        // Only classify as Chan if the first argument is a channel type.
+        // make([]T, n) (SliceLit) and make(map[K]V) (MapLit) must remain Plain
+        // so single-var range binds elements/keys rather than channel values.
         if matches!(call, Expr::Ident { name, .. } if name == "make") {
-            // args[0] is the type-as-value encoding; peek at its shape.
-            // (Verified against the parser's make encoding.)
-            return BindingKind::Chan;
+            if let Some(first) = args.first() {
+                if let Expr::StructLit {
+                    ty: Some(TypeExpr::Chan { .. }),
+                    ..
+                } = &first.value
+                {
+                    return BindingKind::Chan;
+                }
+            }
+            return BindingKind::Plain;
         }
         BindingKind::Plain
     }
