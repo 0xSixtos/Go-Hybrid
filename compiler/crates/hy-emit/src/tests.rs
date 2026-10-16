@@ -1543,3 +1543,68 @@ fn e3_hoist_preserves_preceding_operand_evaluation_order() {
         go
     );
 }
+
+#[test]
+fn task_preserves_variadic_spread() {
+    let go = emit(
+        "fn worker(items ...string) {}\n\nfn main() {\n    items := []string{\"a\", \"b\"}\n    task worker(items...)\n}\n",
+    );
+    assert!(
+        go.contains("go worker(items...)"),
+        "task must preserve variadic spread `...`:\n{}",
+        go
+    );
+}
+
+#[test]
+fn task_auto_addresses_pointer_params() {
+    let go = emit(
+        "struct env {\n    name string\n}\n\nfn worker(e *env) {}\n\nfn main() {\n    e := env{name: \"prod\"}\n    task worker(e)\n}\n",
+    );
+    assert!(
+        go.contains("go worker(&e)"),
+        "task must auto-address addressable pointer argument:\n{}",
+        go
+    );
+}
+
+#[test]
+fn task_preserves_already_addressed_pointer_param() {
+    let go = emit(
+        "struct env {\n    name string\n}\n\nfn worker(e *env) {}\n\nfn main() {\n    e := env{name: \"prod\"}\n    task worker(&e)\n}\n",
+    );
+    assert!(
+        go.contains("go worker(&e)"),
+        "task must not double-address:\n{}",
+        go
+    );
+}
+
+#[test]
+fn task_package_call_uses_package_and_normalizes_name() {
+    let go = emit(
+        "fn main() {\n    task time.sleep(100)\n}\n",
+    );
+    assert!(
+        go.contains("\"time\""),
+        "package must be imported:\n{}",
+        go
+    );
+    assert!(
+        go.contains("go time.Sleep(100)"),
+        "method name must normalize and emit go:\n{}",
+        go
+    );
+}
+
+#[test]
+fn task_plain_call_still_emits_verbatim() {
+    let go = emit(
+        "fn worker(x int) {}\n\nfn main() {\n    x := 42\n    task worker(x)\n}\n",
+    );
+    assert!(
+        go.contains("go worker(x)"),
+        "plain task call must emit verbatim:\n{}",
+        go
+    );
+}
