@@ -97,7 +97,7 @@ fn main() {
 const DOUBLE_NEG_ZERO: &str = "\
 fn main() {
     x := 5
-    y := x / --0
+    y := x / -(-0)
     fmt.println(\"{y}\")
 }
 ";
