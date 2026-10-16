@@ -1018,6 +1018,7 @@ impl Emitter {
                     }
                 }
             }
+        }
         if targets.len() == 1 && values.len() == 1 && op == AssignOp::Assign {
             if let PlaceKind::Ident(name) = &targets[0].kind {
                 if self.expr_is_pointer(&values[0]) {
