@@ -529,6 +529,64 @@ pub(crate) fn collect_ref_roots(e: &Expr, out: &mut Vec<String>) {
                 collect_ref_roots(it, out);
             }
         }
+        Expr::AddrOf { operand, .. } => collect_ref_roots(operand, out),
+        Expr::Unary {
+            op: hy_syntax::UnOp::Addr,
+            operand,
+            ..
+        } => collect_ref_roots(operand, out),
+        _ => {}
+    }
+}
+
+/// Collect root identifiers that are explicitly borrowed via address-of (`&x`) inside `e`
+/// (including nested in composite literals, slice literals, map literals, calls, etc.).
+pub(crate) fn collect_addr_of_roots(e: &Expr, out: &mut Vec<String>) {
+    match unwrap_parens(e) {
+        Expr::AddrOf { operand, .. } => {
+            if let Some(id) = operand.root_ident() {
+                out.push(id.to_string());
+            }
+            collect_addr_of_roots(operand, out);
+        }
+        Expr::Unary {
+            op: hy_syntax::UnOp::Addr,
+            operand,
+            ..
+        } => {
+            if let Some(id) = operand.root_ident() {
+                out.push(id.to_string());
+            }
+            collect_addr_of_roots(operand, out);
+        }
+        Expr::Try { operand, .. } => collect_addr_of_roots(operand, out),
+        Expr::Slice { base, .. } => collect_addr_of_roots(base, out),
+        Expr::Field { base, .. } => collect_addr_of_roots(base, out),
+        Expr::Index { base, .. } => collect_addr_of_roots(base, out),
+        Expr::Call { callee, args, .. } => {
+            for a in args {
+                collect_addr_of_roots(&a.value, out);
+            }
+            if let Expr::Field { base, .. } = unwrap_parens(callee) {
+                collect_addr_of_roots(base, out);
+            }
+        }
+        Expr::StructLit { fields, .. } => {
+            for f in fields {
+                collect_addr_of_roots(&f.value, out);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                collect_addr_of_roots(k, out);
+                collect_addr_of_roots(v, out);
+            }
+        }
+        Expr::SliceLit { items, .. } => {
+            for it in items {
+                collect_addr_of_roots(it, out);
+            }
+        }
         _ => {}
     }
 }
