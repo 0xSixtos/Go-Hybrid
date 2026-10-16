@@ -2659,6 +2659,57 @@ mod tests {
     }
 
     #[test]
+    fn move_of_container_holding_closures_rejects() {
+        // A closure that captures `m` is wrapped in a slice / map / struct and
+        // the CONTAINER is moved to a task. `move v` froze only `v`, never the
+        // captured `m`, so main kept writing `m` while the task wrote it
+        // through the closure: ACCEPT with 0 diagnostics and a `go run -race`
+        // hit before this fix (#225). Moving a bare closure was already
+        // rejected.
+        let shapes = [
+            ("v []fn()", "v[0]()", "v := []fn(){fn() { m[\"k\"]++ }}", ""),
+            (
+                "v map[string]fn()",
+                "v[\"a\"]()",
+                "v := map[string]fn(){\"a\": fn() { m[\"k\"]++ }}",
+                "",
+            ),
+            (
+                "v job",
+                "v.f()",
+                "v := job{f: fn() { m[\"k\"]++ }}",
+                "struct job { f fn() }\n",
+            ),
+            (
+                "v outer",
+                "v.j.f()",
+                "v := outer{j: job{f: fn() { m[\"k\"]++ }}}",
+                "struct job { f fn() }\nstruct outer { j job }\n",
+            ),
+        ];
+        for (param, call, def, pre) in shapes {
+            let src = format!(
+                "{pre}fn worker({param}, done chan<- bool) {{\n  {call}\n  done <- true\n}}\n\
+                 fn main() {{\n  m := map[string]int{{}}\n  {def}\n  done := make(chan bool, 1)\n  \
+                 task worker(move v, done)\n  m[\"k\"] = 2\n  <-done\n}}\n"
+            );
+            let r = check(&src);
+            assert_eq!(r.verdict, Verdict::Reject, "{param}: {:?}", r.diagnostics);
+            assert!(
+                r.diagnostics.iter().any(|d| d.code == "HYB-E3001"),
+                "{param}: {:?}",
+                r.diagnostics
+            );
+        }
+        // Negative control: a moved container of plain values still crosses.
+        let ok = check(
+            "fn worker(v []int, done chan<- bool) {\n  v[0] = 1\n  done <- true\n}\n\
+             fn main() {\n  v := []int{0}\n  done := make(chan bool, 1)\n  task worker(move v, done)\n  <-done\n}\n",
+        );
+        assert_eq!(ok.verdict, Verdict::Accept, "{:?}", ok.diagnostics);
+    }
+
+    #[test]
     fn non_owned_param_capture_and_range_moves_reject_e3004() {
         // 1. Function parameter moved across a task boundary: caller retains `m`.
         let r_param = check(
