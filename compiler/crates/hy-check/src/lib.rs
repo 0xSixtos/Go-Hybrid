@@ -33,6 +33,7 @@
 //!     (issue #201: incomparable `==`, package-level redeclarations,
 //!     invalid receivers, negative shift counts, bad array lengths).
 //!   * this file    — Pass B: the per-statement driver and the verdict.
+//!   * `builtins.rs` — HYB-E2001 defer-non-call + HYB-E2005 builtin args (issue #187).
 //!
 //! Tier-0 discipline (O4.9, rule FC — human directive 2026-10-13): the
 //! checker is FAIL-CLOSED at spawn/send boundaries — a value whose type it
@@ -54,6 +55,7 @@ mod model;
 mod sendability;
 mod shape;
 mod walk;
+mod builtins;
 
 use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
 
@@ -528,6 +530,12 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         }
 
         // Statement-specific processing.
+        // Issue #187: defer must be a call (HYB-E2001); literal/arity
+        // misuse of make/len/cap/delete/close/new (HYB-E2005).
+        // After the call/loan walk so it does not collide with upstream
+        // inserts around check_uses (const-zero-divisor / LX14).
+        ck.check_stmt_builtins(stmt);
+
         match stmt {
             Stmt::Local(l) => {
                 ck.process_local(&mut st, l, idx, managed);

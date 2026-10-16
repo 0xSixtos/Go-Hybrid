@@ -144,6 +144,23 @@
       "rule": "T23"
     },
     {
+      "code": "HYB-E2005",
+      "name": "builtin-argument-invalid",
+      "category": "type",
+      "severity": "error",
+      "title": "invalid argument to a builtin",
+      "summary": "A builtin call (`make`, `len`, `cap`, `delete`, `close`, `new`) with a compile-time-detectable bad arity or literal argument is rejected: Go refuses to compile the emitted call, so an accepted Hybrid program would emit unbuildable Go (issue #187). Only literal / arity misuse is in scope — variable operands stay a run-time concern, matching Go.",
+      "fixits": [
+        "for `make`, pass a non-negative integer size (or omit size / use a variable)",
+        "for `len`/`cap`, pass a string, slice, map, array, or channel — not a number or bool literal",
+        "for `delete`, pass both the map and the key: `delete(m, k)`",
+        "for `close`, pass a channel value — not a literal",
+        "for `new`, pass a type name — not a value literal"
+      ],
+      "example": "c := make(chan int, -1)   // reject: HYB-E2005 — make size must be a non-negative int",
+      "rule": "P"
+    },
+    {
       "code": "HYB-E2006",
       "name": "equality-incomparable",
       "category": "type",
