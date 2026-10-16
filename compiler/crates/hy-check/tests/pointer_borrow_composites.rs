@@ -235,3 +235,189 @@ fn main() {
     assert!(matches!(res.verdict, Verdict::Reject));
     assert!(res.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
 }
+
+#[test]
+fn multiple_borrow_roots_in_slice_freezes_first_root() {
+    let src = r#"
+struct node {
+    val int
+}
+
+fn worker(s []*node, done chan int) {
+    s[0].val = 999
+    done <- 1
+}
+
+fn main() {
+    n1 := node{val: 0}
+    n2 := node{val: 0}
+    s := []*node{&n1, &n2}
+    done := make(chan int, 1)
+    task worker(move s, done)
+    n1.val = 1
+    <-done
+}
+"#;
+    let res = check(src);
+    assert!(matches!(res.verdict, Verdict::Reject));
+    assert!(res.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+}
+
+#[test]
+fn multiple_borrow_roots_in_slice_freezes_second_root() {
+    let src = r#"
+struct node {
+    val int
+}
+
+fn worker(s []*node, done chan int) {
+    s[1].val = 999
+    done <- 1
+}
+
+fn main() {
+    n1 := node{val: 0}
+    n2 := node{val: 0}
+    s := []*node{&n1, &n2}
+    done := make(chan int, 1)
+    task worker(move s, done)
+    n2.val = 2
+    <-done
+}
+"#;
+    let res = check(src);
+    assert!(matches!(res.verdict, Verdict::Reject));
+    assert!(res.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+}
+
+#[test]
+fn deeply_nested_slice_of_slices_freezes_all_roots() {
+    let src = r#"
+struct node {
+    val int
+}
+
+fn worker_grid(grid [][]*node, done chan int) {
+    grid[0][0].val = 999
+    done <- 1
+}
+
+fn main() {
+    n1 := node{val: 0}
+    n2 := node{val: 0}
+    grid := [][]*node{ []*node{&n1}, []*node{&n2} }
+    done := make(chan int, 1)
+    task worker_grid(move grid, done)
+    n1.val = 1
+    <-done
+}
+"#;
+    let res = check(src);
+    assert!(matches!(res.verdict, Verdict::Reject));
+    assert!(res.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+}
+
+#[test]
+fn deeply_nested_slice_of_slices_freezes_second_root() {
+    let src = r#"
+struct node {
+    val int
+}
+
+fn worker_grid(grid [][]*node, done chan int) {
+    grid[1][0].val = 999
+    done <- 1
+}
+
+fn main() {
+    n1 := node{val: 0}
+    n2 := node{val: 0}
+    grid := [][]*node{ []*node{&n1}, []*node{&n2} }
+    done := make(chan int, 1)
+    task worker_grid(move grid, done)
+    n2.val = 2
+    <-done
+}
+"#;
+    let res = check(src);
+    assert!(matches!(res.verdict, Verdict::Reject));
+    assert!(res.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+}
+
+#[test]
+fn deeply_nested_map_of_pointer_slices_freezes_root() {
+    let src = r#"
+struct node {
+    val int
+}
+
+fn worker_map(m map[string][]*node, done chan int) {
+    m["row"][0].val = 999
+    done <- 1
+}
+
+fn main() {
+    n := node{val: 0}
+    m := map[string][]*node{"row": []*node{&n}}
+    done := make(chan int, 1)
+    task worker_map(move m, done)
+    n.val = 1
+    <-done
+}
+"#;
+    let res = check(src);
+    assert!(matches!(res.verdict, Verdict::Reject));
+    assert!(res.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+}
+
+#[test]
+fn positive_control_multiple_borrow_roots_unaccessed_post_move() {
+    let src = r#"
+struct node {
+    val int
+}
+
+fn worker(s []*node, done chan int) {
+    s[0].val = 999
+    done <- 1
+}
+
+fn main() {
+    n1 := node{val: 0}
+    n2 := node{val: 0}
+    s := []*node{&n1, &n2}
+    done := make(chan int, 1)
+    task worker(move s, done)
+    <-done
+}
+"#;
+    let res = check(src);
+    assert_eq!(res.diagnostics.len(), 0);
+    assert!(matches!(res.verdict, Verdict::Accept));
+}
+
+#[test]
+fn positive_control_deeply_nested_composites_unaccessed_post_move() {
+    let src = r#"
+struct node {
+    val int
+}
+
+fn worker_grid(grid [][]*node, done chan int) {
+    grid[0][0].val = 999
+    done <- 1
+}
+
+fn main() {
+    n1 := node{val: 0}
+    n2 := node{val: 0}
+    grid := [][]*node{ []*node{&n1}, []*node{&n2} }
+    done := make(chan int, 1)
+    task worker_grid(move grid, done)
+    <-done
+}
+"#;
+    let res = check(src);
+    assert_eq!(res.diagnostics.len(), 0);
+    assert!(matches!(res.verdict, Verdict::Accept));
+}

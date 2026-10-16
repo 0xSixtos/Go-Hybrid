@@ -560,15 +560,21 @@ pub(crate) fn collect_addr_of_roots(e: &Expr, out: &mut Vec<String>) {
             collect_addr_of_roots(operand, out);
         }
         Expr::Try { operand, .. } => collect_addr_of_roots(operand, out),
+        Expr::Move { operand, .. } => collect_addr_of_roots(operand, out),
         Expr::Slice { base, .. } => collect_addr_of_roots(base, out),
         Expr::Field { base, .. } => collect_addr_of_roots(base, out),
-        Expr::Index { base, .. } => collect_addr_of_roots(base, out),
+        Expr::Index { base, index, .. } => {
+            collect_addr_of_roots(base, out);
+            collect_addr_of_roots(index, out);
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_addr_of_roots(lhs, out);
+            collect_addr_of_roots(rhs, out);
+        }
         Expr::Call { callee, args, .. } => {
+            collect_addr_of_roots(callee, out);
             for a in args {
                 collect_addr_of_roots(&a.value, out);
-            }
-            if let Expr::Field { base, .. } = unwrap_parens(callee) {
-                collect_addr_of_roots(base, out);
             }
         }
         Expr::StructLit { fields, .. } => {
