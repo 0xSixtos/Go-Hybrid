@@ -1560,7 +1560,14 @@ impl Emitter {
                 }
             } else if matches!(v, Expr::Ident { name, .. } if name == "_") {
                 match &self.cur_fn_error_returns {
-                    Some(zeros) if i < zeros.len() => vs.push(zeros[i].clone()),
+                    Some(zeros) if i < zeros.len() => {
+                        let z = &zeros[i];
+                        vs.push(if z.is_empty() {
+                            "nil".to_string()
+                        } else {
+                            z.clone()
+                        });
+                    }
                     _ => {
                         return Err(EmitError::unsupported(
                             "`return _` needs a fn whose results end in `error` (E3's zero-fill)",
@@ -1587,7 +1594,11 @@ impl Emitter {
                 });
             }
         }
-        self.push(&format!("return {}", vs.join(", ")));
+        if vs.is_empty() {
+            self.push("return");
+        } else {
+            self.push(&format!("return {}", vs.join(", ")));
+        }
         Ok(())
     }
 

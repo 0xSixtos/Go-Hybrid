@@ -1543,3 +1543,35 @@ fn e3_hoist_preserves_preceding_operand_evaluation_order() {
         go
     );
 }
+
+#[test]
+fn bare_return_in_void_fn_has_no_trailing_whitespace() {
+    let go = emit("fn main() {\n    return\n}\n");
+    assert!(go.contains("\treturn\n"), "must emit clean return without trailing space:\n{}", go);
+    assert!(!go.contains("\treturn \n"), "must not emit trailing whitespace:\n{}", go);
+}
+
+#[test]
+fn return_blank_in_error_slot_lowers_to_nil() {
+    let go = emit("fn compute() (int, error) {\n    return 42, _\n}\n");
+    assert!(
+        go.contains("return 42, nil"),
+        "return 42, _ must lower error slot to nil:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("return 42, \n"),
+        "must not emit empty slot with trailing comma:\n{}",
+        go
+    );
+}
+
+#[test]
+fn return_all_blanks_lowers_zero_and_nil() {
+    let go = emit("fn compute() (int, error) {\n    return _, _\n}\n");
+    assert!(
+        go.contains("return 0, nil"),
+        "return _, _ must lower to zero value and nil:\n{}",
+        go
+    );
+}
