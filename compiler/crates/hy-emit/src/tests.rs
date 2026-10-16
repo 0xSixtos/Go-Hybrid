@@ -1296,6 +1296,52 @@ fn diff_pointer_param_auto_address() {
 }
 
 #[test]
+fn pointer_param_forwarded_to_pointer_param_not_double_addressed() {
+    // A parameter already having a pointer type (*env) must NOT be auto-addressed
+    // with '&' when passed to a pointer parameter (*env), which would produce **env.
+    let go = emit(
+        "struct env {\n    n int\n}\n\nfn scale(e *env) {\n    _ = e\n}\n\nfn forward(p *env) {\n    scale(p)\n}\n",
+    );
+    assert!(go.contains("scale(p)"), ":\n{}", go);
+    assert!(
+        !go.contains("scale(&p)"),
+        "must not double-address pointer param:\n{}",
+        go
+    );
+}
+
+#[test]
+fn pointer_var_passed_to_pointer_param_not_double_addressed() {
+    // A variable declared with a pointer type (var p *env) must NOT be auto-addressed
+    // when passed to a pointer parameter.
+    let go = emit(
+        "struct env {\n    n int\n}\n\nfn scale(e *env) {\n    _ = e\n}\n\nfn main() {\n    var p *env\n    scale(p)\n}\n",
+    );
+    assert!(go.contains("scale(p)"), ":\n{}", go);
+    assert!(
+        !go.contains("scale(&p)"),
+        "must not double-address pointer var:\n{}",
+        go
+    );
+}
+
+#[test]
+fn pointer_binding_from_addrof_not_double_addressed() {
+    // A binding initialized from an address-of expression (p := &e) is already a
+    // pointer and must not be auto-addressed when passed to a pointer parameter.
+    let go = emit(
+        "struct env {\n    n int\n}\n\nfn scale(e *env) {\n    _ = e\n}\n\nfn main() {\n    e := env{}\n    p := &e\n    scale(p)\n}\n",
+    );
+    assert!(go.contains("p := &e"), ":\n{}", go);
+    assert!(go.contains("scale(p)"), ":\n{}", go);
+    assert!(
+        !go.contains("scale(&p)"),
+        "must not double-address pointer local:\n{}",
+        go
+    );
+}
+
+#[test]
 fn diff_hyfn_rust_typed_result_normalizes_methods() {
     // corpus 13: `s := summary(doc)?` — summary's declared result is
     // serde_json.value; `s.set(...)` normalizes like any rust-call result.
