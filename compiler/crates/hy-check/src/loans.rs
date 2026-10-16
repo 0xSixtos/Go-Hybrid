@@ -1053,12 +1053,98 @@ impl<'a> Checker<'a> {
                     if root == name {
                         continue;
                     }
-                    if self.binding_may_share(st, &root) {
+                    // `binding_may_share` is false for a primitive array
+                    // (`[N]int` copies its elements). A slice of that array
+                    // does not: `s := a[:]`, `s := b.data[:]`, `row := g[i][:]`,
+                    // and `append(a[0:1], x)` all view the array's storage.
+                    // Link those so a later `move` freezes the array too.
+                    if self.binding_may_share(st, &root)
+                        || self.expr_slices_addressable_array(st, value, &root)
+                    {
                         st.share_edge(name, &root);
                     }
                 }
             }
         }
+    }
+
+    /// True when `value` contains a slice whose base is an addressable
+    /// array rooted at `root`. A call that returns an array by value
+    /// (`clone(a)[:]`) is a copy: the slice base is the call, so it does
+    /// not match even though `collect_ref_roots` still sees `a`.
+    fn expr_slices_addressable_array(&self, st: &FnState, value: &Expr, root: &str) -> bool {
+        match value {
+            Expr::Slice { base, lo, hi, .. } => {
+                if self.addressable_array_root(st, base) == Some(root) {
+                    return true;
+                }
+                if self.expr_slices_addressable_array(st, base, root) {
+                    return true;
+                }
+                if let Some(lo) = lo {
+                    if self.expr_slices_addressable_array(st, lo, root) {
+                        return true;
+                    }
+                }
+                if let Some(hi) = hi {
+                    if self.expr_slices_addressable_array(st, hi, root) {
+                        return true;
+                    }
+                }
+                false
+            }
+            Expr::Paren { inner, .. }
+            | Expr::Move { operand: inner, .. }
+            | Expr::Try { operand: inner, .. }
+            | Expr::Unary { operand: inner, .. }
+            | Expr::AddrOf { operand: inner, .. } => {
+                self.expr_slices_addressable_array(st, inner, root)
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.expr_slices_addressable_array(st, lhs, root)
+                    || self.expr_slices_addressable_array(st, rhs, root)
+            }
+            Expr::Index { base, index, .. } => {
+                self.expr_slices_addressable_array(st, base, root)
+                    || self.expr_slices_addressable_array(st, index, root)
+            }
+            Expr::Field { base, .. } => self.expr_slices_addressable_array(st, base, root),
+            Expr::Call { callee, args, .. } => {
+                self.expr_slices_addressable_array(st, callee, root)
+                    || args
+                        .iter()
+                        .any(|a| self.expr_slices_addressable_array(st, &a.value, root))
+            }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| self.expr_slices_addressable_array(st, &f.value, root)),
+            Expr::SliceLit { items, .. } => items
+                .iter()
+                .any(|it| self.expr_slices_addressable_array(st, it, root)),
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
+                self.expr_slices_addressable_array(st, k, root)
+                    || self.expr_slices_addressable_array(st, v, root)
+            }),
+            Expr::Receive { chan, .. } => self.expr_slices_addressable_array(st, chan, root),
+            Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                hy_syntax::InterpPart::Expr(e) => {
+                    self.expr_slices_addressable_array(st, e, root)
+                }
+                hy_syntax::InterpPart::Lit(_) => false,
+            }),
+            // Closure bodies are checked as their own statements.
+            Expr::FnLit { .. } | Expr::Ident { .. } | Expr::Lit { .. } => false,
+        }
+    }
+
+    /// Binding an addressable `[N]T` expression is rooted at.
+    /// `a`, `b.data`, and `g[i]` qualify; a call does not (it yields a copy).
+    fn addressable_array_root<'e>(&self, st: &FnState, expr: &'e Expr) -> Option<&'e str> {
+        let expr = unwrap_parens(expr);
+        if !matches!(self.shape_of_expr(st, expr), TypeShape::Array(_)) {
+            return None;
+        }
+        expr.root_ident()
     }
     // `record_literal_ref` (pr-28's composite-literal recursion) is gone:
     // `record_may_share` now walks literals, calls and views with
