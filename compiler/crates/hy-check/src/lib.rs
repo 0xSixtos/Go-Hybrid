@@ -220,16 +220,32 @@ fn build_tables(ck: &mut Checker<'_>) {
             Decl::Fn(f) => {
                 // Only top-level functions belong in `ck.fns` (methods have a
                 // receiver and must not overwrite or impersonate top-level fns).
-                if f.receiver.is_none() {
-                    ck.declare_pkg_name(&f.name, "fn", f.span);
-                    ck.fns.insert(f.name.clone(), f);
-                } else {
+                if let Some(r) = &f.receiver {
+                    if let Some(base) = Checker::base_named_type(&r.ty) {
+                        ck.method_decls.insert((base, f.name.clone()), f);
+                    }
                     // Issue #201-C/D: method-set dup + receiver validity.
                     ck.declare_method(f);
+                } else {
+                    ck.declare_pkg_name(&f.name, "fn", f.span);
+                    ck.fns.insert(f.name.clone(), f);
                 }
             }
-            Decl::Enum(e) => ck.declare_pkg_name(&e.name, "enum", e.span),
-            Decl::TypeAlias(a) => ck.declare_pkg_name(&a.name, "type", a.span),
+            Decl::Enum(e) => {
+                ck.enum_has_zero_value.insert(
+                    e.name.clone(),
+                    e.variants.first().is_some_and(|v| v.payload.is_none()),
+                );
+                ck.enums.insert(
+                    e.name.clone(),
+                    e.variants.iter().map(|v| v.name.clone()).collect(),
+                );
+                ck.declare_pkg_name(&e.name, "enum", e.span);
+            }
+            Decl::TypeAlias(ta) => {
+                ck.type_aliases.insert(ta.name.clone(), ta.ty.clone());
+                ck.declare_pkg_name(&ta.name, "type", ta.span);
+            }
         }
     }
 
@@ -654,7 +670,16 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 }
             }
 
-            // If-init Locals, match arms, defer, exprs, blocks: already
+            // T13/T14/T15 (`HYB-E5001`): match exhaustiveness and `_` arm placement.
+            Stmt::Match {
+                subject,
+                arms,
+                span,
+            } => {
+                ck.check_match(&st, subject, arms, *span);
+            }
+
+            // If-init Locals, defer, exprs, blocks: already
             // covered by the flat walk (init is its own statement entry)
             // and the uses/calls collected above.
             _ => {}
@@ -2983,6 +3008,146 @@ mod tests {
              }",
         );
         assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #143: T13/T14/T15 (`HYB-E5001`) match exhaustiveness & `_`
+    // placement + N3 (`HYB-E4002`) enum/struct zero-value checks (R1–R6).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn match_exhaustiveness_and_wildcard_placement_reject_e5001() {
+        // R1: option match with only `none` arm rejects with HYB-E5001
+        let r1 = check(
+            "fn main() {\n\
+               var x option[int] = some(1)\n\
+               match x {\n\
+                 none: fmt.println(\"none\")\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r1.verdict, Verdict::Reject, "{:?}", r1.diagnostics);
+        assert_eq!(r1.diagnostics[0].code, "HYB-E5001");
+        assert!(r1.diagnostics[0].message.contains("some(v)"));
+
+        // R2: option match with only `some(v)` arm rejects with HYB-E5001
+        let r2 = check(
+            "fn main() {\n\
+               var x option[int] = some(1)\n\
+               match x {\n\
+                 some(v): fmt.println(v)\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r2.verdict, Verdict::Reject, "{:?}", r2.diagnostics);
+        assert_eq!(r2.diagnostics[0].code, "HYB-E5001");
+        assert!(r2.diagnostics[0].message.contains("none"));
+
+        // R3: enum match missing variants rejects with HYB-E5001 naming missing variants
+        let r3 = check(
+            "enum shape {\n\
+               circle(f64)\n\
+               square(f64)\n\
+               point\n\
+             }\n\
+             fn area(s shape) {\n\
+               match s {\n\
+                 circle(r): fmt.println(r)\n\
+               }\n\
+             }\n\
+             fn main() {}",
+        );
+        assert_eq!(r3.verdict, Verdict::Reject, "{:?}", r3.diagnostics);
+        assert_eq!(r3.diagnostics[0].code, "HYB-E5001");
+        assert!(r3.diagnostics[0].message.contains("square"));
+        assert!(r3.diagnostics[0].message.contains("point"));
+
+        // R4: `_` not last (or only arm) rejects with HYB-E5001
+        let r4 = check(
+            "fn main() {\n\
+               var x option[int] = some(1)\n\
+               match x {\n\
+                 _: fmt.println(\"wild\")\n\
+                 some(v): fmt.println(v)\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r4.verdict, Verdict::Reject, "{:?}", r4.diagnostics);
+        assert_eq!(r4.diagnostics[0].code, "HYB-E5001");
+
+        // Positive controls: exhaustive option match (`some(v)` + `none`, or `some(v)` + `_`)
+        // and exhaustive enum match accept with 0 diagnostics.
+        let r_ok_opt = check(
+            "fn main() {\n\
+               var x option[int] = some(1)\n\
+               match x {\n\
+                 some(v): fmt.println(v)\n\
+                 _: fmt.println(\"none\")\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r_ok_opt.verdict, Verdict::Accept, "{:?}", r_ok_opt.diagnostics);
+
+        let r_ok_enum = check(
+            "enum shape {\n\
+               point\n\
+               circle(f64)\n\
+               square(f64)\n\
+             }\n\
+             fn area(s shape) {\n\
+               match s {\n\
+                 point: fmt.println(0)\n\
+                 circle(r): fmt.println(r)\n\
+                 square(w): fmt.println(w)\n\
+               }\n\
+             }\n\
+             fn main() {}",
+        );
+        assert_eq!(r_ok_enum.verdict, Verdict::Accept, "{:?}", r_ok_enum.diagnostics);
+    }
+
+    #[test]
+    fn enum_and_struct_without_zero_value_reject_e4002() {
+        // R5: enum whose first variant carries a payload has no zero value (N3 -> HYB-E4002)
+        let r5 = check(
+            "enum shape {\n\
+               circle(f64)\n\
+               point\n\
+             }\n\
+             fn main() {\n\
+               var s shape\n\
+               fmt.println(s)\n\
+             }",
+        );
+        assert_eq!(r5.verdict, Verdict::Reject, "{:?}", r5.diagnostics);
+        assert_eq!(r5.diagnostics[0].code, "HYB-E4002");
+
+        // R6: struct containing a field whose type has no zero value also rejects (N3 -> HYB-E4002)
+        let r6 = check(
+            "enum shape { circle(f64) }\n\
+             struct box { s shape }\n\
+             fn main() {\n\
+               var b box\n\
+               fmt.println(b)\n\
+             }",
+        );
+        assert_eq!(r6.verdict, Verdict::Reject, "{:?}", r6.diagnostics);
+        assert_eq!(r6.diagnostics[0].code, "HYB-E4002");
+
+        // Positive control: enum whose first variant is payload-free HAS a zero value.
+        let r_ok = check(
+            "enum shape {\n\
+               point\n\
+               circle(f64)\n\
+             }\n\
+             struct box { s shape }\n\
+             fn main() {\n\
+               var s shape\n\
+               var b box\n\
+               fmt.println(s, b)\n\
+             }",
+        );
+        assert_eq!(r_ok.verdict, Verdict::Accept, "{:?}", r_ok.diagnostics);
     }
 }
 

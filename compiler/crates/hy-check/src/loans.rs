@@ -765,6 +765,9 @@ impl<'a> Checker<'a> {
         if l.values.is_empty() {
             // `var hits atomic.int64` / `var got []int` — shape from the
             // ascription (there is no initializer to infer from).
+            if let Some(t) = &l.ty {
+                self.check_zero_value_local(l, t);
+            }
             let shape =
                 l.ty.as_ref()
                     .map(|t| self.shape_of_type(t))

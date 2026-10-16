@@ -1543,3 +1543,22 @@ fn e3_hoist_preserves_preceding_operand_evaluation_order() {
         go
     );
 }
+
+#[test]
+fn non_exhaustive_option_match_errors_cleanly_in_emitter() {
+    // Defense-in-depth (#143 R1/R2): even if `emit_go` is called directly
+    // without running `hy-check`, a `none`-only or `some(v)`-only match must
+    // return a clean `EmitError::unsupported` citing HYB-E5001, never an
+    // orphan `} else {` or silent single-arm branch.
+    let msg_none_only = emit_err(
+        "fn main() {\n    var x option[int] = some(1)\n    match x {\n        none: fmt.println(\"none\")\n    }\n}\n",
+    );
+    assert!(msg_none_only.contains("HYB-E5001"), "{}", msg_none_only);
+    assert!(msg_none_only.contains("some(v)"), "{}", msg_none_only);
+
+    let msg_some_only = emit_err(
+        "fn main() {\n    var x option[int] = some(1)\n    match x {\n        some(v): fmt.println(v)\n    }\n}\n",
+    );
+    assert!(msg_some_only.contains("HYB-E5001"), "{}", msg_some_only);
+    assert!(msg_some_only.contains("none"), "{}", msg_some_only);
+}
