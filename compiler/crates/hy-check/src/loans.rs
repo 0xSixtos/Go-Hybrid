@@ -1144,17 +1144,22 @@ impl<'a> Checker<'a> {
     /// binding must freeze the other (O5.2). A primitive-element slice
     /// (`[]int`) copies by value and shares nothing, so no edge is recorded
     /// and the positive control stays accepted.
-    fn record_copy_may_share(&self, st: &mut FnState, cr: &CallRef) {
+    pub(crate) fn record_copy_may_share(&self, st: &mut FnState, cr: &CallRef) {
         let (Some(dst), Some(src)) = (cr.args.first(), cr.args.get(1)) else {
             return;
         };
         // A slice shape is always a reference (`shape_may_share(Slice)` is
         // unconditional), so consult the ELEMENT shape instead: only a
-        // reference-bearing element is copied by reference.
-        let TypeShape::Slice(elem) = self.shape_of_expr(st, unwrap_parens(&dst.value)) else {
-            return;
-        };
-        if !self.shape_may_share(&elem) {
+        // reference-bearing element is copied by reference. Check both `dst`
+        // and `src` so an untyped/unknown slice on one side still records the
+        // edge when the other side's element type is known to share.
+        let elem_shares = [&dst.value, &src.value].into_iter().any(|arg| {
+            matches!(
+                self.shape_of_expr(st, unwrap_parens(arg)),
+                TypeShape::Slice(elem) if self.shape_may_share(&elem)
+            )
+        });
+        if !elem_shares {
             return;
         }
         let mut dst_roots = Vec::new();
@@ -1851,7 +1856,15 @@ impl<'a> Checker<'a> {
 
             if check_writes {
                 let mut calls = Vec::new();
-                walk::own_calls(stmt, &mut calls);
+                if let Stmt::For {
+                    kind: hy_syntax::ForKind::Iterate { expr, .. },
+                    ..
+                } = stmt
+                {
+                    walk::expr_calls(expr, &mut calls);
+                } else {
+                    walk::own_calls(stmt, &mut calls);
+                }
                 for cr in &calls {
                     self.check_delete_const(&cst, cr, &HashSet::new());
                 }
