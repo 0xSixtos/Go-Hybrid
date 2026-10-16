@@ -108,6 +108,7 @@ impl Emitter {
                                  — the loop label would have no target (LX14)",
                             ));
                         }
+                        self.flush_loans_for_loop(true);
                         let name = self
                             .loop_labels
                             .last()
@@ -115,7 +116,10 @@ impl Emitter {
                             .unwrap_or_else(|| "hyLoop".to_string());
                         self.push(&format!("break {}", name));
                     }
-                    None => self.push("break"),
+                    None => {
+                        self.flush_loans_for_loop(false);
+                        self.push("break");
+                    }
                 }
                 Ok(())
             }
@@ -128,6 +132,7 @@ impl Emitter {
                                  closure — the loop label would have no target (LX14)",
                             ));
                         }
+                        self.flush_loans_for_loop(true);
                         let name = self
                             .loop_labels
                             .last()
@@ -135,7 +140,10 @@ impl Emitter {
                             .unwrap_or_else(|| "hyLoop".to_string());
                         self.push(&format!("continue {}", name));
                     }
-                    None => self.push("continue"),
+                    None => {
+                        self.flush_loans_for_loop(false);
+                        self.push("continue");
+                    }
                 }
                 Ok(())
             }
@@ -1251,7 +1259,9 @@ impl Emitter {
 
     /// Every block body goes through this: a loan frame is pushed, the
     /// statements render, and the frame's store-backs flush at the block's
-    /// end (before the closing brace). This is what makes the O8 slot-loan
+    /// end (before the closing brace) unless the block already terminated via
+    /// `return`, `break`, or `continue` (which flush active loans before the
+    /// control-flow transfer, #203). This is what makes the O8 slot-loan
     /// desugar sound: mutations through the loaned copy persist exactly for
     /// the loan's lexical window.
     pub fn emit_block_body(&mut self, stmts: &[Stmt]) -> Result<(), EmitError> {
@@ -1261,11 +1271,73 @@ impl Emitter {
             self.emit_stmt(st)?;
         }
         let frame = self.loan_frames.pop().unwrap_or_default();
-        for (name, place) in frame {
-            self.push(&format!("{} = {}", place, name));
+        if !stmts.iter().any(Self::stmt_terminates) {
+            for (name, place) in frame {
+                if !name.is_empty() {
+                    self.push(&format!("{} = {}", place, name));
+                }
+            }
         }
         self.indent -= 1;
         Ok(())
+    }
+
+    fn block_terminates(b: &Block) -> bool {
+        b.stmts.iter().any(Self::stmt_terminates)
+    }
+
+    fn stmt_terminates(s: &Stmt) -> bool {
+        match s {
+            Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => true,
+            Stmt::Block { block, .. } | Stmt::Managed { body: block, .. } => {
+                Self::block_terminates(block)
+            }
+            Stmt::If {
+                then,
+                otherwise: Some(else_stmt),
+                ..
+            } => Self::block_terminates(then) && Self::stmt_terminates(else_stmt),
+            Stmt::Match { arms, .. } => {
+                !arms.is_empty()
+                    && arms
+                        .iter()
+                        .all(|a| a.guard.is_none() && Self::block_terminates(&a.body))
+            }
+            _ => false,
+        }
+    }
+
+    fn flush_loans_for_return(&mut self) {
+        let mut stores: Vec<(String, String)> = Vec::new();
+        for frame in self.loan_frames.iter().rev() {
+            if frame.first().map(|(n, _)| n.is_empty()).unwrap_or(false) {
+                continue;
+            }
+            for (name, place) in frame {
+                stores.push((name.clone(), place.clone()));
+            }
+        }
+        for (name, place) in stores {
+            self.push(&format!("{} = {}", place, name));
+        }
+    }
+
+    fn flush_loans_for_loop(&mut self, labeled: bool) {
+        let mut stores: Vec<(String, String)> = Vec::new();
+        for frame in self.loan_frames.iter().rev() {
+            if frame.first().map(|(n, _)| n.is_empty()).unwrap_or(false) {
+                if !labeled || !frame[0].1.is_empty() {
+                    break;
+                }
+                continue;
+            }
+            for (name, place) in frame {
+                stores.push((name.clone(), place.clone()));
+            }
+        }
+        for (name, place) in stores {
+            self.push(&format!("{} = {}", place, name));
+        }
     }
 
     fn emit_for(&mut self, kind: &ForKind, body: &Block) -> Result<(), EmitError> {
@@ -1440,7 +1512,10 @@ impl Emitter {
         };
         self.push(&head);
         self.for_depth += 1;
+        let sentinel_label = label.clone().unwrap_or_default();
+        self.loan_frames.push(vec![(String::new(), sentinel_label)]);
         let body_r = self.emit_block_body(&body.stmts);
+        self.loan_frames.pop();
         self.for_depth -= 1;
         body_r?;
         self.push("}");
@@ -1496,6 +1571,7 @@ impl Emitter {
     // -----------------------------------------------------------------------
 
     fn emit_return(&mut self, values: &[Expr]) -> Result<(), EmitError> {
+        self.flush_loans_for_return();
         for (idx, v) in values.iter().enumerate() {
             let later_has_try = values[idx + 1..].iter().any(Self::expr_has_hoistable_try);
             if later_has_try {

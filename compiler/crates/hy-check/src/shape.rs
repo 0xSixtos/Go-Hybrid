@@ -507,7 +507,7 @@ impl<'a> Checker<'a> {
                             },
                             _ => None,
                         })?;
-                    self.methods
+                    self.method_decls
                         .get(&(recv_base, head.to_string()))
                         .and_then(|f| f.results.first())
                         .map(|r| r.ty.clone())
