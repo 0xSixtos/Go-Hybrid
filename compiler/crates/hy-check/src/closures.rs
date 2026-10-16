@@ -134,6 +134,9 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
             // must NOT take the class-4 sendability shortcut.
             let immutable = l.kind == LocalKind::Const;
             if l.values.is_empty() {
+                if let Some(t) = &l.ty {
+                    ck.check_zero_value_local(l, t);
+                }
                 let shape = l
                     .ty
                     .as_ref()
@@ -336,6 +339,14 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
             st.scope_pop();
         }
         Stmt::For { kind, body, .. } => {
+            let outer_depth = st.scopes.len();
+            let pre_moved: std::collections::HashSet<String> = st
+                .env
+                .iter()
+                .chain(st.scopes.iter().flat_map(|s| s.iter()))
+                .filter(|(_, b)| b.moved.is_some())
+                .map(|(k, _)| k.clone())
+                .collect();
             st.scope_push(); // the loop vars' scope
             match kind {
                 Iterate { vars, expr } => {
@@ -369,10 +380,33 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
             }
             st.scope_push(); // the body's own scope
             check_body_boundaries(ck, st, body, managed);
+            if !managed {
+                let flat_body = crate::walk::flatten(body);
+                let mut loop_stmts: Vec<(&Stmt, usize)> =
+                    Vec::with_capacity(flat_body.stmts.len() + 1);
+                loop_stmts.push((stmt, 0));
+                for (s, idx) in flat_body.stmts {
+                    loop_stmts.push((s, idx + 1));
+                }
+                let mut reported_backedge = std::collections::HashSet::new();
+                ck.check_loop_backedge(
+                    st,
+                    outer_depth,
+                    &loop_stmts,
+                    body,
+                    &pre_moved,
+                    &mut reported_backedge,
+                );
+            }
             st.scope_pop();
             st.scope_pop();
         }
-        Stmt::Match { arms, .. } => {
+        Stmt::Match {
+            subject,
+            arms,
+            span,
+        } => {
+            ck.check_match(st, subject, arms, *span);
             for arm in arms {
                 st.scope_push();
                 check_body_boundaries(ck, st, &arm.body, managed);
