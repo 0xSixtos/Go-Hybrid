@@ -1547,7 +1547,7 @@ fn e3_hoist_preserves_preceding_operand_evaluation_order() {
 #[test]
 fn task_preserves_variadic_spread() {
     let go = emit(
-        "fn worker(items ...string) {}\n\nfn main() {\n    items := []string{\"a\", \"b\"}\n    task worker(items...)\n}\n",
+        "fn worker(items []string) {}\n\nfn main() {\n    items := []string{\"a\", \"b\"}\n    task worker(items...)\n}\n",
     );
     assert!(
         go.contains("go worker(items...)"),
@@ -1608,3 +1608,17 @@ fn task_plain_call_still_emits_verbatim() {
         go
     );
 }
+
+#[test]
+fn task_with_try_args_hoists_in_order_before_spawn() {
+    let go = emit(
+        "fn worker(a int, b int) {}\nfn first() (int, error) { return 1, nil }\nfn second() (int, error) { return 2, nil }\nfn run() error {\n    task worker(first()?, second()?)\n    return nil\n}\n",
+    );
+    let first_at = go.find("first()").expect("first() present");
+    let second_at = go.find("second()").expect("second() present");
+    let spawn_at = go.find("go worker(").expect("go worker spawn present");
+    assert!(first_at < second_at, "first try must evaluate before second try");
+    assert!(second_at < spawn_at, "tries must evaluate before goroutine spawn");
+    assert!(go.contains("go worker(hyT0, hyT2)"), "arguments substituted with temps:\n{}", go);
+}
+

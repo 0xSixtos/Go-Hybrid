@@ -537,7 +537,7 @@ impl Emitter {
         self.member_name(base, name)
     }
 
-    fn emit_call(&mut self, callee: &Expr, args: &[CallArg]) -> Result<String, EmitError> {
+    pub(crate) fn emit_call(&mut self, callee: &Expr, args: &[CallArg]) -> Result<String, EmitError> {
         // --- make(...): the first argument is a TYPE (bug-#2 fix) ---
         if matches!(callee, Expr::Ident { name, .. } if name == "make") {
             return self.emit_make(args);
