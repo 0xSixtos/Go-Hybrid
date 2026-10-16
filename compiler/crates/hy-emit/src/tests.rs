@@ -571,7 +571,7 @@ fn match_stmt_errors_cleanly() {
 #[test]
 fn select_emits_go_cases() {
     let go = emit(
-        "fn main() {\n    select {\n        v, ok := <-sq:\n            _ = ok\n        <-deadline:\n            _ = deadline\n    }\n}\n",
+        "fn main() {\n    select {\n        v, ok := <-sq:\n            _ = v\n            _ = ok\n        <-deadline:\n            _ = deadline\n    }\n}\n",
     );
     assert!(go.contains("select {"), ":\n{}", go);
     assert!(go.contains("case v, ok := <-sq:"), ":\n{}", go);
@@ -1542,4 +1542,52 @@ fn e3_hoist_preserves_preceding_operand_evaluation_order() {
         "substituted in order:\n{}",
         go
     );
+}
+
+#[test]
+fn select_recv_single_var_unread_drops_to_bare_receive() {
+    let go = emit("fn main() {\n    select {\n        v := <-ch:\n            fmt.println(\"tick\")\n    }\n}\n");
+    assert!(go.contains("case <-ch:"), "unread single binding must lower to bare receive:\n{}", go);
+    assert!(!go.contains("case v"), "must not declare unread variable in case:\n{}", go);
+    assert!(!go.contains(":="), "must not use := with no new variables:\n{}", go);
+}
+
+#[test]
+fn select_recv_single_var_blank_drops_to_bare_receive() {
+    let go = emit("fn main() {\n    select {\n        _ := <-ch:\n            fmt.println(\"tick\")\n    }\n}\n");
+    assert!(go.contains("case <-ch:"), "blank single binding must lower to bare receive:\n{}", go);
+    assert!(!go.contains(":="), "must not use := with blank variable:\n{}", go);
+}
+
+#[test]
+fn select_recv_two_var_neither_read_drops_to_bare_receive() {
+    let go = emit("fn main() {\n    select {\n        v, ok := <-ch:\n            fmt.println(\"tick\")\n    }\n}\n");
+    assert!(go.contains("case <-ch:"), "two unread bindings must drop to bare receive:\n{}", go);
+    assert!(!go.contains("case v"), "must not declare unread variables in case:\n{}", go);
+    assert!(!go.contains(":="), "must not use := with no new variables:\n{}", go);
+}
+
+#[test]
+fn select_recv_two_var_neither_read_explicit_blank() {
+    let go = emit("fn main() {\n    select {\n        _, _ := <-ch:\n            fmt.println(\"tick\")\n    }\n}\n");
+    assert!(go.contains("case <-ch:"), "two blank bindings must drop to bare receive:\n{}", go);
+    assert!(!go.contains(":="), "must not emit invalid `case _, _ := <-ch:`:\n{}", go);
+}
+
+#[test]
+fn select_recv_two_var_first_only_read_blanks_second() {
+    let go = emit("fn main() {\n    select {\n        v, ok := <-ch:\n            fmt.println(\"{v}\")\n    }\n}\n");
+    assert!(go.contains("case v, _ := <-ch:"), "unread second binding must be blanked:\n{}", go);
+}
+
+#[test]
+fn select_recv_two_var_second_only_read_blanks_first() {
+    let go = emit("fn main() {\n    select {\n        v, ok := <-ch:\n            if ok {\n                fmt.println(\"open\")\n            }\n    }\n}\n");
+    assert!(go.contains("case _, ok := <-ch:"), "unread first binding must be blanked:\n{}", go);
+}
+
+#[test]
+fn select_recv_two_var_both_read_kept_intact() {
+    let go = emit("fn main() {\n    select {\n        v, ok := <-ch:\n            if ok {\n                fmt.println(\"{v}\")\n            }\n    }\n}\n");
+    assert!(go.contains("case v, ok := <-ch:"), "both read bindings must remain intact:\n{}", go);
 }

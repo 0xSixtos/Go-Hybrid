@@ -158,8 +158,42 @@ impl Emitter {
                             let c = self.emit_expr(chan, 0)?;
                             let head = match names.len() {
                                 0 => format!("case <-{}:", c),
-                                1 => format!("case {} := <-{}:", names[0], c),
-                                2 => format!("case {}, {} := <-{}:", names[0], names[1], c),
+                                1 => {
+                                    // An unread or blank single binding cannot emit
+                                    // `case _ := <-c:` (Go rejects: `no new variables on
+                                    // left side of :=`) or `case v := <-c:` (Go rejects:
+                                    // `v declared and not used`). Lower to bare receive.
+                                    let read = names[0] != "_"
+                                        && crate::rangebind::body_reads(&arm.body, &names[0]);
+                                    if read {
+                                        format!("case {} := <-{}:", names[0], c)
+                                    } else {
+                                        format!("case <-{}:", c)
+                                    }
+                                }
+                                2 => {
+                                    // Go rejects unread receive bindings (`declared and
+                                    // not used`) and rejects `case _, _ := <-c:` (`no new
+                                    // variables on left side of :=`).
+                                    // If both unread, drop to bare receive. If one is read,
+                                    // blank the unread slot with `_`.
+                                    let a_read = names[0] != "_"
+                                        && crate::rangebind::body_reads(&arm.body, &names[0]);
+                                    let b_read = names[1] != "_"
+                                        && crate::rangebind::body_reads(&arm.body, &names[1]);
+                                    match (a_read, b_read) {
+                                        (true, true) => {
+                                            format!("case {}, {} := <-{}:", names[0], names[1], c)
+                                        }
+                                        (true, false) => {
+                                            format!("case {}, _ := <-{}:", names[0], c)
+                                        }
+                                        (false, true) => {
+                                            format!("case _, {} := <-{}:", names[1], c)
+                                        }
+                                        (false, false) => format!("case <-{}:", c),
+                                    }
+                                }
                                 n => {
                                     return Err(EmitError::unsupported(format!(
                                         "select receive with {} names",
