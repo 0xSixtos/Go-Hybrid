@@ -432,7 +432,7 @@ impl<'a> Checker<'a> {
                         .iter()
                         .any(|s| s.contains_key(lhs.as_str()));
                     if is_inner
-                        && matches!(crate::model::unwrap_parens(rhs), Expr::Call { .. })
+                        && self.call_returns_fresh_copy(rhs)
                         && st.aliases.contains_key(lhs.as_str())
                     {
                         call_local_roots.insert(resolve_alias(st, lhs));
@@ -494,6 +494,10 @@ impl<'a> Checker<'a> {
                         clear_names.push(a.clone());
                     }
                 }
+                let seeded = clear_names.clone();
+                for m in seeded {
+                    clear_names.extend(iter_st.share_group(&m));
+                }
                 for k in &clear_names {
                     if let Some(b) = iter_st.env_lookup_mut(k) {
                         b.moved = None;
@@ -512,6 +516,111 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+    }
+
+    /// True only when `expr` calls a file-local function whose return statements
+    /// all construct a fresh value-element slice via `append([]T{}, ...)` (such
+    /// as corpus 15's `chunk_of`), so the returned slice cannot share mutable
+    /// backing storage with the caller's argument across loop iterations (#194).
+    fn call_returns_fresh_copy(&self, expr: &Expr) -> bool {
+        let Expr::Call { callee, .. } = crate::model::unwrap_parens(expr) else {
+            return false;
+        };
+        let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) else {
+            return false;
+        };
+        let Some(fdecl) = self.fns.get(name.as_str()) else {
+            return false;
+        };
+        if fdecl.results.len() != 1 {
+            return false;
+        }
+        let ret_shape = self.shape_of_type(&fdecl.results[0].ty);
+        let crate::model::TypeShape::Slice(elem) = ret_shape else {
+            return false;
+        };
+        if self.shape_may_share(&elem) || matches!(*elem, crate::model::TypeShape::Unknown) {
+            return false;
+        }
+        let Some(body) = &fdecl.body else {
+            return false;
+        };
+        let mut saw_return = false;
+        if !Self::block_returns_only_fresh_append(body, &mut saw_return) {
+            return false;
+        }
+        saw_return
+    }
+
+    fn block_returns_only_fresh_append(block: &hy_syntax::Block, saw_return: &mut bool) -> bool {
+        for stmt in &block.stmts {
+            match stmt {
+                hy_syntax::Stmt::Return { values, .. } => {
+                    *saw_return = true;
+                    if values.len() != 1 || !Self::is_fresh_empty_slice_append(&values[0]) {
+                        return false;
+                    }
+                }
+                hy_syntax::Stmt::If {
+                    then, otherwise, ..
+                } => {
+                    if !Self::block_returns_only_fresh_append(then, saw_return) {
+                        return false;
+                    }
+                    if let Some(o) = otherwise {
+                        let dummy_block = hy_syntax::Block {
+                            stmts: vec![(**o).clone()],
+                            span: o.span(),
+                        };
+                        if !Self::block_returns_only_fresh_append(&dummy_block, saw_return) {
+                            return false;
+                        }
+                    }
+                }
+                hy_syntax::Stmt::For { body, .. } | hy_syntax::Stmt::Managed { body, .. } => {
+                    if !Self::block_returns_only_fresh_append(body, saw_return) {
+                        return false;
+                    }
+                }
+                hy_syntax::Stmt::Block { block, .. } => {
+                    if !Self::block_returns_only_fresh_append(block, saw_return) {
+                        return false;
+                    }
+                }
+                hy_syntax::Stmt::Match { arms, .. } => {
+                    for arm in arms {
+                        if !Self::block_returns_only_fresh_append(&arm.body, saw_return) {
+                            return false;
+                        }
+                    }
+                }
+                hy_syntax::Stmt::Select { arms, .. } => {
+                    for arm in arms {
+                        if !Self::block_returns_only_fresh_append(&arm.body, saw_return) {
+                            return false;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+
+    fn is_fresh_empty_slice_append(expr: &Expr) -> bool {
+        let Expr::Call { callee, args, .. } = crate::model::unwrap_parens(expr) else {
+            return false;
+        };
+        let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) else {
+            return false;
+        };
+        if name != "append" || args.is_empty() {
+            return false;
+        }
+        matches!(
+            crate::model::unwrap_parens(&args[0].value),
+            Expr::SliceLit { items, .. } if items.is_empty()
+        )
     }
 }
 
