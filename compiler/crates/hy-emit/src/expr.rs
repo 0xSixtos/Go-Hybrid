@@ -40,6 +40,9 @@ impl Emitter {
     /// The full expression emitter. `min_prec` = the precedence the CALLER
     /// requires; lower-precedence children parenthesize themselves.
     pub fn emit_expr(&mut self, e: &Expr, min_prec: u8) -> Result<String, EmitError> {
+        if let Some(t) = self.expr_temps.get(&Self::expr_key(e)) {
+            return Ok(t.clone());
+        }
         let text = self.emit_expr_inner(e)?;
         let my = self.top_prec(e);
         if my < min_prec {
@@ -332,11 +335,9 @@ impl Emitter {
                 // Redirect statement output into a scratch buffer: the
                 // literal renders inline, its body keeps normal indents.
                 let main_body = std::mem::take(&mut self.body);
-                self.indent += 1;
-                for st in &body.stmts {
-                    self.emit_stmt(st)?;
-                }
-                self.indent -= 1;
+                let saved_loans = std::mem::take(&mut self.loan_frames);
+                self.emit_block_body(&body.stmts)?;
+                self.loan_frames = saved_loans;
                 let closure_body = std::mem::take(&mut self.body);
                 self.body = main_body;
                 self.fnlit_depth -= 1;
@@ -352,6 +353,9 @@ impl Emitter {
             }
 
             Expr::Paren { inner, .. } => {
+                if let Some(t) = self.expr_temps.get(&Self::expr_key(inner)) {
+                    return Ok(t.clone());
+                }
                 let i = self.emit_expr(inner, 0)?;
                 Ok(format!("({})", i))
             }
