@@ -2469,6 +2469,9 @@ mod tests {
 
     #[test]
     fn multi_return_assign_preserves_second_result_shape_and_rejects_spawn() {
+        // Fixture seam-fix for #134: `n` is only stored to (a bare `=`
+        // target is not a Go read), so `_ = n` keeps the snippet a valid
+        // program and the E3001 spawn check first.
         let r = check(
             "fn make_pair() (int, map[string]int) {\n\
                m := map[string]int{\"init\": 0}\n\
@@ -2479,6 +2482,7 @@ mod tests {
                m := map[string]int{\"init\": 0}\n\
                n := 0\n\
                n, m = make_pair()\n\
+               _ = n\n\
                task worker(m)\n\
              }",
         );

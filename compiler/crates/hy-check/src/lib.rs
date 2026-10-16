@@ -43,6 +43,7 @@
 //! diagnostics are returned in source order.
 
 mod arith;
+mod buildable;
 mod const_overflow;
 mod closures;
 mod emit_guard;
@@ -100,6 +101,11 @@ pub fn check_file(file: &File) -> CheckResult {
     for f in fns {
         check_fn(&mut ck, f);
     }
+
+    // Issue #134: an accepted program must emit buildable Go — unused `:=`
+    // bindings (incl. `_ := 5`), unused imports, and repeated names on the
+    // left of one `:=` are rejected fail-closed as HYB-E1002.
+    buildable::check_buildable(&mut ck);
 
     let mut diags = ck.diags;
     diags.sort_by(|a, b| {
@@ -1557,11 +1563,15 @@ mod tests {
 
     #[test]
     fn a7_use_after_consuming_rejects() {
+        // Fixture seam-fix for #134: `out` must be read (`_ = out`), or the
+        // snippet itself is a declared-and-not-used program and the HYB-E1002
+        // buildability reject lands first. The A7 consume rule is unchanged.
         let r = check(
             "import \"rust/flate2\"\n\
              fn main() {\n\
                enc := flate2.new_writer(6)?\n\
                out := enc.finish()?\n\
+               _ = out\n\
                enc.write([]byte(\"trailer\"))?\n\
              }",
         );

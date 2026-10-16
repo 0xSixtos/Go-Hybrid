@@ -86,6 +86,23 @@
       "rule": "M"
     },
     {
+      "code": "HYB-E1002",
+      "name": "unbuildable-declaration",
+      "category": "resolve",
+      "severity": "error",
+      "title": "the emitted Go cannot build this declaration",
+      "summary": "Go's front-end rejects three declaration shapes that `hyb check` used to accept with 0 diagnostics, so the emitted module could never build (issue #134): (1) an unused `:=` binding — `x := 5` with no read of `x` is `declared and not used`, and `_ := 5` / `_, _ := ...` declares no new variable at all (`no new variables on left side of :=`); (2) an unused import — the emitter carries every declared Go import into the header, and Go rejects `imported and not used`; (3) a repeated name on the left of one `:=` — `x, x := 1, 2` is `x repeated on left side of :=`. Fail-closed: what the checker accepts must survive `go build`. Out of scope (same Go error family, separate issues): unused `var`/composite-`const` locals, select-receive names, unread `for ... in` bindings (handled at emission, issue #139), and unused `rust/` imports (never emitted as Go imports).",
+      "fixits": [
+        "read the binding — a mention anywhere in the function counts, including inside a closure, and `x++`, `x += 1`, `x[k] = v`, `x.f = v`, `&x` and `_ = x` all count (a bare `x = v` store does not); or drop the declaration",
+        "`_` is not a variable: `_ := 5` can never build — write `_ = 5` to discard the value, or bind a real name",
+        "remove the unused import (the emitted header carries it, and an unused import never builds)",
+        "give each name on the left of `:=` once: `x, y := 1, 2`"
+      ],
+      "example": "x := 5   // reject: HYB-E1002 — `x` is never read; Go refuses the emitted `x := 5`",
+      "rule": "BUILDABLE",
+      "tier0_rule_id": "BUILDABLE"
+    },
+    {
       "code": "HYB-E1003",
       "name": "redeclaration",
       "category": "resolve",
@@ -253,7 +270,6 @@
       "tier0_rule_id": "IMMUT"
     },
     {
-
       "code": "HYB-E3007",
       "name": "send-target-not-channel",
       "category": "ownership-sendability",
@@ -268,7 +284,6 @@
       "rule": "O4",
       "tier0_rule_id": "A1c"
     },
-
     {
       "code": "HYB-E3010",
       "name": "loop-label-out-of-scope",
@@ -405,7 +420,6 @@
       "rule": "T"
     },
     {
-
       "code": "HYB-E6001",
       "name": "div-by-const-zero",
       "category": "overflow-bounds",
