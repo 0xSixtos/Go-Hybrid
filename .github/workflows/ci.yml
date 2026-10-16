@@ -39,6 +39,7 @@ jobs:
 =======
 >>>>>>> main
           python3 -m unittest discover -s tools -p test_corpus_harness.py -v
+          python3 -m unittest discover -s tools -p 'test_job*.py' -v
           # runner self-test: execute a trivial inline job end-to-end
           mkdir -p /tmp/selftest && cd /tmp/selftest
           cat > job.json <<'EOF'
