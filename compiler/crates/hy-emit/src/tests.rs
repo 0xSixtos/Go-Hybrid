@@ -1543,3 +1543,38 @@ fn e3_hoist_preserves_preceding_operand_evaluation_order() {
         go
     );
 }
+
+#[test]
+fn explicit_multi_segment_go_import_emits_full_path() {
+    let go = emit("import \"crypto/sha256\"\n\nfn main() {\n    _ = sha256.new()\n}\n");
+    assert!(
+        go.contains("\"crypto/sha256\""),
+        "must emit full package path, got:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("\n\t\"sha256\"\n"),
+        "must not strip directory prefix to unresolvable root:\n{}",
+        go
+    );
+}
+
+#[test]
+fn explicit_nested_stdlib_and_third_party_imports_preserved() {
+    let go = emit("import \"encoding/json\"\nimport \"net/url\"\n\nfn main() {\n    _ = json.marshal(\"hi\")\n    _ = url.parse(\"http://example.com\")\n}\n");
+    assert!(
+        go.contains("\"encoding/json\""),
+        "must preserve encoding/json import path:\n{}",
+        go
+    );
+    assert!(
+        go.contains("\"net/url\""),
+        "must preserve net/url import path:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("\n\t\"json\"\n") && !go.contains("\n\t\"url\"\n"),
+        "must not emit naked stripped roots:\n{}",
+        go
+    );
+}
