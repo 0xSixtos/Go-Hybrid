@@ -37,6 +37,7 @@
 //! every rejection teaches (O17 — fix-its come from the hy-diag registry);
 //! diagnostics are returned in source order.
 
+mod addr_loan;
 mod arith;
 mod const_overflow;
 mod closures;
@@ -219,6 +220,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     "method receiver `{}` (the caller retains the receiver across intra-task calls)",
                     r.name
                 )),
+                slot_loan: false,
             },
         );
     }
@@ -236,6 +238,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     "parameter `{}` (the caller retains the argument across intra-task calls)",
                     p.name
                 )),
+                slot_loan: false,
             },
         );
     }
@@ -394,6 +397,8 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         let mut uses = Vec::new();
         walk::own_uses(stmt, &mut uses);
         ck.check_uses(&st, &uses);
+        // T24: no address-of on a map-slot loan (HYB-E3104).
+        ck.check_addr_of_loan(&st, &uses);
 
         // Issue #149: `/` or `%` by a literal 0 must not be accepted —
         // Go refuses to compile the emitted expression.
@@ -426,6 +431,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             Stmt::Local(l) => {
                 ck.process_local(&mut st, l, idx, managed);
                 ck.record_local_borrow_aliases(&mut st, l);
+                ck.mark_slot_loans_local(&mut st, l);
             }
 
             Stmt::Assign {
@@ -436,6 +442,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             } => {
                 ck.process_assign(&mut st, targets, *op, values, *span, idx);
                 ck.record_assign_borrow_aliases(&mut st, targets, *op, values);
+                ck.mark_slot_loans_assign(&mut st, targets, *op, values);
             }
 
             Stmt::Return { values, .. } => ck.process_return(&mut st, values),

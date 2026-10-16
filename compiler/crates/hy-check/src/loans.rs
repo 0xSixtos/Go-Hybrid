@@ -1278,6 +1278,7 @@ impl<'a> Checker<'a> {
                 managed_taint: managed, // O6.2: born inside `managed {}`
                 moved: None,
                 non_owned_origin,
+                slot_loan: false,
             },
         );
     }
@@ -2075,6 +2076,7 @@ impl<'a> Checker<'a> {
             managed_taint: false,
             moved: None,
             non_owned_origin,
+            slot_loan: false,
         }
     }
 }
