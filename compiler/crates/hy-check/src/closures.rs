@@ -96,9 +96,7 @@ fn check_body_boundaries(ck: &mut Checker<'_>, st: &mut FnState, block: &Block, 
     }
 }
 
-fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, managed: bool) {
-    // Check uses on every statement in the closure BEFORE any new defines or
-    // move transfers on this statement take effect (#29).
+fn check_stmt_own_uses(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, managed: bool) {
     let mut uses = Vec::new();
     crate::walk::own_uses(stmt, &mut uses);
     if !managed {
@@ -124,6 +122,15 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
         }
     }
     ck.check_uses(st, &uses);
+}
+
+fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, managed: bool) {
+    // Check uses on every statement in the closure BEFORE any new defines or
+    // move transfers on this statement take effect (#29). For `Stmt::If`,
+    // `init` executes BEFORE `cond`, so `cond`'s uses are checked after `init`.
+    if !matches!(stmt, Stmt::If { .. }) {
+        check_stmt_own_uses(ck, st, stmt, managed);
+    }
 
     match stmt {
         Stmt::Local(l) => {
@@ -331,6 +338,7 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
             if let Some(i) = init {
                 check_stmt_boundaries(ck, st, i, managed);
             }
+            check_stmt_own_uses(ck, st, stmt, managed);
             st.scope_push();
             check_body_boundaries(ck, st, then, managed);
             st.scope_pop();
