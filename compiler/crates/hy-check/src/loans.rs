@@ -868,15 +868,45 @@ impl<'a> Checker<'a> {
             }
             let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
             let tys = self.multi_value_tys(st, &l.values[0], l.names.len());
-            for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
-                let (shape, ty) = match (&l.ty, shape) {
-                    (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
-                    (_, s) => (s, ty.or_else(|| l.ty.clone())),
-                };
+            let resolved: Vec<(String, TypeShape, Option<hy_syntax::TypeExpr>, Option<String>)> = l
+                .names
+                .iter()
+                .zip(shapes)
+                .zip(tys)
+                .map(|((name, shape), ty)| {
+                    let (shape, ty) = match (&l.ty, shape) {
+                        (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
+                        (_, s) => (s, ty.or_else(|| l.ty.clone())),
+                    };
+                    let shadowed = if self.shape_may_share(&shape)
+                        && self.value_reads_storage_of(st, &l.values[0], name)
+                    {
+                        self.non_owned_origin_of(st, name).map(|(o, via_share)| {
+                            if via_share && !o.starts_with("a may-share peer of ") {
+                                format!("a may-share peer of {}", o)
+                            } else {
+                                o
+                            }
+                        })
+                    } else {
+                        None
+                    };
+                    (name.clone(), shape, ty, shadowed)
+                })
+                .collect();
+            for (name, shape, ty, shadowed_origin) in resolved {
                 let is_view = matches!(shape, TypeShape::BorrowHandle(_));
-                self.define_binding(st, name, shape, ty, immutable, managed);
+                self.define_binding(st, &name, shape.clone(), ty, immutable, managed);
                 if is_view {
-                    self.extend_call_loans_to_view(st, &l.values[0], name, idx);
+                    self.extend_call_loans_to_view(st, &l.values[0], &name, idx);
+                }
+                self.record_multi_value_share_and_alias(st, &name, &shape, &l.values[0]);
+                if let Some(origin) = shadowed_origin {
+                    if let Some(b) = st.env_lookup_mut(&name) {
+                        if b.non_owned_origin.is_none() {
+                            b.non_owned_origin = Some(origin);
+                        }
+                    }
                 }
             }
         } else {
@@ -1443,6 +1473,70 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Record may-share and alias edges for one target `name` of a multi-value
+    /// define or assignment (`h2, ok := alias_pair(h)`, `m, ok := buckets[k]`)
+    /// using that target's resolved `shape` (#75).
+    pub(crate) fn record_multi_value_share_and_alias(
+        &self,
+        st: &mut FnState,
+        name: &str,
+        shape: &TypeShape,
+        value: &Expr,
+    ) {
+        if !self.shape_may_share(shape) && !matches!(shape, TypeShape::Unknown) {
+            return;
+        }
+        let mut roots = Vec::new();
+        collect_ref_roots(value, &mut roots);
+        for root in &roots {
+            if root == name {
+                continue;
+            }
+            if let Some(b) = self.lookup_binding(st, root) {
+                if b.shape.is_handle()
+                    && !self.shape_carries_handle(shape)
+                    && !matches!(shape, TypeShape::Unknown)
+                {
+                    continue;
+                }
+                if self.shape_may_share(&b.shape) {
+                    st.share_edge(name, root);
+                }
+            }
+        }
+        if shape.is_reference_alias() || matches!(shape, TypeShape::OwnHandle(_)) {
+            for src in &roots {
+                if src == name {
+                    continue;
+                }
+                let matched = self.lookup_binding(st, src).map(|b| {
+                    let ok = if matches!(shape, TypeShape::OwnHandle(_)) {
+                        self.shape_carries_handle(&b.shape)
+                    } else {
+                        b.shape.is_reference_alias()
+                    };
+                    (ok, b.non_owned_origin.clone())
+                });
+                if let Some((true, origin)) = matched {
+                    st.aliases.insert(name.to_string(), src.clone());
+                    if let Some(origin) = origin {
+                        if let Some(nb) = st.env_lookup_mut(name) {
+                            nb.non_owned_origin = Some(origin);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        if let Some(origin) = self.moved_non_owned_origin_in_expr(st, value) {
+            if let Some(nb) = st.env_lookup_mut(name) {
+                if nb.non_owned_origin.is_none() {
+                    nb.non_owned_origin = Some(origin);
+                }
+            }
+        }
+    }
+
     pub(crate) fn define_binding(
         &self,
         st: &mut FnState,
@@ -1452,6 +1546,47 @@ impl<'a> Checker<'a> {
         immutable: bool,
         managed: bool,
     ) {
+        // Issue #75: before a shadowing or same-scope define (`h2 := h;
+        // if true { h := fresh; ... }` or `h2 := h; h, ok := fresh, true`)
+        // clears `name`'s share/alias edges and replaces `name` in the lexical
+        // environment, transfer `name`'s non-owned origin to any existing
+        // may-share peers and direct alias children so they remain non-owned.
+        if let Some((orig, _)) = self.non_owned_origin_of(st, name) {
+            let peer_origin = if orig.starts_with("a may-share peer of ") {
+                orig.clone()
+            } else {
+                format!("a may-share peer of {}", orig)
+            };
+            let peers: Vec<String> = st.share_group(name).into_iter().collect();
+            for peer in peers {
+                if peer == name {
+                    continue;
+                }
+                if let Some(pb) = st.env_lookup_mut(&peer) {
+                    if pb.non_owned_origin.is_none() {
+                        pb.non_owned_origin = Some(peer_origin.clone());
+                    }
+                }
+            }
+            let alias_children: Vec<String> = st
+                .aliases
+                .iter()
+                .filter_map(|(k, v)| {
+                    if v == name && k != name {
+                        Some(k.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for child in alias_children {
+                if let Some(cb) = st.env_lookup_mut(&child) {
+                    if cb.non_owned_origin.is_none() {
+                        cb.non_owned_origin = Some(orig.clone());
+                    }
+                }
+            }
+        }
         st.aliases.remove(name);
         st.share_clear(name);
         let non_owned_origin = if immutable && !shape.is_sendable_by_type() {
@@ -1727,7 +1862,7 @@ impl<'a> Checker<'a> {
                     if !info.reads_self {
                         if let Some((orig, _)) = self.non_owned_origin_of(st, name) {
                             let peer_origin = if orig.starts_with("a may-share peer of ") {
-                                orig
+                                orig.clone()
                             } else {
                                 format!("a may-share peer of {}", orig)
                             };
@@ -1739,6 +1874,24 @@ impl<'a> Checker<'a> {
                                 if let Some(pb) = st.env_lookup_mut(&peer) {
                                     if pb.non_owned_origin.is_none() {
                                         pb.non_owned_origin = Some(peer_origin.clone());
+                                    }
+                                }
+                            }
+                            let alias_children: Vec<String> = st
+                                .aliases
+                                .iter()
+                                .filter_map(|(k, v)| {
+                                    if v == name && k != name {
+                                        Some(k.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            for child in alias_children {
+                                if let Some(cb) = st.env_lookup_mut(&child) {
+                                    if cb.non_owned_origin.is_none() {
+                                        cb.non_owned_origin = Some(orig.clone());
                                     }
                                 }
                             }
@@ -1799,18 +1952,104 @@ impl<'a> Checker<'a> {
         } else if values.len() == 1 && targets.len() > 1 {
             let shapes = self.multi_value_shapes(st, &values[0], targets.len());
             let tys = self.multi_value_tys(st, &values[0], targets.len());
-            for ((t, shape), ty) in targets.iter().zip(shapes).zip(tys) {
+            for (i, ((t, shape), ty)) in targets.iter().zip(shapes).zip(tys).enumerate() {
+                if is_const_write.get(i).copied().unwrap_or(false) {
+                    continue;
+                }
                 if let PlaceKind::Ident(name) = &t.kind {
+                    let reads_self = self.value_reads_storage_of(st, &values[0], name);
+                    let shadowed_origin = if self.shape_may_share(&shape) && reads_self {
+                        self.non_owned_origin_of(st, name).map(|(o, via_share)| {
+                            if via_share && !o.starts_with("a may-share peer of ") {
+                                format!("a may-share peer of {}", o)
+                            } else {
+                                o
+                            }
+                        })
+                    } else {
+                        None
+                    };
+                    let prior_alias = if reads_self {
+                        st.aliases.get(name).cloned()
+                    } else {
+                        None
+                    };
+                    let prior_shares: Vec<String> = if reads_self {
+                        st.may_share
+                            .get(name)
+                            .map(|s| s.iter().cloned().collect())
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    if !reads_self {
+                        if let Some((orig, _)) = self.non_owned_origin_of(st, name) {
+                            let peer_origin = if orig.starts_with("a may-share peer of ") {
+                                orig.clone()
+                            } else {
+                                format!("a may-share peer of {}", orig)
+                            };
+                            let peers: Vec<String> = st.share_group(name).into_iter().collect();
+                            for peer in peers {
+                                if &peer == name {
+                                    continue;
+                                }
+                                if let Some(pb) = st.env_lookup_mut(&peer) {
+                                    if pb.non_owned_origin.is_none() {
+                                        pb.non_owned_origin = Some(peer_origin.clone());
+                                    }
+                                }
+                            }
+                            let alias_children: Vec<String> = st
+                                .aliases
+                                .iter()
+                                .filter_map(|(k, v)| {
+                                    if v == name && k != name {
+                                        Some(k.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            for child in alias_children {
+                                if let Some(cb) = st.env_lookup_mut(&child) {
+                                    if cb.non_owned_origin.is_none() {
+                                        cb.non_owned_origin = Some(orig.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if let Some(b) = st.env_lookup_mut(name) {
                         if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
-                            b.shape = shape;
+                            b.shape = shape.clone();
                         }
                         if ty.is_some() || b.ty.is_none() {
                             b.ty = ty;
                         }
                         b.moved = None;
+                        b.non_owned_origin = None;
                     }
                     st.aliases.remove(name);
+                    st.share_clear(name);
+                    if reads_self {
+                        if let Some(pa) = prior_alias {
+                            if &pa != name {
+                                st.aliases.insert(name.clone(), pa);
+                            }
+                        }
+                        for peer in prior_shares {
+                            st.share_edge(name, &peer);
+                        }
+                    }
+                    self.record_multi_value_share_and_alias(st, name, &shape, &values[0]);
+                    if let Some(origin) = shadowed_origin {
+                        if let Some(b) = st.env_lookup_mut(name) {
+                            if b.non_owned_origin.is_none() {
+                                b.non_owned_origin = Some(origin);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -3283,5 +3522,126 @@ mod tests {
         assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
     }
-}
 
+    #[test]
+    fn param_may_share_peer_survived_inner_shadow_rejects_with_e3004() {
+        let r = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(h holder, done chan int) {\n\
+               h.m[\"worker\"] = 1\n\
+               done <- 1\n\
+             }\n\
+             fn outer(h holder, done chan int) {\n\
+               h2 := h\n\
+               if true {\n\
+                 h := holder{m: map[string]int{\"fresh\": 0}}\n\
+                 _ = h\n\
+                 task worker(move h2, done)\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+            "expected HYB-E3004 when moving parameter may-share peer after inner shadow, got {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn param_may_share_peer_survived_parallel_redefine_rejects_with_e3004() {
+        let r = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(h holder, done chan int) {\n\
+               h.m[\"worker\"] = 1\n\
+               done <- 1\n\
+             }\n\
+             fn outer(h holder, done chan int) {\n\
+               h2 := h\n\
+               h, tag := holder{m: map[string]int{\"fresh\": 0}}, 1\n\
+               _ = h\n\
+               _ = tag\n\
+               task worker(move h2, done)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+            "expected HYB-E3004 when moving parameter may-share peer after multi-define, got {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn multi_return_define_from_param_rejects_may_share_move_with_e3004() {
+        let r = check(
+            "struct holder { m map[string]int }\n\
+             fn alias_pair(h holder) (holder, bool) {\n\
+               return h, true\n\
+             }\n\
+             fn worker(h holder, done chan int) {\n\
+               h.m[\"worker\"] = 1\n\
+               done <- 1\n\
+             }\n\
+             fn outer(h holder, done chan int) {\n\
+               h2, ok := alias_pair(h)\n\
+               _ = ok\n\
+               task worker(move h2, done)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+            "expected HYB-E3004 for multi-return may-share peer of parameter, got {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn multi_return_assign_from_param_rejects_may_share_move_with_e3004() {
+        let r = check(
+            "struct holder { m map[string]int }\n\
+             fn alias_pair(h holder) (holder, bool) {\n\
+               return h, true\n\
+             }\n\
+             fn worker(h holder, done chan int) {\n\
+               h.m[\"worker\"] = 1\n\
+               done <- 1\n\
+             }\n\
+             fn outer(h holder, done chan int) {\n\
+               h2 := holder{m: map[string]int{\"fresh\": 0}}\n\
+               ok := false\n\
+               h2, ok = alias_pair(h)\n\
+               _ = ok\n\
+               task worker(move h2, done)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+            "expected HYB-E3004 for multi-return rebind may-share peer of parameter, got {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn comma_ok_map_lookup_on_param_rejects_move_with_e3004() {
+        let r = check(
+            "fn worker(m map[string]int, done chan int) {\n\
+               m[\"worker\"] = 1\n\
+               done <- 1\n\
+             }\n\
+             fn outer(buckets map[string]map[string]int, done chan int) {\n\
+               m, ok := buckets[\"k\"]\n\
+               _ = ok\n\
+               task worker(move m, done)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+            "expected HYB-E3004 for comma-ok map lookup on non-owned parameter, got {:?}",
+            r.diagnostics
+        );
+    }
+}
