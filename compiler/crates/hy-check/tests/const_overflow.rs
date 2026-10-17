@@ -194,3 +194,119 @@ fn variable_conversion_truncation_still_accepts() {
     );
     assert_eq!(r.verdict, Verdict::Accept);
 }
+
+const OVERFLOW_RETURN: &str = "\
+fn get_b() uint8 {
+    return 300
+}
+fn main() {}
+";
+
+const OVERFLOW_RETURN_NEG: &str = "\
+fn get_b() uint8 {
+    return -1
+}
+fn main() {}
+";
+
+const FITS_RETURN: &str = "\
+fn get_b() uint8 {
+    return 255
+}
+fn main() {}
+";
+
+const OVERFLOW_MULTI_RETURN: &str = "\
+fn get_pair() (int, uint8) {
+    return 1, 300
+}
+fn main() {}
+";
+
+const OVERFLOW_CLOSURE_RETURN: &str = "\
+fn main() {
+    f := fn() uint8 {
+        return 300
+    }
+    _ = f
+}
+";
+
+const OVERFLOW_ALIASED_RETURN: &str = "\
+type my_byte = uint8
+fn get_b() my_byte {
+    return 300
+}
+fn main() {}
+";
+
+#[test]
+fn return_overflow_is_rejected() {
+    let r = check(OVERFLOW_RETURN);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "return 300 for uint8 must emit HYB-E6002, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn return_negative_overflow_is_rejected() {
+    let r = check(OVERFLOW_RETURN_NEG);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "return -1 for uint8 must emit HYB-E6002, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn return_fitting_accepts() {
+    let r = check(FITS_RETURN);
+    assert!(
+        error_codes(&r).is_empty(),
+        "return 255 for uint8 must fit, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+#[test]
+fn multi_return_overflow_is_rejected() {
+    let r = check(OVERFLOW_MULTI_RETURN);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "return 1, 300 for (int, uint8) must emit HYB-E6002, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn closure_return_overflow_is_rejected() {
+    let r = check(OVERFLOW_CLOSURE_RETURN);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "closure return 300 must emit HYB-E6002, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn aliased_return_overflow_is_rejected() {
+    let r = check(OVERFLOW_ALIASED_RETURN);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "return 300 for my_byte must emit HYB-E6002, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}

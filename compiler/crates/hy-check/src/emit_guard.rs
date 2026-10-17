@@ -103,7 +103,11 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::Return { values, .. } => {
-                for v in values {
+                for (i, v) in values.iter().enumerate() {
+                    if let Some(res_ty) = st.result_types.get(i) {
+                        let resolved_ty = self.resolve_type_alias(res_ty);
+                        self.check_const_overflow_init("return statement", &resolved_ty, v);
+                    }
                     self.check_expr_emit_guard(st, v);
                 }
             }
@@ -250,8 +254,10 @@ impl<'a> Checker<'a> {
                     self.check_type_expr(&r.ty);
                 }
                 // Closure bodies are not flattened into Pass B — deep-walk.
+                let mut inner_st = st.clone();
+                inner_st.result_types = results.iter().map(|r| r.ty.clone()).collect();
                 for stmt in &body.stmts {
-                    self.check_stmt_emit_guard_inner(st, stmt, /*deep=*/ true);
+                    self.check_stmt_emit_guard_inner(&inner_st, stmt, /*deep=*/ true);
                 }
             }
             Expr::Ident { .. } | Expr::Lit { .. } => {}
