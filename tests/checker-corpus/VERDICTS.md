@@ -628,3 +628,13 @@ With this addition the registered corpus is **52 programs:
 ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 37** (harness recompute: 52/52
 verdict agreement; tripwire 2/52 = 3.8% verdict-level, 3/52 = 5.8%
 as-written — not fired).
+
+## Additive corpus registration — 2026-10-17: field store materializes may_share (#392)
+
+`h.m = shared` never created the edge from the composite to the live RHS root,
+so `move h` froze `h` but not `shared` and the emitted Go raced.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 53 | 53-field-store-alias-at-spawn | REJECT | A1b | `HYB-E3003` | `var h holder; h.m = shared` then `task worker(move h)` then a write to `shared` |
+| 54 | 54-field-store-fresh-at-spawn | ACCEPT | — | — | the over-rejection guard: a FRESH map literal stored into the field shares nothing |

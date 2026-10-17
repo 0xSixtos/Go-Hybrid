@@ -2125,6 +2125,22 @@ impl<'a> Checker<'a> {
                     // mutation set (or clears it for non-closure values)
                     st.closure_mutates.remove(name);
                     self.record_closure_mutations(st, name, v);
+                } else {
+                    // #392: a store into a field or an index of a composite
+                    // (`h.m = shared`) must materialize the may_share edge
+                    // from the composite's ROOT binding to every live
+                    // reference-bearing root on the RHS. Without the edge the
+                    // composite looks self-contained, so `move h` neither
+                    // reports an unproven spawn nor freezes `shared`, and both
+                    // writers reach the same map (GUARANTEES.md rows 1 and 3).
+                    //
+                    // The guard keeps this narrow: only composites that may
+                    // share mutable GC storage get an edge, so scalar field
+                    // stores (`svc.replicas = n`) stay unedged.
+                    let root = t.root().to_string();
+                    if !root.is_empty() && self.binding_may_share(st, &root) {
+                        self.record_may_share(st, &root, v);
+                    }
                 }
             }
         } else if values.len() == 1 && targets.len() > 1 {
