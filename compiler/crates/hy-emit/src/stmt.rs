@@ -1750,55 +1750,59 @@ impl Emitter {
 
         if has_unguarded_some {
             let else_arm = none_arm.or(wildcard_arm);
-            if some_arms.len() == 1 {
-                let (binding, arm) = some_arms[0];
-                self.push(&format!("if {}.ok {{", temp));
-                self.indent += 1;
-                self.push(&format!("{} := {}.val", binding, temp));
-                for st in &arm.body.stmts {
-                    self.emit_stmt(st)?;
-                }
-                self.indent -= 1;
-            } else {
-                self.push(&format!("if {}.ok {{", temp));
-                self.indent += 1;
-                let primary_binding = some_arms[0].0;
-                self.push(&format!("{} := {}.val", primary_binding, temp));
-                for (i, (binding, arm)) in some_arms.iter().enumerate() {
-                    match &arm.guard {
-                        Some(g) => {
-                            let gt = self.emit_expr(g, 0)?;
-                            if i == 0 {
-                                self.push(&format!("if {} {{", gt));
-                            } else {
-                                self.push(&format!("}} else if {} {{", gt));
-                            }
-                            self.indent += 1;
-                            if binding.as_str() != primary_binding.as_str() {
-                                self.push(&format!("{} := {}", binding, primary_binding));
-                            }
-                            for st in &arm.body.stmts {
-                                self.emit_stmt(st)?;
-                            }
-                            self.indent -= 1;
+            self.push(&format!("if {}.ok {{", temp));
+            self.indent += 1;
+            let primary_binding = some_arms[0].0;
+            self.push(&format!("{} := {}.val", primary_binding, temp));
+            // Arms run top-to-bottom. A guarded arm chains as `if`/`else if`;
+            // the FIRST unguarded `some` arm is the chain's unconditional
+            // catch-all and every arm after it is unreachable, so emission
+            // stops there. When that first arm is itself unguarded (index 0)
+            // it matches whenever `ok` is true, so its body is emitted
+            // directly — the old code always emitted `} else {` for an
+            // unguarded arm, which for an unguarded FIRST arm produced an
+            // orphan `else` with no preceding `if` and Go that does not
+            // compile (HYB accepted the program with 0 diagnostics).
+            let mut chain_opened = false;
+            for (binding, arm) in some_arms.iter() {
+                match &arm.guard {
+                    Some(g) => {
+                        let gt = self.emit_expr(g, 0)?;
+                        if chain_opened {
+                            self.push(&format!("}} else if {} {{", gt));
+                        } else {
+                            self.push(&format!("if {} {{", gt));
                         }
-                        None => {
+                        self.indent += 1;
+                        if binding.as_str() != primary_binding.as_str() {
+                            self.push(&format!("{} := {}", binding, primary_binding));
+                        }
+                        for st in &arm.body.stmts {
+                            self.emit_stmt(st)?;
+                        }
+                        self.indent -= 1;
+                        chain_opened = true;
+                    }
+                    None => {
+                        if chain_opened {
                             self.push("} else {");
                             self.indent += 1;
-                            if binding.as_str() != primary_binding.as_str() {
-                                self.push(&format!("{} := {}", binding, primary_binding));
-                            }
-                            for st in &arm.body.stmts {
-                                self.emit_stmt(st)?;
-                            }
+                        }
+                        if binding.as_str() != primary_binding.as_str() {
+                            self.push(&format!("{} := {}", binding, primary_binding));
+                        }
+                        for st in &arm.body.stmts {
+                            self.emit_stmt(st)?;
+                        }
+                        if chain_opened {
                             self.indent -= 1;
                             self.push("}");
-                            break;
                         }
+                        break; // later some-arms are unreachable
                     }
                 }
-                self.indent -= 1;
             }
+            self.indent -= 1;
             match else_arm {
                 Some(arm) => {
                     self.push("} else {");
