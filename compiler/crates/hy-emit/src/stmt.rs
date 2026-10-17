@@ -79,8 +79,10 @@ impl Emitter {
                 // greppable in the generated source and now carries the
                 // category + reason + tickets (row 14, discussion #4) — a
                 // reviewer greps the GO output, not just the .hy input.
-                let mut marker =
-                    format!("{{ // managed [{}] {} (audited via hyb check --report-managed)", category, reason);
+                let mut marker = format!(
+                    "{{ // managed [{}] {} (audited via hyb check --report-managed)",
+                    category, reason
+                );
                 if !tickets.is_empty() {
                     marker.push_str(&format!(" tickets: {}", tickets.join(", ")));
                 }
@@ -166,8 +168,42 @@ impl Emitter {
                             let c = self.emit_expr(chan, 0)?;
                             let head = match names.len() {
                                 0 => format!("case <-{}:", c),
-                                1 => format!("case {} := <-{}:", names[0], c),
-                                2 => format!("case {}, {} := <-{}:", names[0], names[1], c),
+                                1 => {
+                                    // An unread or blank single binding cannot emit
+                                    // `case _ := <-c:` (Go rejects: `no new variables on
+                                    // left side of :=`) or `case v := <-c:` (Go rejects:
+                                    // `v declared and not used`). Lower to bare receive.
+                                    let read = names[0] != "_"
+                                        && crate::rangebind::body_reads(&arm.body, &names[0]);
+                                    if read {
+                                        format!("case {} := <-{}:", names[0], c)
+                                    } else {
+                                        format!("case <-{}:", c)
+                                    }
+                                }
+                                2 => {
+                                    // Go rejects unread receive bindings (`declared and
+                                    // not used`) and rejects `case _, _ := <-c:` (`no new
+                                    // variables on left side of :=`).
+                                    // If both unread, drop to bare receive. If one is read,
+                                    // blank the unread slot with `_`.
+                                    let a_read = names[0] != "_"
+                                        && crate::rangebind::body_reads(&arm.body, &names[0]);
+                                    let b_read = names[1] != "_"
+                                        && crate::rangebind::body_reads(&arm.body, &names[1]);
+                                    match (a_read, b_read) {
+                                        (true, true) => {
+                                            format!("case {}, {} := <-{}:", names[0], names[1], c)
+                                        }
+                                        (true, false) => {
+                                            format!("case {}, _ := <-{}:", names[0], c)
+                                        }
+                                        (false, true) => {
+                                            format!("case _, {} := <-{}:", names[1], c)
+                                        }
+                                        (false, false) => format!("case <-{}:", c),
+                                    }
+                                }
                                 n => {
                                     return Err(EmitError::unsupported(format!(
                                         "select receive with {} names",
@@ -298,9 +334,7 @@ impl Emitter {
         // E3 expression form (Batch G): `?` nested anywhere else in the
         // values hoists to temp bindings + propagation, then substitutes.
         for (idx, v) in l.values.iter().enumerate() {
-            let later_has_try = l.values[idx + 1..]
-                .iter()
-                .any(Self::expr_has_hoistable_try);
+            let later_has_try = l.values[idx + 1..].iter().any(Self::expr_has_hoistable_try);
             if later_has_try {
                 self.hoist_order_before_try(v)?;
             } else {
@@ -381,9 +415,9 @@ impl Emitter {
                         .map(Self::expr_has_hoistable_try)
                         .unwrap_or(false)
             }
-            Expr::StructLit { fields, .. } => {
-                fields.iter().any(|f| Self::expr_has_hoistable_try(&f.value))
-            }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| Self::expr_has_hoistable_try(&f.value)),
             Expr::SliceLit { items, .. } => items.iter().any(Self::expr_has_hoistable_try),
             Expr::MapLit { entries, .. } => entries
                 .iter()
@@ -1490,10 +1524,7 @@ impl Emitter {
                         v, cont, lo_once, lo_once, hi_once, cont, v
                     )
                 } else {
-                    format!(
-                        "for {} := {}; {} < {}; {}++ {{",
-                        v, lo_t, v, hi_t, v
-                    )
+                    format!("for {} := {}; {} < {}; {}++ {{", v, lo_t, v, hi_t, v)
                 }
             }
             ForKind::Iterate { vars, expr } => {
