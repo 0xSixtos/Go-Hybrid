@@ -177,11 +177,12 @@ fn build_tables(ck: &mut Checker<'_>) {
                 // Issue #148: a file-level `const n int8 = 300` must not
                 // pass the checker and then fail `go build` (overflow).
                 if let Some(ty) = &c.ty {
-                    ck.check_const_overflow_init(&c.name, ty, &c.value);
+                    ck.check_const_overflow_init(&c.name, ty, &c.value, None);
                 }
                 ck.declare_pkg_name(&c.name, "const", c.span);
                 let b = ck.const_binding(c);
                 ck.consts.insert(c.name.clone(), b);
+                ck.const_values.insert(c.name.clone(), &c.value);
                 // Issue #205: file-level `const c = get_val()` must not pass check then fail go build.
                 // Placed after insert so this hook sits below main's E6002 overflow check and
                 // 3-way-merges cleanly (same pattern as PR #191 relocated hooks).

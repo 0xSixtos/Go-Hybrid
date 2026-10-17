@@ -1240,7 +1240,7 @@ impl<'a> Checker<'a> {
                 // Issue #148: constant initializer outside a fixed-width
                 // declared type → HYB-E6002 (Go would refuse to build).
                 if let Some(t) = &l.ty {
-                    self.check_const_overflow_init(name, t, value);
+                    self.check_const_overflow_init(name, t, value, Some(st));
                 }
                 // N1: a bare `nil` initializer under a non-nilable
                 // ascription is a compile error (HYB-E4001) — the SPEC's own

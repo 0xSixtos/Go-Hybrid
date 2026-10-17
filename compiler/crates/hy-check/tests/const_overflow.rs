@@ -194,3 +194,101 @@ fn variable_conversion_truncation_still_accepts() {
     );
     assert_eq!(r.verdict, Verdict::Accept);
 }
+
+// ---------------------------------------------------------------------------
+// W10 (2026-10-17): the E6002 range check is bypassable by a file-level
+// `const` alias: `const big = 300; var n int8 = big` passes `hyb check` and
+// the emitted Go fails `go build` (`cannot use big (untyped int constant 300)
+// as int8 value … (overflows)`). The checker must resolve `const` identifiers
+// to their (constant) initializer before folding. A local binding with the
+// same name shadows the file-level const and must NOT be resolved.
+// ---------------------------------------------------------------------------
+
+const CONST_ALIAS_INT8: &str = "\
+const big = 300
+
+fn main() {
+    var n int8 = big
+    fmt.println(\"{n}\")
+}
+";
+
+const CONST_ALIAS_WIDER_OK: &str = "\
+const big = 300
+
+fn main() {
+    var i int32 = big
+    fmt.println(\"{i}\")
+}
+";
+
+const CONST_ALIAS_SHADOWED_OK: &str = "\
+const big = 300
+
+fn main() {
+    big := int8(1)
+    var n int8 = big
+    fmt.println(\"{n} {big}\")
+}
+";
+
+#[test]
+fn const_alias_overflow_is_rejected() {
+    let r = check(CONST_ALIAS_INT8);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for var n int8 = big (big = 300), got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn const_alias_that_fits_wider_declared_type_accepts() {
+    let r = check(CONST_ALIAS_WIDER_OK);
+    assert!(
+        error_codes(&r).is_empty(),
+        "var i int32 = big (big = 300) must stay accepted, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+#[test]
+fn const_alias_shadowed_by_local_accepts() {
+    // The local `big` shadows the file-level `big = 300`; the initializer
+    // must not be resolved through the const table.
+    let r = check(CONST_ALIAS_SHADOWED_OK);
+    assert!(
+        error_codes(&r).is_empty(),
+        "a local shadowing the const must stay accepted, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+const CONST_ALIAS_CHAIN_SHADOWED: &str = "\
+const a = 300
+const big = a
+
+fn main() {
+    a := int8(1)
+    var n int8 = big
+    fmt.println(\"{n} {a}\")
+}
+";
+
+#[test]
+fn const_alias_chain_with_shadowed_inner_name_is_rejected() {
+    // The local `a` shadows the file-level `a` only at the use site; the
+    // const's own initializer `big = a` still refers to `const a = 300`.
+    let r = check(CONST_ALIAS_CHAIN_SHADOWED);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for big = a = 300 used as int8, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
