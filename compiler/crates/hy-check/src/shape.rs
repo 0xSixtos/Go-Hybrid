@@ -355,6 +355,39 @@ impl<'a> Checker<'a> {
                         return foreign::package_result(b, name);
                     }
                 }
+                // Issue #411/H2: user-defined methods (`c.keys()`).
+                // `receiver_type_name` only keys the FOREIGN method table, so
+                // every user-method call result used to stay `Unknown` —
+                // fail-closing e.g. `for v in c.keys()` as HYB-E3005 — while
+                // `ty_of_expr`'s Call arm resolves the same callee through
+                // `method_decls` (and `loans.rs` does too): `call_shape` was
+                // the one method-call resolution site without it. Mirror that
+                // resolution: the receiver's base name, then the declared
+                // method's first result. A zero-result method falls through
+                // to the original path unchanged.
+                let recv_base = self
+                    .ty_of_expr(st, base)
+                    .map(|t| self.resolve_type_alias(&t))
+                    .and_then(|t| Self::base_named_type(&t))
+                    .or_else(|| match self.shape_of_expr(st, base) {
+                        TypeShape::Struct(Some(s)) => {
+                            Some(Self::base_named_type_str(&s).to_string())
+                        }
+                        TypeShape::Pointer(inner) => match *inner {
+                            TypeShape::Struct(Some(s)) => {
+                                Some(Self::base_named_type_str(&s).to_string())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    });
+                if let Some(rb) = recv_base {
+                    if let Some(decl) = self.method_decls.get(&(rb, name.to_string())) {
+                        if let Some(r) = decl.results.first() {
+                            return self.shape_of_type(&r.ty);
+                        }
+                    }
+                }
                 let recv = self.shape_of_expr(st, base);
                 match receiver_type_name(&recv) {
                     Some(t) => foreign::method_result(&t, name),

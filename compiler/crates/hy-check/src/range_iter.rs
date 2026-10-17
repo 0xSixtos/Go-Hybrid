@@ -8,10 +8,15 @@
 //! passed `hyb check` with 0 diagnostics and emitted `for _, v := range x`
 //! — Go: `cannot range over x`. This mirrors the send-target (#77) and
 //! receive-operand classification:
-//!   * iterable kinds (Slice/Array/Str/Map/Chan/BorrowHandle) pass;
+//!   * iterable kinds (Slice/Array/Str/Map/Chan/BorrowHandle, plus the
+//!     element-source foreign handles) pass;
 //!   * a concrete non-iterable is HYB-E2009;
 //!   * an unresolvable operand stays fail-closed (HYB-E3005, O4.9) — the
 //!     same treatment the send and receive sides give an unknown operand.
+//!
+//! Go's range rule also allows a pointer TO AN ARRAY (`*[N]T`), so exactly
+//! one Pointer level is normalized for arrays — `*struct` / `*slice` /
+//! `*string` stay non-iterable, as in Go.
 //!
 //! `ForKind::Range` (`for i in 0..n`) has no iterable operand and is not
 //! affected. Wiring: the Tier-0 flat walk (lib.rs, per flattened statement)
@@ -37,19 +42,36 @@ impl<'a> Checker<'a> {
     /// Classify a range's ITERABLE — the mirror of `check_send_target`
     /// (issue #411): SPEC-LANGUAGE LX13 allows slices, arrays, strings,
     /// maps, and channels (plus L3 borrow views, which the shape layer
-    /// already iterates — corpus 07/11/12). A concrete non-iterable is
-    /// HYB-E2009; an unresolvable shape is fail-closed HYB-E3005 (O4.9),
-    /// exactly as the send (#77) and receive (#409) sides treat an unknown
-    /// operand. A TYPE contract, not a sendability doubt — `managed` does
-    /// not suppress it.
-    pub(crate) fn check_range_iterable(&mut self, st: &FnState, expr: &Expr, span: Span) -> bool {
-        match self.shape_of_expr(st, expr) {
+    /// already iterates — corpus 07/11/12, and the foreign element-source
+    /// handles the emitter ranges via its ForeignTy branch). A concrete
+    /// non-iterable is HYB-E2009; an unresolvable shape is fail-closed
+    /// HYB-E3005 (O4.9), exactly as the send (#77) and receive (#409)
+    /// sides treat an unknown operand. A TYPE contract, not a sendability
+    /// doubt — `managed` does not suppress it.
+    pub(crate) fn check_range_iterable(&mut self, st: &FnState, expr: &Expr, span: Span) {
+        // Go: "array, pointer to array, slice, string, map, or channel" —
+        // only pointer-to-ARRAY is rangeable (`*struct` / `*slice` /
+        // `*string` are not), so normalize exactly one Pointer level for
+        // arrays and leave every other shape as classified.
+        let shape = match self.shape_of_expr(st, expr) {
+            TypeShape::Pointer(inner) if matches!(*inner, TypeShape::Array(_)) => *inner,
+            other => other,
+        };
+        match shape {
             TypeShape::Slice(_)
             | TypeShape::Array(_)
             | TypeShape::Str
             | TypeShape::Map(_, _)
             | TypeShape::Chan(_)
-            | TypeShape::BorrowHandle(_) => true,
+            // The L3 borrow views (e.g. `doc.array("users")?` — the element
+            // view the emitter iterates; corpus 05/07/11/12). Corpus-driven,
+            // NOT a Go range shape — Go cannot range the view struct itself.
+            | TypeShape::BorrowHandle(_) => {}
+            // The foreign handles the emitter ranges as element sources
+            // (the ForeignTy range branch); `serde_json.value` only —
+            // other handles (`flate2.writer`) are not iterable and fall
+            // through to the concrete-non-iterable arm.
+            TypeShape::OwnHandle(ref t) if crate::foreign::is_iterable_handle(t) => {}
             TypeShape::Unknown => {
                 let msg = format!(
                     "cannot prove `{}` is iterable — `for x in e` needs a slice, array, string, map, or channel (LX13; O4.9)",
@@ -62,7 +84,6 @@ impl<'a> Checker<'a> {
                 self.diags.push(
                     Diagnostic::error("HYB-E3005", self.path.clone(), span, msg).with_notes(notes),
                 );
-                false
             }
             other => {
                 let msg = format!(
@@ -77,7 +98,6 @@ impl<'a> Checker<'a> {
                 self.diags.push(
                     Diagnostic::error("HYB-E2009", self.path.clone(), span, msg).with_notes(notes),
                 );
-                false
             }
         }
     }

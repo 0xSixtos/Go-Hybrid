@@ -196,11 +196,11 @@
       "category": "type",
       "severity": "error",
       "title": "range over a non-iterable",
-      "summary": "`for x in e` where `e` resolves to a concrete non-iterable shape (int, bool, struct, pointer, ...) is rejected: SPEC-LANGUAGE LX13 allows slices, arrays, strings (runes), maps (keys), and channels, and Go refuses `range` over anything else, so an accepted Hybrid program would emit unbuildable Go (issue #411). The integer-range form `for i in 0..n` is a different statement kind and is not affected. An UNRESOLVABLE iterable stays fail-closed under HYB-E3005 (O4.9), exactly as the send (#77) and receive (#409) sides treat an unknown operand.",
+      "summary": "`for x in e` where `e` resolves to a concrete non-iterable shape (int, bool, struct, pointer to a struct/slice/string, ...) is rejected: SPEC-LANGUAGE LX13 allows slices, arrays, strings (runes), maps (keys), and channels, and Go refuses `range` over anything else (a pointer TO AN ARRAY stays rangeable, mirroring Go's range rule), so an accepted Hybrid program would emit unbuildable Go (issue #411). The integer-range form `for i in 0..n` is a different statement kind and is not affected. An UNRESOLVABLE iterable stays fail-closed under HYB-E3005 (O4.9), exactly as the send (#77) and receive (#409) sides treat an unknown operand.",
       "fixits": [
         "iterate a slice, array, string, map, or channel binding",
         "for a number sequence use the integer-range form: `for i in 0..n`",
-        "bind the value first if it is a call result, so the checker can see its type"
+        "for a function or method call result that resolves to an iterable, bind it to a local first so the checker can classify it"
       ],
       "example": "x := 5; for v in x { }   // reject: HYB-E2009 — x is an int, not an iterable",
       "rule": "BUILDABLE"

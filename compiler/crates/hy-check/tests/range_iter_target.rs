@@ -199,22 +199,117 @@ fn main() {
     ch := make(chan int, 1)
     for v in ch {
     }
-    for i in 0..3 {
-    }
-    for i in 1..=8 {
-    }
 }
 ";
 
 #[test]
 fn legal_iterable_forms_stay_accepted() {
     // Precision control: every LX13 iterable kind keeps working — slice
-    // binding, slice literal, string, map, channel, and both integer
-    // range forms (Range is a different statement kind, unaffected).
+    // binding, slice literal, string, map, channel. (The integer range
+    // forms are a different statement kind and are pinned separately
+    // below — they never enter the iterable classification.)
     let r = check(LEGAL_ITERABLES);
     assert!(
         codes(&r).is_empty(),
         "all LX13 iterable forms must stay clean, got {:?}",
+        codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+#[test]
+fn integer_range_forms_unaffected() {
+    // `for i in 0..n` / `for i in 1..=8` are `ForKind::Range` — a
+    // different statement kind with no iterable operand.
+    let r = check(
+        "fn main() {\n    for i in 0..3 {\n        fmt.println(i)\n    }\n    for i in 1..=8 {\n        fmt.println(i)\n    }\n}\n",
+    );
+    assert!(
+        codes(&r).is_empty(),
+        "range forms must stay clean, got {:?}",
+        codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+const BORROW_VIEW_ITERABLE: &str = "\
+import \"rust/serde_json\"
+
+fn main() {
+    doc := serde_json.parse(`{\"users\":[]}`)?
+    for u in doc.array(\"users\")? {
+        _ = u
+    }
+}
+";
+
+#[test]
+fn borrow_view_iterable_stays_accepted() {
+    // The BorrowHandle whitelist arm — corpus-driven (example 05 /
+    // corpus 07/11/12): the element VIEW the emitter iterates, not a Go
+    // range shape of its own. Locks the arm so it is not removed.
+    let r = check(BORROW_VIEW_ITERABLE);
+    assert!(
+        codes(&r).is_empty(),
+        "the borrow-view iterable must stay clean, got {:?}",
+        codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+const USER_METHOD_CALL_ITERABLE: &str = "\
+struct cache[k comparable] {
+    items []k
+}
+
+fn (c *cache[k]) keys() []k {
+    return c.items
+}
+
+fn main() {
+    c := cache[int]{items: []int{1, 2}}
+    for v in c.keys() {
+        fmt.println(v)
+    }
+}
+";
+
+#[test]
+fn user_method_call_iterable_stays_accepted() {
+    // H2 pin: a user-method call result resolves through `method_decls`
+    // (the same resolution `ty_of_expr` applies) — `call_shape` used to
+    // leave it `Unknown`, fail-closing the iterable as E3005.
+    let r = check(USER_METHOD_CALL_ITERABLE);
+    assert!(
+        codes(&r).is_empty(),
+        "a user-method call returning a slice must stay clean, got {:?}",
+        codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+const FOREIGN_HANDLE_VALUE_ITERABLE: &str = "\
+import \"rust/serde_json\"
+
+fn main() {
+    arr := serde_json.parse(`[]`)?
+    for u in arr {
+        _ = u
+    }
+}
+";
+
+#[test]
+fn foreign_element_source_handle_iterable_stays_accepted() {
+    // M1 pin: the emitter's ForeignTy range branch ranges the
+    // `serde_json.value` handle as an element source; the checker must
+    // not contradict that contract. Other handles (`flate2.writer`)
+    // stay rejected — the whitelist is the narrow predicate, not the
+    // whole OwnHandle family.
+    let r = check(FOREIGN_HANDLE_VALUE_ITERABLE);
+    assert!(
+        codes(&r).is_empty(),
+        "the element-source handle iterable must stay clean, got {:?}",
         codes(&r)
     );
     assert_eq!(r.verdict, Verdict::Accept);
