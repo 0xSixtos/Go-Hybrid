@@ -39,11 +39,16 @@ fn deferred_argument_moved_into_task_rejects_e3003_issue_415() {
     );
     assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
     assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+    // Logged amendment (pr-421 landing): the landed machinery is #421's
+    // value-precise deferred-binding rule, which rejects these shapes with
+    // the generic use-after-move HYB-E3003 (A1b) rather than #418's
+    // defer-specific wording — the two mechanisms collide (double report),
+    // so the wording pin is relaxed to the verdict pin: REJECT + E3003 + A1b.
     assert!(
         r.diagnostics
             .iter()
-            .any(|d| d.code == "HYB-E3003" && d.message.contains("defer")),
-        "expected the defer-specific HYB-E3003, got {:?}",
+            .any(|d| d.code == "HYB-E3003"),
+        "expected a use-after-move HYB-E3003, got {:?}",
         r.diagnostics
     );
 }
@@ -94,11 +99,16 @@ fn deferred_alias_guards_the_moved_origin_e3003_issue_415() {
     );
     assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
     assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+    // Logged amendment (pr-421 landing): the landed machinery is #421's
+    // value-precise deferred-binding rule, which rejects these shapes with
+    // the generic use-after-move HYB-E3003 (A1b) rather than #418's
+    // defer-specific wording — the two mechanisms collide (double report),
+    // so the wording pin is relaxed to the verdict pin: REJECT + E3003 + A1b.
     assert!(
         r.diagnostics
             .iter()
-            .any(|d| d.code == "HYB-E3003" && d.message.contains("defer")),
-        "expected the defer-specific HYB-E3003, got {:?}",
+            .any(|d| d.code == "HYB-E3003"),
+        "expected a use-after-move HYB-E3003, got {:?}",
         r.diagnostics
     );
 }
@@ -163,11 +173,16 @@ fn deferred_argument_moved_into_channel_rejects_e3003_issue_415() {
     );
     assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
     assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+    // Logged amendment (pr-421 landing): the landed machinery is #421's
+    // value-precise deferred-binding rule, which rejects these shapes with
+    // the generic use-after-move HYB-E3003 (A1b) rather than #418's
+    // defer-specific wording — the two mechanisms collide (double report),
+    // so the wording pin is relaxed to the verdict pin: REJECT + E3003 + A1b.
     assert!(
         r.diagnostics
             .iter()
-            .any(|d| d.code == "HYB-E3003" && d.message.contains("defer")),
-        "expected the defer-specific HYB-E3003, got {:?}",
+            .any(|d| d.code == "HYB-E3003"),
+        "expected a use-after-move HYB-E3003, got {:?}",
         r.diagnostics
     );
 }
