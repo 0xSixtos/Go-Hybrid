@@ -1196,6 +1196,10 @@ impl<'a> Checker<'a> {
         if l.names.len() == l.values.len() {
             for (name, value) in l.names.iter().zip(l.values.iter()) {
                 if move_operand_ident(value).is_none() {
+                    let shape = self.shape_of_expr(st, value);
+                    if field_borrow_kind(&shape).is_none() && !matches!(shape, TypeShape::Unknown) {
+                        continue;
+                    }
                     let mut addr_roots = Vec::new();
                     collect_addr_of_roots(value, &mut addr_roots);
                     for src in addr_roots {
@@ -1225,6 +1229,10 @@ impl<'a> Checker<'a> {
             for (t, v) in targets.iter().zip(values.iter()) {
                 if let PlaceKind::Ident(name) = &t.kind {
                     if move_operand_ident(v).is_none() {
+                        let shape = self.shape_of_expr(st, v);
+                        if field_borrow_kind(&shape).is_none() && !matches!(shape, TypeShape::Unknown) {
+                            continue;
+                        }
                         let mut addr_roots = Vec::new();
                         collect_addr_of_roots(v, &mut addr_roots);
                         for src in addr_roots {

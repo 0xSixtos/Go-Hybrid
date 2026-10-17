@@ -539,8 +539,9 @@ pub(crate) fn collect_ref_roots(e: &Expr, out: &mut Vec<String>) {
     }
 }
 
-/// Collect root identifiers that are explicitly borrowed via address-of (`&x`) inside `e`
-/// (including nested in composite literals, slice literals, map literals, calls, etc.).
+/// Collect root identifiers that are explicitly borrowed via address-of (`&x`) inside composite literals
+/// (e.g. `[]*T{&x}`, `map[K]*T{"k": &x}`, nested composite literals).
+/// Ordinary calls, binary operations, indexing, and fields do not propagate borrow roots into results.
 pub(crate) fn collect_addr_of_roots(e: &Expr, out: &mut Vec<String>) {
     match unwrap_parens(e) {
         Expr::AddrOf { operand, .. } => {
@@ -561,22 +562,6 @@ pub(crate) fn collect_addr_of_roots(e: &Expr, out: &mut Vec<String>) {
         }
         Expr::Try { operand, .. } => collect_addr_of_roots(operand, out),
         Expr::Move { operand, .. } => collect_addr_of_roots(operand, out),
-        Expr::Slice { base, .. } => collect_addr_of_roots(base, out),
-        Expr::Field { base, .. } => collect_addr_of_roots(base, out),
-        Expr::Index { base, index, .. } => {
-            collect_addr_of_roots(base, out);
-            collect_addr_of_roots(index, out);
-        }
-        Expr::Binary { lhs, rhs, .. } => {
-            collect_addr_of_roots(lhs, out);
-            collect_addr_of_roots(rhs, out);
-        }
-        Expr::Call { callee, args, .. } => {
-            collect_addr_of_roots(callee, out);
-            for a in args {
-                collect_addr_of_roots(&a.value, out);
-            }
-        }
         Expr::StructLit { fields, .. } => {
             for f in fields {
                 collect_addr_of_roots(&f.value, out);

@@ -421,3 +421,220 @@ fn main() {
     assert_eq!(res.diagnostics.len(), 0);
     assert!(matches!(res.verdict, Verdict::Accept));
 }
+
+#[test]
+fn negative_control_call_returning_int_accepts() {
+    let src = r#"
+import "fmt"
+
+struct node {
+    val int
+}
+
+fn count_items(n *node) int {
+    return n.val
+}
+
+fn worker(n node) {}
+
+fn main() {
+    n := node{val: 42}
+    count := count_items(&n)
+    task worker(move n)
+    fmt.println(count)
+}
+"#;
+    let res = check(src);
+    assert_eq!(res.diagnostics.len(), 0, "{:?}", res.diagnostics);
+    assert!(matches!(res.verdict, Verdict::Accept));
+}
+
+#[test]
+fn negative_control_call_returning_bool_accepts() {
+    let src = r#"
+import "fmt"
+
+struct node {
+    val int
+}
+
+fn is_valid(n *node) bool {
+    return n.val > 0
+}
+
+fn worker(n node) {}
+
+fn main() {
+    n := node{val: 42}
+    ok := is_valid(&n)
+    task worker(move n)
+    fmt.println(ok)
+}
+"#;
+    let res = check(src);
+    assert_eq!(res.diagnostics.len(), 0, "{:?}", res.diagnostics);
+    assert!(matches!(res.verdict, Verdict::Accept));
+}
+
+#[test]
+fn negative_control_len_of_call_accepts() {
+    let src = r#"
+import "fmt"
+
+struct node {
+    tag string
+}
+
+fn get_tag(n *node) string {
+    return n.tag
+}
+
+fn worker(n node) {}
+
+fn main() {
+    n := node{tag: "hello"}
+    l := len(get_tag(&n))
+    task worker(move n)
+    fmt.println(l)
+}
+"#;
+    let res = check(src);
+    assert_eq!(res.diagnostics.len(), 0, "{:?}", res.diagnostics);
+    assert!(matches!(res.verdict, Verdict::Accept));
+}
+
+#[test]
+fn negative_control_comparison_involving_call_accepts() {
+    let src = r#"
+import "fmt"
+
+struct node {
+    val int
+}
+
+fn get_val(n *node) int {
+    return n.val
+}
+
+fn worker(n node) {}
+
+fn main() {
+    n := node{val: 10}
+    is_positive := get_val(&n) > 0
+    task worker(move n)
+    fmt.println(is_positive)
+}
+"#;
+    let res = check(src);
+    assert_eq!(res.diagnostics.len(), 0, "{:?}", res.diagnostics);
+    assert!(matches!(res.verdict, Verdict::Accept));
+}
+
+#[test]
+fn negative_control_slice_of_scalar_call_results_accepts() {
+    let src = r#"
+import "fmt"
+
+struct node {
+    val int
+}
+
+fn get_val(n *node) int {
+    return n.val
+}
+
+fn worker(n node) {}
+
+fn main() {
+    n := node{val: 10}
+    items := []int{get_val(&n)}
+    task worker(move n)
+    fmt.println(items[0])
+}
+"#;
+    let res = check(src);
+    assert_eq!(res.diagnostics.len(), 0, "{:?}", res.diagnostics);
+    assert!(matches!(res.verdict, Verdict::Accept));
+}
+
+#[test]
+fn negative_control_map_of_scalar_call_results_accepts() {
+    let src = r#"
+import "fmt"
+
+struct node {
+    val int
+}
+
+fn get_val(n *node) int {
+    return n.val
+}
+
+fn worker(n node) {}
+
+fn main() {
+    n := node{val: 10}
+    table := map[string]int{"x": get_val(&n)}
+    task worker(move n)
+    fmt.println(table["x"])
+}
+"#;
+    let res = check(src);
+    assert_eq!(res.diagnostics.len(), 0, "{:?}", res.diagnostics);
+    assert!(matches!(res.verdict, Verdict::Accept));
+}
+
+#[test]
+fn negative_control_method_call_returning_scalar_accepts() {
+    let src = r#"
+import "fmt"
+
+struct node {
+    val int
+}
+
+fn (n node) get_with_ref(other *node) int {
+    return n.val + other.val
+}
+
+fn worker(n node) {}
+
+fn main() {
+    n := node{val: 10}
+    other := node{val: 20}
+    m_val := other.get_with_ref(&n)
+    task worker(move n)
+    fmt.println(m_val)
+}
+"#;
+    let res = check(src);
+    assert_eq!(res.diagnostics.len(), 0, "{:?}", res.diagnostics);
+    assert!(matches!(res.verdict, Verdict::Accept));
+}
+
+#[test]
+fn negative_control_cast_conversion_returning_scalar_accepts() {
+    let src = r#"
+import "fmt"
+
+struct node {
+    val int
+}
+
+fn get_val(n *node) int {
+    return n.val
+}
+
+fn worker(n node) {}
+
+fn main() {
+    n := node{val: 10}
+    cast_val := int(get_val(&n))
+    task worker(move n)
+    fmt.println(cast_val)
+}
+"#;
+    let res = check(src);
+    assert_eq!(res.diagnostics.len(), 0, "{:?}", res.diagnostics);
+    assert!(matches!(res.verdict, Verdict::Accept));
+}
