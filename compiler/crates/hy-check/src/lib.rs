@@ -59,6 +59,7 @@ mod tuple;
 mod walk;
 mod builtins;
 mod range_iter;
+mod recv;
 
 use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
 
@@ -582,6 +583,10 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         // E3005 (O4.9). Same accepted-should-emit-buildable-Go family as
         // the send-target (#77) classification.
         ck.check_stmt_range_iterable(&st, stmt);
+        // Issue #409: every receive operand must resolve to a channel
+        // (HYB-E2008; fail-closed E3005) — the mirror of the send-side
+        // target classification (#77, HYB-E3007).
+        ck.check_stmt_recv_operands(&st, stmt);
 
         match stmt {
             Stmt::Local(l) => {
