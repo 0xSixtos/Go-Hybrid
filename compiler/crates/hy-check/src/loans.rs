@@ -3665,7 +3665,13 @@ impl<'a> Checker<'a> {
                         if !matches!(info.shape, TypeShape::Unknown) || b.ty.is_none() {
                             b.shape = info.shape;
                         }
-                        if info.ty.is_some() || b.ty.is_none() {
+                        if info.ty.is_some()
+                            || b.ty.is_none()
+                            || matches!(
+                                b.ty.as_ref().map(|t| self.resolve_type_alias(t)),
+                                Some(hy_syntax::TypeExpr::Fn { .. })
+                            )
+                        {
                             b.ty = info.ty;
                         }
                         b.moved = None; // a fresh value re-owns the binding
