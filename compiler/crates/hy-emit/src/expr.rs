@@ -227,7 +227,12 @@ impl Emitter {
                 Ok(format!("{}{{{}}}", head, parts.join(", ")))
             }
 
-            Expr::FnLit { params, results, body, .. } => {
+            Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } => {
                 // Conversion target (Batch E): untyped params take the
                 // TARGET's types (`http.handler(fn(w, r) {…})` — the
                 // literal's `w, r` are typed by HandlerFunc's signature).
@@ -335,11 +340,9 @@ impl Emitter {
                 // Redirect statement output into a scratch buffer: the
                 // literal renders inline, its body keeps normal indents.
                 let main_body = std::mem::take(&mut self.body);
-                self.indent += 1;
-                for st in &body.stmts {
-                    self.emit_stmt(st)?;
-                }
-                self.indent -= 1;
+                let saved_loans = std::mem::take(&mut self.loan_frames);
+                self.emit_block_body(&body.stmts)?;
+                self.loan_frames = saved_loans;
                 let closure_body = std::mem::take(&mut self.body);
                 self.body = main_body;
                 self.fnlit_depth -= 1;
@@ -537,7 +540,11 @@ impl Emitter {
         self.member_name(base, name)
     }
 
-    pub(crate) fn emit_call(&mut self, callee: &Expr, args: &[CallArg]) -> Result<String, EmitError> {
+    pub(crate) fn emit_call(
+        &mut self,
+        callee: &Expr,
+        args: &[CallArg],
+    ) -> Result<String, EmitError> {
         // --- make(...): the first argument is a TYPE (bug-#2 fix) ---
         if matches!(callee, Expr::Ident { name, .. } if name == "make") {
             return self.emit_make(args);
@@ -649,9 +656,7 @@ impl Emitter {
                 // SPEC-LANGUAGE line 1991 asserts `u8(300) == 44` as an
                 // executable test-claim. The fold computes that same
                 // two's-complement truncation at emit time.
-                if let Some(folded) =
-                    super::constconv::fold_constant(&args[0].value, name)
-                {
+                if let Some(folded) = super::constconv::fold_constant(&args[0].value, name) {
                     return Ok(format!("{}({})", go, folded));
                 }
                 let a = self.emit_call_arg(&args[0])?;
