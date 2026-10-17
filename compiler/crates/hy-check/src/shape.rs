@@ -121,7 +121,10 @@ impl<'a> Checker<'a> {
         if depth > 16 {
             return true;
         }
-        if shape.is_reference_alias() || shape.is_handle() {
+        if shape.is_reference_alias()
+            || shape.is_handle()
+            || matches!(shape, TypeShape::Closure)
+        {
             return true;
         }
         match shape {
