@@ -503,7 +503,11 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             for arm in arms {
                 st.scope_push();
                 match &arm.kind {
-                    SelectArmKind::Send { chan, value } => {
+                    SelectArmKind::Send {
+                        chan,
+                        value,
+                        is_move,
+                    } => {
                         ck.mark_move_in_value(
                             st,
                             chan,
@@ -511,11 +515,23 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         );
                         let span = chan.span().to(value.span());
                         if ck.check_send_target(st, chan, span) {
-                            let desc =
-                                format!("the select-send `{} <- {}`", chan.render(), value.render());
+                            // C5: a select-send clause takes the SAME rules as
+                            // a statement send — including the class-3
+                            // owned-move route (`ch <- move v`). The parser's
+                            // `is_move` marker used to be dropped when a send
+                            // statement became a select arm.
+                            let desc = if *is_move {
+                                format!(
+                                    "the move-send `{} <- move {}`",
+                                    chan.render(),
+                                    value.render()
+                                )
+                            } else {
+                                format!("the select-send `{} <- {}`", chan.render(), value.render())
+                            };
                             let vals: Vec<&Expr> = vec![value];
                             let targets = ck.chan_elem_shape(st, chan);
-                            ck.check_site(st, span, "HYB-E3002", &vals, managed, &desc, false, None, targets.as_deref());
+                            ck.check_site(st, span, "HYB-E3002", &vals, managed, &desc, *is_move, None, targets.as_deref());
                         }
                     }
                     SelectArmKind::Recv { names, chan } => {
@@ -847,7 +863,7 @@ fn collect_stmt<'a>(
         Stmt::Select { arms, .. } => {
             for arm in arms {
                 match &arm.kind {
-                    SelectArmKind::Send { chan, value } => {
+                    SelectArmKind::Send { chan, value, .. } => {
                         collect_expr(chan, out);
                         collect_expr(value, out);
                     }
@@ -1349,7 +1365,7 @@ fn stmt_moves_watched_binding(
         }
         Stmt::Select { arms, .. } => {
             for arm in arms {
-                if let SelectArmKind::Send { chan, value } = &arm.kind {
+                if let SelectArmKind::Send { chan, value, .. } = &arm.kind {
                     let desc = format!(
                         "the select move-send `{} <- {}`",
                         chan.render(),

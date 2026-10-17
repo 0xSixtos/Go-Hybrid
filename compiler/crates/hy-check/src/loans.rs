@@ -3838,7 +3838,7 @@ fn collect_capture_idents_stmt(
         hy_syntax::Stmt::Select { arms, .. } => {
             for arm in arms {
                 match &arm.kind {
-                    hy_syntax::SelectArmKind::Send { chan, value } => {
+                    hy_syntax::SelectArmKind::Send { chan, value, .. } => {
                         collect_capture_idents_expr(chan, bound, out);
                         collect_capture_idents_expr(value, bound, out);
                     }

@@ -213,7 +213,7 @@ impl Emitter {
                             };
                             self.push(&head);
                         }
-                        SelectArmKind::Send { chan, value } => {
+                        SelectArmKind::Send { chan, value, .. } => {
                             let c = self.emit_expr(chan, 0)?;
                             let v = self.emit_expr(value, 0)?;
                             self.push(&format!("case {} <- {}:", c, v));
@@ -2297,7 +2297,7 @@ impl Emitter {
             Stmt::Select { arms, .. } => arms.iter().any(|a| {
                 let head_mentions = match &a.kind {
                     SelectArmKind::Recv { chan, .. } => Self::expr_mentions_ident(chan, target),
-                    SelectArmKind::Send { chan, value } => {
+                    SelectArmKind::Send { chan, value, .. } => {
                         Self::expr_mentions_ident(chan, target)
                             || Self::expr_mentions_ident(value, target)
                     }
