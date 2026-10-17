@@ -71,12 +71,57 @@ renumbered).
 | 25 | 25-o40-spawn-callee-proof | REJECT | A1c | the O4.0 spawn-callee PROOF: a closure callee (`task gap()`) crosses with its captured environment (A5, E3001) and an undeclared callee (`task mystery(1)`) is fail-closed unproven (E3005/FC) — before the fix the O4.0 site checked only the arguments and both passed silently (adoption-audit finding F1; the ACCEPT/proven side is pinned in hy-check/tests/callee_and_nil.rs) |
 | 26 | 26-call-return-alias-freeze | REJECT | A1b | an alias that comes back through a function call (`alias := same(agg)`, `same` returns its map argument) is still a live alias of `agg` — the checker has no interprocedural summary proving the return is fresh, so `results <- move agg` freezes it too; the write through `alias` is use-after-move (issue #38; before the fix the call return was treated as fresh storage and the program was accepted with 0 diagnostics while `go -race` reported a DATA RACE) |
 | 27 | 27-const-write-reject | REJECT | IMMUT | a file-level `const` slice takes an element write (W1) and a whole-binding rebind (W2) while the emitter lowers the const to a package-level `var` — two spawned tasks reach the same backing array with NOTHING crossing the spawn site, so O4 never fires and `hyb check` reported 0 diagnostics against `go run -race` evidence (issue #37; T22 deep immutability — the write rejection was the missing check; the accept side is pinned in hy-check/tests/const_write.rs) |
+| 38 | 38-const-closure-alias-write-reject | REJECT | IMMUT | T22 deep immutability on the paths the first E3006 fix never walked: an element write, a rebind, and a `delete` INSIDE a closure body (flatten/uses/calls skip `FnLit` — the A5 perimeter), a write through a COPY of the const (`alias := cells` — `const_write_root` only tested the place's own root), and `delete` on a const map anywhere — all ACCEPT with 0 diagnostics on main while `go run -race` reported `WARNING: DATA RACE` for the dual-closure writer program (issue #123, the follow-up gap in paid #37's fix; the fix scans every FnLit at fn end, follows alias/may-share peers to the immutable root, and routes delete through E3006 — accept side pinned in hy-check/tests/const_write.rs) |
+
+
+
 | 28 | 28-composite-nil-reject | REJECT | N1 | a nil NESTED in a composite literal (`job{m: nil}`, map-typed field) passed with 0 diagnostics — classify_composite has no per-field type context, so the five direct-flow nil sites never saw it; the literal carries its own type context and the nil now rejects as a TYPE error at the define, at the boundary, inside `managed` too, and for map/slice literal slots (PLAN follow-up row from the external adoption audit) |
 | 29 | 29-struct-param-share-move-reject | REJECT | A1b | a shallow struct copy of a PARAMETER (`h2 := h`, struct carrying a map) is a may-share peer but not a reference alias, so `check_non_owned_move` (which consulted the binding's own origin and its alias-chain root only) accepted `task worker(move h2, done)` with 0 diagnostics while `go run` hit `fatal error: concurrent map writes` (issue #75; the map twin `m2 := m` was already rejected via alias+origin inheritance — identical storage-identity argument; array twin is corpus 30, pure-local accept pinned in hy-check/tests/param_share_move.rs) |
 | 30 | 30-array-param-share-move-reject | REJECT | A1b | ARRAY twin of 29: a shallow fixed-array copy of a parameter (`a2 := a`, `[2]map[string]int`) recurses to a map element shape so it may-shares, but a fixed array is not a reference alias and recorded no origin — same pre-fix OK(0)/`go run` fatal split, same fix (move-time scan of the may-share component for a non-owned origin) |
 | 31 | 31-generic-call-return-alias-freeze | REJECT | A1b | an alias that comes back through a GENERIC call (`alias := same(agg)` where `same[t any](m t) t` returns its argument) is still a live alias of `agg` — the result shape resolves through the type parameter to Unknown, which is not a reference alias, so 26's alias recording and the may-share recorder (which had no Call arm) both skipped it: before the fix `hyb check` reported 0 diagnostics while `go run` hit `fatal error: concurrent map writes` (issue #73; generic twin of 26 — the struct-result sibling `h2 := alias_holder(h1)` is pinned in the hy-check unit tests, one root cause) |
+| 32 | 32-a3-assign-map-slot-invalidated | REJECT | A3 | re-assignment `x = &m[k]` opens a map-slot loan window just like define `x := &m[k]` — before the fix only LocalDecl registered MapSlot loans, leaving assignments untracked so map inserts during active assignment loans passed with 0 diagnostics (issue #138) |
 
-**Distribution: ACCEPT 8 · ACCEPT-MANAGED 2 · REJECT 21 — 31 programs.**
+
+| 32 | 32-closure-local-alias-move-reject | REJECT | A1b | a local rebind inside a closure (`alias := m`, where `m` is a captured outer map) is an alias of non-owned state, but `check_closure_boundaries` called `define_binding` without `record_alias` or `record_may_share`, wiping origin and alias links — before the fix `task worker(move alias, done)` was accepted with 0 diagnostics while `go run -race` produced concurrent map writes (issue #137) |
+
+
+**Distribution: ACCEPT 10 · ACCEPT-MANAGED 2 · REJECT 24 — 36 programs.**
+| 36 | 36-closure-capture-move | REJECT | A1b | a closure that captures a reference-bearing outer binding is a live ALIAS of its storage: `ch <- move a` transfers the map, but a later `f()` writes through the capture — on main the program was ACCEPT with 0 diagnostics while the receiver and the closure wrote the same map (`go run -race` WARNING: DATA RACE, issue #109); the fix links the closure binding to its captures with may-share edges so the move freezes `f` (alias-read twin of 20's alias-write form; accept/precision side pinned in hy-check/tests/capture_freeze.rs) |
+| 37 | 37-a3-interproc-window | REJECT | A3 | the insert that invalidates the live `&m["a"]` slot loan is spelled one FRAME away — `bump(m, "fresh")` inserts in its own frame while main's non-lexical window is live — the same runtime event as 08's direct insert (which rejects HYB-E3102); on main this form was ACCEPT with 0 diagnostics while the direct twin rejected (issue #111, with alias and closure-body siblings plus a wrong-result runtime proof: a helper delete resurrected by the loan's store-back); the fix matches A3 events across share-group peers, callee parameters (bounded, fail-closed), and closure call sites (legal twins pinned in hy-check/tests/a3_interproc.rs) |
+
+**Distribution: ACCEPT 10 · ACCEPT-MANAGED 2 · REJECT 26 — 38 programs.**
+
+
+**Distribution: ACCEPT 8 · ACCEPT-MANAGED 2 · REJECT 27 — 39 programs.**
+| 40 | 40-wrapper-alias-freeze | REJECT | A1b | the WRAPPER tail of the same family: `alias := same(same(agg))` — and the sibling forms `same(agg)[0:2]`, `wrap{items: same(agg)}`, `box{items: agg}.items`, `take(box{items: agg})` — is still a live alias of `agg`, but `Expr::root_ident()` stops at a call or a literal base, so neither `record_alias` nor `record_may_share` recorded an edge: before the fix `hyb check` reported 0 diagnostics while `go run -race` reported `WARNING: DATA RACE` on the shared map write (issue #160; nested twin of 26/31, fixed by generalizing the alias collector) |
+| 41 | 41-wrapper-alias-own-move-control | ACCEPT | — | the FALSE-POSITIVE GUARD for 32: the same wrapper alias is held and read BEFORE the owned move, and neither `agg` nor `alias` is used after it — holding an alias is legal, only a use after the freeze violates O5.2, so a widened alias collector must keep this program accepted (accept-side control; pairs with 32 the way 23 pairs with 22) |
+
+**Distribution: ACCEPT 11 · ACCEPT-MANAGED 2 · REJECT 27 — 41 programs.**
+
+
+**Distribution: ACCEPT 12 · ACCEPT-MANAGED 2 · REJECT 28 — 42 programs.**
+
+## Additive corpus registration — 2026-10-15: builtin `copy` ref-element alias (issue #178)
+
+These two cases were hand-derived from SPEC O5.2 (freeze covers every live
+alias) and Go's element-copy semantics for the builtin `copy` before being
+run against the checker. For a slice whose element carries mutable GC
+storage, `copy(dst, src)` duplicates the element *references*, so `dst` and
+`src` become may-share peers; the checker recorded no edge (there is no
+`copy` arm anywhere in `hy-check`) and accepted the REJECT case with 0
+diagnostics while `go run -race` reported `WARNING: DATA RACE` and `fatal
+error: concurrent map writes`. The control guards the false-positive
+direction: a primitive-element slice copies by value and shares nothing.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 43 | 43-copy-ref-element-alias-freeze | REJECT | A1b | `copy(dst, src)` on a `[]map[...]` makes `dst[i]` and `src[i]` the same map; `task worker(move dst, done)` did not freeze `src`, so the later write through `src` was use-after-move (issue #178; the root cause is a missing `copy` arm in `process_call`, plus `make([]T, n)` dropping its element shape) |
+| 44 | 44-copy-primitive-element-control | ACCEPT | — | the FALSE-POSITIVE GUARD for 43: `copy(dst, src)` on `[]int` copies by value and shares no GC storage, so no may-share edge may be recorded |
+| 45 | 45-composite-literal-embeds-shared-map | REJECT | A1c | O4.6 deep sendability: a fresh `[]T{shared}` composite literal embedding a live shared map at a spawn is not laundered by the wrap (PR #176, maintainer-integrated as #45) |
+| 53 | 53-array-slice-backing-freeze | REJECT | A1b | slicing an addressable array (`s := a[:]` on `[4]int`, also `b.data[:]`, `append(a[0:1], x)`, overlapping windows) shares the array's backing storage even when the element is a primitive; `shape_may_share` only recurses into reference elements, so `move s` froze `s` and not `a`, `hyb check` reported 0 diagnostics, and `go run -race` reported `WARNING: DATA RACE` on `s[0]` vs `a[0]`. A value copy (`b := a`) and `clone(a)[:]` stay unlinked |
+
+**Distribution: ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 34 — 49 programs.**
+
 (19 and 20 were added by the lead during integration on 2026-10-12 — still
 BEFORE any checker existed; see the pre-registration statement. 21, 22, 23
 and 24 are post-checker corpus GROWTH from the bounty track, added
@@ -93,7 +138,19 @@ issue-#37 soundness program (2026-10-14): verdict derived from T22's
 deep-immutability text first, then pinned against the HYB-E3006 fix —
 the report came with `hyb check` OK / `go run -race` DATA RACE evidence,
 so the hand-derived REJECT and the reproduction were one step here, in
-that order.
+that order. 26 is the issue-#38 call-return alias (2026-10-14, renumbered
+when pr-42 took the slot) and 27 is the issue-#37 soundness program as the
+table above spells them. 28 is the issue-#109 closure-capture freeze
+(2026-10-15): verdict derived from O5.2's alias form first (a capture is a
+live alias of the captured storage), then pinned against the fix — the
+report came with `hyb check` ACCEPT / `go run -race` DATA RACE evidence,
+so the hand-derived REJECT and the reproduction were one step, in that
+order. 29 is the issue-#111 interprocedural A3 program (2026-10-15):
+verdict derived from O8's own text first ("any map insert/delete inside
+the window" — no frame scoping) and pinned against the fix; the report
+came with the direct-twin contrast (corpus 08 / direct delete reject,
+these accept) and a runtime wrong-result reproduction, hand-derived
+REJECT first, per the same discipline.
 
 ## Reading-distinguishing power (what Spike 6's corpus could not do)
 
@@ -437,3 +494,148 @@ fiat here.
 - **A8 note.** The top-level `?` exit contract is not exercised by this
   corpus (no program fires it) — flagged so SPEC-LANGUAGE coverage is not
   overstated; spike-6 02 remains its only test.
+
+## Additive corpus registration — 2026-10-14: select-send clauses
+
+The original registrations and subsequent upstream cases 21–24 above are
+preserved. The following three cases were derived from SPEC-LANGUAGE.md
+§8.3 C4, §8.4 C5 and §9.3 O4/O4.9 before these files were run against the
+checker. They exercise the previously unrepresented `select` SEND surface,
+not a new language rule. Each file pins one verdict; reject files also
+name the exact diagnostic code in their header. A disagreement must be
+recorded and resolved, never hidden by changing an expected result.
+
+Originally registered as 21–23, these files are now 25–27: the integration
+of upstream commit `2e79213838649557cb00310a9f79c166f8c6731c` brought its own
+cases 21–24. Only filenames and corresponding references were renumbered;
+expected verdicts, rules and diagnostic codes did not change.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 32 | 32-select-send-shared-map | REJECT | A1c | `HYB-E3002` | a named mutable map is not safe-by-type at a select-send clause |
+| 33 | 33-select-send-safe-values | ACCEPT | — | no error | string and channel values remain legal at select-send sites |
+| 34 | 34-select-send-unproven-name | REJECT | FC (O4.9) | `HYB-E3005` | an unresolved sent name is unproven, even with a known destination element type |
+
+Historical registration on the earlier 20-case base produced **23
+programs: ACCEPT 8 · ACCEPT-MANAGED 2 · REJECT 13**; the recorded 23-case
+verification remains a dated result rather than a claim about this merged
+state. With the upstream 24-case base, this three-case addition gives **27
+programs: ACCEPT 9 · ACCEPT-MANAGED 2 · REJECT 16** before case 28 below.
+`FC` is the existing fail-closed rule from SPEC O4.9; these rows do not
+amend its meaning or renumber diagnostics. No new file contains `managed`.
+The harness's static as-written managed set remains the historical
+{01, 03, 04}; its ratios count only that set, not a new exhaustive friction
+survey. The dated original tripwire baseline above remains historical.
+
+## Additive corpus registration — 2026-10-14: default fallback
+
+Case 28 (originally registered as case 24 before upstream integration) was
+derived from SPEC-LANGUAGE.md §8.3 C4 before running this fixture. It pins
+the already documented default-arm syntax and selection behaviour, not a
+new language rule. The checker must accept the safe string send. At
+runtime the unbuffered channel has no receiver, so the default arm must
+run without blocking and print exactly `idle`.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 35 | 35-default-fallback | ACCEPT | — | no error | a default arm supplies the nonblocking fallback for an unavailable, safe string send |
+
+This is an ordinary syntax/behaviour regression: the previous parser
+expected a reserved `default` token that the lexer does not emit. C4
+requires the arm syntax; LX3 leaves `default` as an ordinary identifier.
+Its previous parse rejection is not an accepted-but-unsound program.
+The expected ACCEPT verdict and output were registered before testing and
+must not be changed merely to match a checker result. Contextual parser
+recognition restores documented arm syntax without reserving a new
+keyword; cases 25–27 stand alone without defaults.
+
+Historical registration on the earlier base produced **24 programs:
+ACCEPT 9 · ACCEPT-MANAGED 2 · REJECT 13**. That registration and its local
+verification are retained as dated evidence; they are not the merged
+corpus total. Current registered corpus: **28 programs: ACCEPT 10 ·
+ACCEPT-MANAGED 2 · REJECT 16**. The original and upstream table entries and
+dated baseline remain unchanged. Verdict-level managed count is 2/28;
+the harness's unchanged historical as-written set {01, 03, 04} reports
+3/28, with the same population qualification noted above. Case 28 adds
+no `managed` block.
+
+## Additive corpus registration — 2026-10-15: buildability declarations (#134)
+
+Four cases derived from issue #134 before these files were run against the
+checker. They pin the accepted-subset contract that an accepted program
+must emit buildable Go (the same contract E6001/E6002 were registered
+under): Go's front-end rejects an unused `:=` binding, an unused import, a
+repeated name on the left of one `:=`, and a `:=` that declares no new
+variable at all. All four reject as the new code `HYB-E1002`
+(`unbuildable-declaration`, rule `BUILDABLE`, registered in
+`hy-diag/data/diagnostics.json`). Reject files name the exact diagnostic
+code in their header; a disagreement must be recorded and resolved, never
+hidden by changing an expected result.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 46 | 46-unused-define-reject | REJECT | BUILDABLE | `HYB-E1002` | `x := 5` is never read — the emitted Go is `declared and not used` |
+| 47 | 47-unused-import-reject | REJECT | BUILDABLE | `HYB-E1002` | the declared import is carried into the emitted header — `imported and not used` |
+| 48 | 48-repeated-define-name-reject | REJECT | BUILDABLE | `HYB-E1002` | `x, x := 1, 2` is `x repeated on left side of :=` |
+| 49 | 49-blank-define-reject | REJECT | BUILDABLE | `HYB-E1002` | `_ := 5` declares no new variable — `no new variables on left side of :=` |
+
+With this four-case addition the registered corpus is **49 programs:
+ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 34** (harness recompute: 49/49
+verdict agreement; tripwire 2/46 = 4.3% verdict-level, 3/46 = 6.5%
+as-written — not fired). None of the four files contains a `managed`
+block; the harness's historical as-written set {01, 03, 04} is unchanged,
+so the tripwire ratios only move with the larger total.
+
+The scope boundary is deliberate and recorded in the HYB-E1002 registry
+entry: an unused `rust/` import is NOT rejected (the emitter never writes
+it as a Go import, so it cannot fail `go build`); unused `var` /
+composite-`const` locals, select-receive names and match bindings stay
+outside this registration (the same Go error family, tracked separately);
+unread `for ... in` bindings are handled at emission (issue #139).
+
+## Additive corpus registration — 2026-10-17: 3-argument slice `make` (#353)
+
+One case added WITH its fix: `make([]T, len, cap)` is valid Go, was
+rejected as HYB-E2005 before the fix, and is accepted now. The 3-argument
+form is slice-only — the same arity on a channel stays E2005, and
+negative/bad-literal sizes still reject, pinned by unit tests in
+`hy-check/tests/builtin_args_defer.rs`. The old diagnostic claimed "Go
+rejects this builtin shape" — false for the slice form, and true for every
+remaining rejection.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 51 | 51-make-slice-cap | ACCEPT | — | — | `make([]int, 3, 10)` is valid Go; zero check-sites, a fresh local |
+
+With this addition the corpus on disk stood at **51 programs:
+ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 36** (recomputed from the files'
+`EXPECTED-VERDICT` markers; #50 carries its registration with its own fix
+PR; the registration below raises the total to 52).
+
+## Additive corpus registration — 2026-10-17: shadowed predeclared types (#326)
+
+One case derived from issue #326 before running this fixture. It pins the
+soundness rule that user-defined structs or type aliases shadowing predeclared
+primitive names (e.g. `struct rune { m map[string]string }`) must resolve to the
+user struct rather than falling through to primitive type shape. When passed
+across tasks, non-sendable contents (such as maps or slices) must be rejected
+with `HYB-E3001` (A1c sendability).
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 52 | 52-shadow-predeclared-struct-reject | REJECT | A1c | `HYB-E3001` | `struct rune { m map[string]string }` passed across tasks must reject because the shadowed struct contains a mutable map |
+
+With this addition the registered corpus is **52 programs:
+ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 37** (harness recompute: 52/52
+verdict agreement; tripwire 2/52 = 3.8% verdict-level, 3/52 = 5.8%
+as-written — not fired).
+
+## Additive corpus registration — 2026-10-17: field store materializes may_share (#392)
+
+`h.m = shared` never created the edge from the composite to the live RHS root,
+so `move h` froze `h` but not `shared` and the emitted Go raced.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 54 | 54-field-store-alias-at-spawn | REJECT | A1b | `HYB-E3003` | `var h holder; h.m = shared` then `task worker(move h)` then a write to `shared` |
+| 55 | 55-field-store-fresh-at-spawn | ACCEPT | — | — | the over-rejection guard: a FRESH map literal stored into the field shares nothing |

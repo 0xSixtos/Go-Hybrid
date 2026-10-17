@@ -1224,6 +1224,11 @@ fmt.println("total={total}")            // expect: total=204
 (LX14; `break loop` shown above). Send clauses (`ch <- v:`) are
 sendability check-sites exactly like statement sends (C5).
 
+`default` is contextual at a select arm head (`default:`), including after
+an unbraced preceding arm. It is not an additional LX3 reserved word:
+ordinary identifier uses, such as a channel named `default`, remain legal.
+Corpus 24 pins the nonblocking fallback; parser tests pin this distinction.
+
 ### 8.4 Sendability check-sites — the complete list
 
 **C5 — Exactly two Hybrid-level check-sites gate cross-task sharing of
@@ -1567,6 +1572,10 @@ mux.handle("/x", http.handler(fn(w http.response_writer) {
   field/path (`move x.field` where the field is a slice/map/struct) is
   `HYB-E3004`: the parent binding still aliases the storage, so the freeze
   cannot be sound — fix-it: copy the field, or move the whole value.
+  The moved binding must also be exclusively owned: a parameter, method
+  receiver, closure capture, or non-channel range variable — or a local
+  that shares its storage, including a self-shadowing `m := m` in an inner
+  block — is `HYB-E3004` (the caller / collection still holds the storage).
 - **O5.5 — No last-use auto-move in MVP.** Sending a *named* mutable value
   that happens to be unused afterward still requires `move` (`jobs <- x`
   is rejected with the "add `move`" fix-it). Automatic last-use moving is

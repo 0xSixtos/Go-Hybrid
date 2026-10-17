@@ -109,7 +109,7 @@ skip the cgo runtime.
 | What does a Go→Rust call cost? | **2.8 ns** safe stack-switched trampoline vs **46.8 ns** cgo — 16.5× faster, 0 allocs | ✅ [spike 1](spikes/spike1-call-overhead/RESULTS.md) · [G2 bench: fast path 3.37 ns ≤ 5 ns on the live bridge](gates/G2.md) |
 | Can consumers skip the toolchain? | Yes — generated Go + prebuilt artifact; a plain `go run` imports a Hybrid package | ✅ [example 09](examples/09-go-imports-hybrid/) |
 | Can a scheduler-safe checked language work at all? | Bounded blocking pool, two-tier budgets, race-clean under `-race` | ✅ [spike 4: 100k-cell matrix](spikes/spike4-scheduling/RESULTS.md) |
-| Ownership rules without visible lifetimes? | Tier-0 checker: 6 sendable classes, move/freeze, loans, fail-closed boundary | ✅ [checker corpus 26/26](tests/checker-corpus/) + [differential loop](tools/differential_loop.py) |
+| Ownership rules without visible lifetimes? | Tier-0 checker: 6 sendable classes, move/freeze, loans, fail-closed boundary | ✅ [checker corpus 30/30](tests/checker-corpus/) + [differential loop](tools/differential_loop.py) |
 | Scheduling with blocking Rust calls | resolved: pool + Go-scheduler fallback, budgets pinned | ✅ spike 4 |
 
 ## Quick start
@@ -235,7 +235,12 @@ issues are tagged. Docs, adversarial test corpora, diagnostic wording, and
 example programs are all high-leverage right now. There is a **$500 bounty
 pool** over the top 10 contributions each cycle: reproduced soundness bugs
 and useful improvements alike, with severity tiers and a Hall of Fame —
-the full rules are in [BOUNTY.md](BOUNTY.md). The project follows an
+the full rules are in [BOUNTY.md](BOUNTY.md). **The Wildcard Track adds
+another $500 per cycle** for revolutionary, contrarian, high-risk ideas a
+normal feature bounty would reject — no prototype required, breaking
+changes and rewrites explicitly allowed, failures published as learnings
+(and paid): ledger and solicitation calendar in [MOONSHOT.md](MOONSHOT.md).
+The project follows an
 evidence-first protocol: hypotheses are pre-registered before measurement,
 failures are reported plainly, and tests are never weakened to pass — see
 [AGENTS.md](AGENTS.md) for how the repo works. Security reports start at

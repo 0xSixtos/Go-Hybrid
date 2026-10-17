@@ -1071,30 +1071,50 @@ fn push_sibling_libs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     }
 }
 
-/// Does the file at `p` contain an ELF image whose e_machine matches the
-/// arch hyb itself was compiled for? (x86-64 = 62, aarch64 = 183; the u16
-/// e_machine sits little-endian at offset 0x12 of the ELF header.)
-///
-/// `libhyrt.a` is an ar ARCHIVE — its first bytes are `!<arch>`, not ELF,
-/// and Rust's symbol-index member can be hundreds of KiB (the naive "scan
-/// the head of the file" approach misses the first object). So the archive
-/// structure is walked properly: member headers are 60 bytes (name 16, size
-/// 10 at offset 48, magic "`\n"), the symbol table (/) and long-name table
-/// (//) are skipped, and the first DATA member's ELF header decides. Raw
-/// ELF (a .o) is checked directly. Anything else — text, truncated files,
-/// non-ELF first member — is rejected: a stale file or a foreign-arch
-/// archive must never be linked by accident.
+/// Check the first object in a static archive (or a raw ELF/Mach-O object)
+/// against the host architecture. GNU/COFF ar names and Darwin's BSD extended
+/// names are supported; index members are skipped without scanning their data.
+/// Every read stays inside its member so a truncated object cannot borrow bytes
+/// from the following header. Unknown formats and architectures fail closed.
 fn lib_arch_matches(p: &std::path::Path) -> bool {
     use std::io::{Read, Seek, SeekFrom};
-    fn machine_matches(m: u16) -> bool {
-        match std::env::consts::ARCH {
-            "x86_64" => m == 62,
-            "aarch64" => m == 183,
-            // Unknown host arch: accept ELF64 but never a mismatched known one.
-            _ => m == 62 || m == 183,
+    fn object_matches(mut r: impl Read, allow_coff: bool) -> bool {
+        let mut hdr = [0u8; 20];
+        if r.read_exact(&mut hdr).is_err() {
+            return false;
         }
+        if &hdr[..4] == b"\x7fELF" {
+            let machine = u16::from_le_bytes([hdr[18], hdr[19]]);
+            return matches!(
+                (std::env::consts::ARCH, machine),
+                ("x86_64", 62) | ("aarch64", 183)
+            );
+        }
+        let big_endian = match &hdr[..4] {
+            b"\xcf\xfa\xed\xfe" => false, // MH_MAGIC_64
+            b"\xfe\xed\xfa\xcf" => true,  // byte-swapped MH_MAGIC_64
+            _ => return allow_coff && coff_machine_matches(u16::from_le_bytes([hdr[0], hdr[1]])),
+        };
+        // A mach_header_64 is 32 bytes, not the 20-byte ELF/COFF probe.
+        if r.read_exact(&mut [0u8; 12]).is_err() {
+            return false;
+        }
+        let word = |offset| {
+            let bytes: [u8; 4] = hdr[offset..offset + 4].try_into().unwrap();
+            if big_endian {
+                u32::from_be_bytes(bytes)
+            } else {
+                u32::from_le_bytes(bytes)
+            }
+        };
+        word(12) == 1 // MH_OBJECT, not an executable/dylib
+            && matches!((std::env::consts::ARCH, word(4)),
+                ("x86_64", 0x01000007) | ("aarch64", 0x0100000c))
     }
     let Ok(mut f) = std::fs::File::open(p) else {
+        return false;
+    };
+    let Ok(file_len) = f.metadata().map(|m| m.len()) else {
         return false;
     };
     let mut magic = [0u8; 8];
@@ -1102,61 +1122,74 @@ fn lib_arch_matches(p: &std::path::Path) -> bool {
         return false;
     }
     if &magic != b"!<arch>\n" {
-        // Not an ar archive — a raw ELF image may start here.
-        let mut hdr = [0u8; 20];
-        if f.seek(SeekFrom::Start(0)).is_err() {
-            return false;
-        }
-        if f.read_exact(&mut hdr).is_err() || &hdr[0..4] != b"\x7fELF" {
-            return false;
-        }
-        return machine_matches(u16::from_le_bytes([hdr[18], hdr[19]]));
+        return f.seek(SeekFrom::Start(0)).is_ok() && object_matches(&mut f, false);
     }
     loop {
         let mut m = [0u8; 60];
         if f.read_exact(&mut m).is_err() || &m[58..60] != b"`\n" {
             return false;
         }
-        let name = String::from_utf8_lossy(&m[0..16]).trim_end().to_string();
-        let size: u64 = match std::str::from_utf8(&m[48..58])
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-        {
-            Some(s) => s,
-            None => return false,
+        let Ok(name) = std::str::from_utf8(&m[..16]) else {
+            return false;
         };
-        if name == "/" || name == "//" || name.starts_with("__.SYMDEF") {
-            // symbol index / long-name table: skip (data 16-byte aligned)
-            let skip = size + (size & 1);
-            if f.seek(SeekFrom::Current(skip as i64)).is_err() {
-                return false;
-            }
-            continue;
-        }
-        // First data member: its object header decides the archive's arch.
-        let mut hdr = [0u8; 20];
-        if f.read_exact(&mut hdr).is_err() {
+        let name = name.trim_end();
+        let Some(size) = std::str::from_utf8(&m[48..58])
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+        else {
+            return false;
+        };
+        let Ok(start) = f.stream_position() else {
+            return false;
+        };
+        let Some(end) = start
+            .checked_add(size)
+            .and_then(|n| n.checked_add(size & 1))
+        else {
+            return false;
+        };
+        if end > file_len {
             return false;
         }
-        if &hdr[0..4] == b"\x7fELF" {
-            return machine_matches(u16::from_le_bytes([hdr[18], hdr[19]]));
+        let mut payload_size = size;
+        let mut is_index = name == "/" || name == "//" || name.starts_with("__.SYMDEF");
+        if let Some(length) = name.strip_prefix("#1/") {
+            // BSD: the size includes a possibly NUL-padded filename prefix.
+            // Read only enough of it to identify an index; never allocate an
+            // untrusted length or inspect the name as though it were an object.
+            let Ok(length) = length.parse::<u64>() else {
+                return false;
+            };
+            if length == 0 || length > size {
+                return false;
+            }
+            let mut prefix = [0u8; 16];
+            let n = length.min(prefix.len() as u64) as usize;
+            if f.read_exact(&mut prefix[..n]).is_err() {
+                return false;
+            }
+            is_index = prefix[..n].starts_with(b"__.SYMDEF");
+            if f.seek(SeekFrom::Start(start + length)).is_err() {
+                return false;
+            }
+            payload_size -= length;
         }
-        // COFF (an msvc-built static .lib): the object starts with the
-        // machine type as a LE u16 at offset 0 — IMAGE_FILE_MACHINE_AMD64 =
-        // 0x8664, AARCH64 = 0xAA64. The community benchmark report (v0.1.0)
-        // hit exactly this flavor: hyb only knew ELF members and rejected
-        // every msvc lib.
-        return coff_machine_matches(u16::from_le_bytes([hdr[0], hdr[1]]));
+        if !is_index {
+            return object_matches((&mut f).take(payload_size), true);
+        }
+        if f.seek(SeekFrom::Start(end)).is_err() {
+            return false;
+        }
     }
 }
 
-/// COFF machine-type counterpart of `machine_matches` (same host-arch rule).
+/// COFF machine-type counterpart of the ELF/Mach-O host-architecture probe.
 fn coff_machine_matches(m: u16) -> bool {
     match std::env::consts::ARCH {
         "x86_64" => m == 0x8664,
         "aarch64" => m == 0xAA64,
-        // Unknown host arch: accept a known-good COFF machine, nothing else.
-        _ => m == 0x8664 || m == 0xAA64,
+        // Never guess the ABI for an unsupported host architecture.
+        _ => false,
     }
 }
 
@@ -1779,6 +1812,9 @@ fn cmd_bench_overhead() -> ExitCode {
         ExitCode::FAILURE
     }
 }
+
+#[cfg(test)]
+mod staticlib_tests;
 
 #[cfg(test)]
 mod tests {

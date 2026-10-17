@@ -30,8 +30,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use hy_syntax::*;
 
+mod constconv;
+mod rangebind;
 mod shapes;
-use shapes::{import_path_of, lookup_conversion, lookup_rust_crate, lookup_unbound_crate, Conversion};
+use shapes::{
+    import_path_of, lookup_conversion, lookup_rust_crate, lookup_unbound_crate, Conversion,
+};
 
 // ---------------------------------------------------------------------------
 // Hybrid prelude (auto-generated Go, emitted only when the program uses it)
@@ -318,6 +322,8 @@ pub struct Emitter {
     indent: usize,
     /// Package roots used anywhere in the body → import lines (sorted).
     imports: BTreeSet<String>,
+    /// Explicit package root → full Go import path mapping from `Decl::Import`.
+    explicit_imports: BTreeMap<String, String>,
     /// Per-function binding hints. A flat map per function: MVP-0's hints
     /// are bound at fn-body top level, and closure bodies share the frame.
     bindings: BTreeMap<String, BindingKind>,
@@ -327,12 +333,29 @@ pub struct Emitter {
     in_main_closure: bool,
     /// Inside a function literal (closure) — `?` binds to ITS results.
     fnlit_depth: usize,
+    /// Enclosing `for`/`loop` depth in the CURRENT function/closure frame.
+    /// A labeled `break loop`/`continue loop` at depth 0 has no Go label
+    /// target (labels do not cross func boundaries) — emit refuses instead
+    /// of emitting `break hyLoop` against an undefined label (backstop for
+    /// closure bodies, which the Tier-0 flat walk skips).
+    for_depth: usize,
     /// Dotted associated-fn names declared in this file
     /// (`lru_cache.new`) — call sites mangle to `lru_cache_new[...]`.
     assoc_fns: BTreeSet<String>,
     /// The enclosing fn's single result type IF it is an option (`option[v]`)
     /// — `return none` lowers to that type's zero value.
     cur_option_result: Option<String>,
+    /// Go label of the loop currently open in THIS function (innermost last).
+    /// `hyLoop` is a fixed name, so two sibling loops that each own a labeled
+    /// `break loop` would emit two `hyLoop:` declarations and the module would
+    /// fail to build (`label hyLoop already declared`). Each labeled loop
+    /// pushes its own name (`hyLoop`, `hyLoop1`, …), and the labeled
+    /// break/continue about to render takes the innermost one.
+    loop_labels: Vec<String>,
+    /// Per-function counter handing each labeled loop a distinct name
+    /// (`hyLoop`, `hyLoop1`, …) so sibling loops never declare two labels
+    /// with the same name.
+    loop_label_n: usize,
     /// Map-slot loans (O8): `x := &m[k]` cannot be a Go map-index address,
     /// so it lowers to a COPY read now + store-back at the loan's block end
     /// (O9's honesty: Go-heap reads are copies). Frames are block-scoped:
@@ -354,6 +377,10 @@ pub struct Emitter {
     /// E3 expression-form hoists (Batch G): Try span start → the hoisted
     /// temp. emit_expr's Try branch substitutes the temp; cleared per fn.
     try_temps: BTreeMap<(u32, u32), String>,
+    /// Hoisted expression temps (keyed by AST node address) for short-circuit
+    /// `&&`/`||` containing `?` and preceding operands whose evaluation order
+    /// must be preserved before a hoisted `?`.
+    expr_temps: BTreeMap<usize, String>,
     /// Package mode (example 09): the emitted `package` clause, the prefix
     /// binding-package imports use, and whether `pub fn` exports.
     package_name: String,
@@ -380,6 +407,10 @@ pub struct Emitter {
     /// var → (shape-known dotted type, is_pointer): `var hits atomic.int64`
     /// / `hits *atomic.int64` — the MethodFunc receiver's address-of form.
     var_ty: BTreeMap<String, (String, bool)>,
+    /// Variables known to hold a pointer type in the current function frame.
+    pointer_vars: BTreeSet<String>,
+    /// Functions whose first result is a pointer type.
+    ptr_returning_fns: BTreeSet<String>,
 }
 
 impl Emitter {
@@ -392,13 +423,17 @@ impl Emitter {
             temp_n: 0,
             in_main_closure: false,
             fnlit_depth: 0,
+            for_depth: 0,
             assoc_fns: BTreeSet::new(),
             cur_option_result: None,
+            loop_labels: Vec::new(),
+            loop_label_n: 0,
             loan_frames: Vec::new(),
             handler_writer: None,
             pending_fnlit_conv: None,
             cur_fn_conv_result: None,
             try_temps: BTreeMap::new(),
+            expr_temps: BTreeMap::new(),
             package_name: "main".to_string(),
             binding_prefix: "hybrid.program".to_string(),
             export_pub: false,
@@ -407,6 +442,9 @@ impl Emitter {
             struct_fields: BTreeMap::new(),
             var_struct: BTreeMap::new(),
             var_ty: BTreeMap::new(),
+            pointer_vars: BTreeSet::new(),
+            ptr_returning_fns: BTreeSet::new(),
+            explicit_imports: BTreeMap::new(),
         }
     }
 
@@ -460,6 +498,19 @@ impl Emitter {
                 )),
                 _ => None,
             })
+            .collect();
+        self.ptr_returning_fns = file
+            .fns()
+            .filter(|f| {
+                matches!(
+                    f.results.first(),
+                    Some(FnResult {
+                        ty: TypeExpr::Pointer { .. },
+                        ..
+                    })
+                )
+            })
+            .map(|f| f.name.clone())
             .collect();
         self.fn_shapes = file
             .fns()
@@ -529,6 +580,7 @@ impl Emitter {
                     // import set ("net/http" → root "http"; the body says
                     // `http.X`, and import_path_of maps the line back).
                     let root = path.split('/').next_back().unwrap_or(path);
+                    self.explicit_imports.insert(root.to_string(), path.clone());
                     self.imports.insert(root.to_string());
                 }
                 Decl::Const(c) => self.emit_file_const(c)?,
@@ -562,7 +614,9 @@ impl Emitter {
             // consumer's package path in package mode). The CODE keeps the
             // root spelling — Go's package name for those imports.
             for root in &self.imports {
-                let path = if shapes::RUST_CRATES
+                let path = if let Some(p) = self.explicit_imports.get(root) {
+                    p.clone()
+                } else if shapes::RUST_CRATES
                     .iter()
                     .any(|c| c.binding_root == root.as_str())
                 {
@@ -663,8 +717,12 @@ impl Emitter {
 
     fn emit_fn(&mut self, f: &FnDecl) -> Result<(), EmitError> {
         self.bindings.clear();
+        self.pointer_vars.clear();
         self.temp_n = 0;
         self.try_temps.clear();
+        self.loop_labels.clear();
+        self.loop_label_n = 0;
+        self.expr_temps.clear();
 
         // Associated functions (`lru_cache.new`) mangle to
         // `lru_cache_new` — Go has no dotted identifiers. Call sites mangle
@@ -725,6 +783,9 @@ impl Emitter {
 
         // Hints from parameter types (dotted foreign types → Foreign).
         if let Some(recv) = &f.receiver {
+            if recv.is_pointer {
+                self.pointer_vars.insert(recv.name.clone());
+            }
             let recv_ty = self.type_text(&recv.ty);
             let star = if recv.is_pointer { "*" } else { "" };
             self.push_raw(&format!(
@@ -892,7 +953,27 @@ impl Emitter {
             } else if matches!(p.ty, TypeExpr::Chan { .. }) {
                 self.bindings.insert(p.name.clone(), BindingKind::Chan);
             }
+            if matches!(p.ty, TypeExpr::Pointer { .. }) {
+                self.pointer_vars.insert(p.name.clone());
+            }
             self.register_var_ty(&p.name, &p.ty);
+        }
+    }
+
+    pub(crate) fn expr_is_pointer(&self, e: &Expr) -> bool {
+        match e {
+            Expr::AddrOf { .. } => true,
+            Expr::Paren { inner, .. } => self.expr_is_pointer(inner),
+            Expr::Try { operand, .. } => self.expr_is_pointer(operand),
+            Expr::Ident { name, .. } => self.pointer_vars.contains(name),
+            Expr::Call { callee, .. } => {
+                if let Expr::Ident { name, .. } = callee.as_ref() {
+                    self.ptr_returning_fns.contains(name)
+                } else {
+                    false
+                }
+            }
+            _ => false,
         }
     }
 
@@ -920,6 +1001,9 @@ impl Emitter {
     /// table knows gives ForeignTy(key) — members resolve field-vs-method;
     /// any other dotted type stays generic Foreign.
     fn binding_kind_of_ty(&self, t: &TypeExpr) -> Option<BindingKind> {
+        if matches!(t, TypeExpr::Chan { .. }) {
+            return Some(BindingKind::Chan);
+        }
         let name = match t {
             TypeExpr::Named { name, .. } => name.as_str(),
             TypeExpr::Pointer { to, .. } => return self.binding_kind_of_ty(to),
@@ -1048,6 +1132,10 @@ impl Emitter {
             Expr::MapLit { entries, .. } => entries
                 .iter()
                 .any(|(k, v)| self.expr_has_try(k) || self.expr_has_try(v)),
+            Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                InterpPart::Expr(x) => self.expr_has_try(x),
+                InterpPart::Lit(_) => false,
+            }),
             Expr::FnLit { body, .. } => self.block_has_try(body),
             Expr::Paren { inner, .. } => self.expr_has_try(inner),
             _ => false,
@@ -1128,7 +1216,12 @@ impl Emitter {
                 .join(".");
             format!("{}.{}", root, joined)
         } else {
-            name.to_string()
+            // A SPEC primitive spelling maps to its Go equivalent
+            // (`u16` -> `uint16`); anything else stays verbatim. Issue #147.
+            match shapes::go_primitive_name(name) {
+                Some(go) => go.to_string(),
+                None => name.to_string(),
+            }
         }
     }
 
@@ -1141,15 +1234,24 @@ impl Emitter {
     /// allocation.
     pub fn zero_value(&mut self, t: &TypeExpr) -> String {
         match t {
-            TypeExpr::Named { name, .. } if !name.contains('.') => match name.as_str() {
-                "bool" => "false".into(),
-                "string" => "\"\"".into(),
-                "byte" | "rune" | "int" | "int8" | "int16" | "int32" | "int64" | "uint"
-                | "uint8" | "uint16" | "uint32" | "uint64" | "uintptr" | "float32" | "float64"
-                | "complex64" | "complex128" => "0".into(),
-                "error" | "any" => "nil".into(),
-                _ => format!("*new({})", name),
-            },
+            TypeExpr::Named { name, .. } if !name.contains('.') => {
+                if self.struct_fields.contains_key(name.as_str()) {
+                    return format!("*new({})", name);
+                }
+                match name.as_str() {
+                    "bool" => "false".into(),
+                    "string" => "\"\"".into(),
+                    // A SPEC primitive spelling takes its own zero value
+                    // (`var n u16` -> `var n uint16 = 0`, not `*new(u16)`).
+                    // Issue #147.
+                    _ if shapes::go_primitive_name(name).is_some() => "0".into(),
+                    "byte" | "rune" | "int" | "int8" | "int16" | "int32" | "int64" | "uint"
+                    | "uint8" | "uint16" | "uint32" | "uint64" | "uintptr" | "float32"
+                    | "float64" | "complex64" | "complex128" => "0".into(),
+                    "error" | "any" => "nil".into(),
+                    _ => format!("*new({})", name),
+                }
+            }
             TypeExpr::Slice { .. }
             | TypeExpr::Map { .. }
             | TypeExpr::Chan { .. }

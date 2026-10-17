@@ -278,10 +278,15 @@ func valueText(id uint64) string {
 	p.Unpin()
 	runtime.KeepAlive(&p)
 	runtime.KeepAlive(buf)
-	// Json::String's to_string is `"text"` — strip the 2-quote wrapper.
-	s := string(buf[:need])
-	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
-		return s[1 : len(s)-1]
+	// Json::String's to_string is a quoted JSON string with escaped characters.
+	var s string
+	if err := json.Unmarshal(buf[:need], &s); err == nil {
+		return s
 	}
-	return s
+	// Fallback: strip the 2-quote wrapper if unmarshal fails.
+	raw := string(buf[:need])
+	if len(raw) >= 2 && raw[0] == '"' && raw[len(raw)-1] == '"' {
+		return raw[1 : len(raw)-1]
+	}
+	return raw
 }

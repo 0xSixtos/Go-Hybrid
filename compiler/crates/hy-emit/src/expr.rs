@@ -40,6 +40,9 @@ impl Emitter {
     /// The full expression emitter. `min_prec` = the precedence the CALLER
     /// requires; lower-precedence children parenthesize themselves.
     pub fn emit_expr(&mut self, e: &Expr, min_prec: u8) -> Result<String, EmitError> {
+        if let Some(t) = self.expr_temps.get(&Self::expr_key(e)) {
+            return Ok(t.clone());
+        }
         let text = self.emit_expr_inner(e)?;
         let my = self.top_prec(e);
         if my < min_prec {
@@ -306,6 +309,11 @@ impl Emitter {
                     self.handler_writer = Some(name);
                 }
                 self.fnlit_depth += 1;
+                // Labels do not cross func boundaries: a labeled break/continue
+                // must find its loop INSIDE the literal — reset the depth so
+                // an outer loop's count cannot bless a closure-nested label.
+                let saved_for_depth = self.for_depth;
+                self.for_depth = 0;
                 let mut out = String::from("func(");
                 out.push_str(&rendered_params);
                 out.push_str(") ");
@@ -327,14 +335,13 @@ impl Emitter {
                 // Redirect statement output into a scratch buffer: the
                 // literal renders inline, its body keeps normal indents.
                 let main_body = std::mem::take(&mut self.body);
-                self.indent += 1;
-                for st in &body.stmts {
-                    self.emit_stmt(st)?;
-                }
-                self.indent -= 1;
+                let saved_loans = std::mem::take(&mut self.loan_frames);
+                self.emit_block_body(&body.stmts)?;
+                self.loan_frames = saved_loans;
                 let closure_body = std::mem::take(&mut self.body);
                 self.body = main_body;
                 self.fnlit_depth -= 1;
+                self.for_depth = saved_for_depth;
                 self.handler_writer = saved_writer;
                 self.bindings.retain(|k, _| known.contains(k));
                 out.push_str(&closure_body);
@@ -346,6 +353,9 @@ impl Emitter {
             }
 
             Expr::Paren { inner, .. } => {
+                if let Some(t) = self.expr_temps.get(&Self::expr_key(inner)) {
+                    return Ok(t.clone());
+                }
                 let i = self.emit_expr(inner, 0)?;
                 Ok(format!("({})", i))
             }
@@ -618,6 +628,35 @@ impl Emitter {
             }
         }
 
+        // --- a SPEC primitive conversion: `u8(300)` -> `uint8(300)`.
+        //     SPEC-LANGUAGE line 1991 states `b := u8(300) // expect: 44`
+        //     as an executable test-claim (§ "Examples are tests"), but the
+        //     name used to fall through to the verbatim emission below and
+        //     die in Go as `undefined: u8`. Issue #147. ---
+        if let Expr::Ident { name, .. } = callee {
+            if let Some(go) = super::shapes::go_primitive_name(name) {
+                if args.len() != 1 {
+                    return Err(EmitError::unsupported(format!(
+                        "`{}` conversion takes exactly one argument",
+                        name
+                    )));
+                }
+                // A CONSTANT operand that does not fit the target has to
+                // be folded here: Go rejects `uint8(300)` outright (the
+                // truncation Go does is only for a variable operand), yet
+                // SPEC-LANGUAGE line 1991 asserts `u8(300) == 44` as an
+                // executable test-claim. The fold computes that same
+                // two's-complement truncation at emit time.
+                if let Some(folded) =
+                    super::constconv::fold_constant(&args[0].value, name)
+                {
+                    return Ok(format!("{}({})", go, folded));
+                }
+                let a = self.emit_call_arg(&args[0])?;
+                return Ok(format!("{}({})", go, a));
+            }
+        }
+
         // --- everything else: callee(args...) ---
         // An addressable argument auto-addresses at a pointer param (Batch
         // I, corpus 09: `scale_then_register(e, …)` with `e *env` — Go's
@@ -634,7 +673,7 @@ impl Emitter {
         for (i, a) in args.iter().enumerate() {
             let t = self.emit_call_arg(a)?;
             let wants_ptr = ptr_params.get(i).copied().unwrap_or(false);
-            let already_ptr = matches!(a.value, Expr::AddrOf { .. });
+            let already_ptr = self.expr_is_pointer(&a.value);
             let addressable = matches!(
                 a.value,
                 Expr::Ident { .. } | Expr::Field { .. } | Expr::Index { .. }

@@ -23,7 +23,7 @@ help:
 	@echo "make test-quick       — sandbox unit tests (grows with the compiler)"
 	@echo "make ci               — what CI runs on push"
 	@echo "make examples         — the ten target programs, byte-exact acceptance"
-	@echo "make corpus           — Tier-0 corpus verdicts (24/24)"
+	@echo "make corpus           — Tier-0 corpus verdicts (35/35)"
 	@echo "make differential     — the differential corpus loop (accept + reject)"
 	@echo "make bench            — G2 call-overhead bench on the live bridge (hyb bench-overhead)"
 	@echo "make spike0-kaggle    — submit Spike 0 part A to the Kaggle worker"
@@ -39,7 +39,10 @@ check:
 	@$(MAKE) -n examples >/dev/null 2>&1 || { echo "MAKE SYNTAX BROKEN (recipes must be TAB-indented)"; exit 1; }
 	@echo "make-syntax OK"
 	@$(PY) -m py_compile tools/runner/runner.py tools/job.py worker/script.py tools/corpus_harness.py tools/differential_loop.py && echo "py-syntax OK"
+
 	@$(PY) -m unittest discover -s tools -p test_differential_loop.py -v
+	@$(PY) -m unittest discover -s tools -p test_check_versions.py -v
+	@$(PY) -m unittest discover -s tools -p test_corpus_harness.py -v
 	@bash tools/check-versions.sh --no-toolchain && echo "versions OK"
 	@cd /tmp && rm -rf gh-selftest && mkdir gh-selftest && cd gh-selftest && \
 	printf '%s\n' '{"job":"selftest","tier":"sandbox","sha":"none","repo":"none","gpu":false,"setup":[],"commands":[{"name":"echo","run":"echo selftest-ok","timeout":30}],"expected_results":[]}' > job.json && \

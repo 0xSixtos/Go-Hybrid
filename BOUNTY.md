@@ -1,8 +1,11 @@
 # 💰 The Hybrid Bounty
 
-We pay for **real soundness bugs** and **useful improvements** in Hybrid.
-The pool is **$500** per cycle, split across the **top 10 most meaningful
-contributions**. Open to humans and AI: we judge the report, not the author.
+We pay for **real soundness bugs**, **useful improvements**, and
+**revolutionary ideas** in Hybrid. The main pool is **$500** per cycle,
+split across the **top 10 most meaningful contributions** — and the
+**Wildcard Track adds another $500** per cycle for the kind of idea a
+normal feature bounty would reject. Open to humans and AI: we judge the
+report, not the author.
 
 The maintainer keeps the final say on whether a report qualifies, its tier,
 and its payout. Every decision gets a written reason in the issue.
@@ -22,7 +25,7 @@ announced in the release notes and listed in the Hall of Fame below.
 
 ## What qualifies
 
-Two tracks, ranked together:
+Two tracks ranked together, plus a third that stands apart:
 
 1. **Soundness bugs (the main track).** A program Hybrid **accepts** but
    that is **unsound**: a data race on shared mutable state crossing a task
@@ -33,6 +36,13 @@ Two tracks, ranked together:
 2. **Useful improvements.** Fixes, adversarial corpus tests, diagnostic
    wording, docs, tooling. Meaningful beats large; a small fix with a test
    outranks a big idea with no repro.
+3. **Wildcard proposals — a separate track with its own $500.**
+   Revolutionary, contrarian, high-risk ideas that the ladder would
+   otherwise filter out. No prototype required; breaking changes,
+   new paradigms, rewrites, and "impossible" ideas explicitly allowed;
+   **failure is a valid outcome if it produces knowledge, and every
+   outcome — including failures — is published.** Full rules, ledger, and
+   the learnings log: [MOONSHOT.md](MOONSHOT.md); quick version below.
 
 ## Severity tiers
 
@@ -87,13 +97,47 @@ only door to a payout.
 
 1. **Bugs:** open an issue with the
    [`soundness` template](https://github.com/limitlessprojects/Go-Hybrid/issues/new?template=soundness.yml).
-   **Improvements:** a normal issue or a PR.
+   **Improvements:** a normal issue or a PR. **Wildcard proposals:** the
+   [`wildcard` template](https://github.com/limitlessprojects/Go-Hybrid/issues/new?template=wildcard.yml).
 2. Include: what happens, what should happen, the exact commit, and the
-   smallest repro (a `.hy` file or a test).
+   smallest repro (a `.hy` file or a test) — wildcards instead name the
+   sacred cow they kill and how we would falsify the idea.
 3. We aim to **acknowledge within 48 hours** with a first verdict:
    accepted, needs info, or duplicate, with reasons.
 4. Fix PRs must pass CI on our side, then get final review.
 5. Winners are announced when a cycle closes, in the release notes and here.
+
+## Track 3 — the Wildcard Track, quick version
+
+**Purpose: incentivize revolutionary, contrarian, high-risk ideas that a
+normal feature bounty would reject.** We are hunting for breakthroughs,
+not incremental improvements — the unique approaches or additions that
+could make a paradigm shift without breaking everything, or that are worth
+it even when they do (the cost-to-ROI call is ours; your job is honesty
+about the cost).
+
+- **Budget: another $500 per cycle**, separate from the ladder. One
+  wildcard winner per cycle: **$250 when the proposal is accepted into the
+  ledger, $250 when its learning is published — success or failure alike.**
+  A fast, honest failure collects its second half; publishing the failure
+  *is* the deliverable.
+- **No working prototype required.** This is purely a place for us to
+  analyze people's crazy ideas and thoughts. A well-argued paragraph is a
+  complete submission.
+- **Breaking changes, new paradigms, rewrites, and "impossible" ideas are
+  explicitly allowed.** Say which sacred cow dies and why — SPEC.md,
+  GUARANTEES.md, and the `.hy`/`.go` split are all fair game.
+- **Everything is published:** the ledger, the review schedule, the
+  milestones, the payouts, and the learnings — including the failure wall —
+  live in [MOONSHOT.md](MOONSHOT.md).
+- **We actively solicit, not just wait:** each cycle names the assumptions
+  we most want attacked (see the solicitation calendar in MOONSHOT.md).
+- **Ops run by the project's AI maintainer:** proposal intake (triage
+  within 48 hours, same as bugs), review scheduling (a public monthly
+  review window), milestone tracking (the MOONSHOT ledger is the single
+  source of truth), and payout preparation — with the maintainer keeping
+  the final say and every decision getting a written reason, same as the
+  ladder.
 
 ## Scope
 
@@ -147,6 +191,18 @@ Contributor) and how to earn each is
 
 | Who | What | When |
 |-----|------|------|
+| [zuluagh](https://github.com/zuluagh) | **Two registered-never-raised codes brought live**: PR #266 (issue #265) — E2002 fires when a multi-value call is bound as one value (`p := minmax(3, 9)` passed hyb check and failed go build); PR #274 (issue #273) — E3104 fires for address-of taken on a map-slot loan (`p := &n` on a loan lowered to a copy then took a general pointer; T24's spec claim now enforced) | 2026-10 |
+| [salvocanci](https://github.com/salvocanci) | **Inclusive-range terminator** (PR #323, issue #322): `for v in lo..=hi` at the type maximum wrapped (int8 `127..=127` never stopped); the loop now drives a continue-safe stop-flag evaluated first in the body — the body runs once at `hi` and exits | 2026-10 |
+| [rickymulya](https://github.com/rickymulya) | **Predeclared-shadow resolution** (PR #343, issue #326): a struct named after a predeclared type (`struct rune { m map[..] }`) was classified as the primitive, silently skipping aliasing checks — named_shape resolves user structs and aliases first, with depth-guarded type resolution; same-fix credit to ajithnair1808-max's independent #329 | 2026-10 |
+| [sonson0910](https://github.com/sonson0910) | **Class-4 const + container guards** (PR #355, issue #354): const closure-containers can no longer cross task/chan boundaries under the pure-value exemption; `make(map[K]fn(){})` no longer erases to Map(Unknown, Unknown) for the closure-container move guard; type-aliased closure fields resolve through type_aliases; interprocedural const-mutation checks reach closure/method bodies | 2026-10 |
+| [Ravs0](https://github.com/Ravs0) | **Diagnostic accuracy** (PR #360, issue #353): `make([]T, len, cap)` — valid Go — was rejected with a builtin-arity diagnostic claiming Go rejects it; the 3-arg slice form is accepted end-to-end (corpus 51) | 2026-10 |
+| [Ratanlavate](https://github.com/Ratanlavate) | **CI recovery + match emission fix**: PR #359 (issue #358) — dropped the committed merge-conflict markers that made every workflow run fail at YAML parse (first green run of the window was this PR's own head); PR #357 (issue #356) — an unguarded first `some`-arm no longer chains an orphan `else`, so accepted matches emit buildable Go again (the accepted-implies-buildable contract) | 2026-10 |
+| [area523ufo](https://github.com/area523ufo) | **Six landings in one conveyor run — the slot-loan/loop-backedge stack**: PR #214 (issue #194) — a call-initialized loop local erased the backedge freeze on its alias root (`m := same(agg)` in a loop moved one map into two tasks); PR #215 (issue #195) — scope_pop sweeps may_share peers, not aliases only; PR #216 (issue #196) — loop-backedge analysis runs inside closure bodies; PR #217 (issue #202) — slot-loan frames scoped to closure bodies (store-backs no longer hoisted out of fns); PR #218 (issue #203) — store-backs flush before return/break/continue; PR #173 (issue #143) — match exhaustiveness (E5001) enforced: non-exhaustive, none-only, and _-first matches reject with the missing variant names. Plus credited same-fix takes on #222/#227 | 2026-10 |
+| [milkingndb-oss](https://github.com/milkingndb-oss) | **The five-family fail-closed swing** (PR #224, issue #201): incomparable ==/!= on map/slice/func/incomparable structs, var-ascription constant overflow/truncation + negative shifts, redeclarations, invalid receivers, invalid array lengths — 16 repros from the issue's own tables now reject fail-closed with dedicated codes E1003/E2006/E2007/E6004/E6005; 33-test battery | 2026-10 |
+| [CarlitoDon](https://github.com/CarlitoDon) | **Unbuildable declarations** (PR #185, issue #134): unused `:=` bindings (incl. `_ := 5`), unused imports, and repeated names on one `:=` now reject fail-closed as HYB-E1002 (rule BUILDABLE); corpus 45→49 with the four pre-registered fixtures | 2026-10 |
+| [rickymulya](https://github.com/rickymulya) | **Match multi-arm emission** (PR #210, issue #204): emit_match kept only the LAST some arm — guarded arms were silently deleted; all some-arms now lower (guards chain, all-guarded shapes fall through a hyMatched flag), with a credited same-fix take on #203 (pr-222) | 2026-10 |
+| [sonson0910](https://github.com/sonson0910) | **Closure origin/may_share preservation** (PR #207, issue #206): type-ascribed locals, assignment rebinds, self-rebinds, and parameter peer rebinds inside closures preserve non_owned_origin and may_share edges — captured-state moves across task boundaries no longer slip through; PR #213 (issue #212) — boundary handles join may_share/A2 loan conflicts, same-stmt share moves freeze, and closure const scanning rebuilt on a single ordered pass | 2026-10 |
+| [salvocanci](https://github.com/salvocanci) | **Defer/builtin hardening** (PR #191, issue #187): defer non-call rejects E2001; make/len/cap/delete/close/new literal and arity misuse rejects E2005; also the channel element-type landing (PR #171, issue #146) — sending into a mismatched-element channel rejects E3011 | 2026-10 |
 | [Ratanlavate](https://github.com/Ratanlavate) | **Three more landings this week**: PR #47 — the installer launcher keeps a caller-provided `HYB_RUNTIME_DIR` (issue #20) and the row-18 `shape.py --check` CI step got the absolute path it needed (main's ci.yml had been red since the step started cwd-ing elsewhere); PR #42 (issue #38) — a call that returns a reference-typed value is recorded as an alias of its argument (`same(m)` freezes with `m` on move); PR #35 (issue #27) — may-share tracking: shallow struct/array copies, re-slices, projections, and composite literals embedding a live binding all freeze with their source on `move` | 2026-10 |
 | [ocakciomursel-pixel](https://github.com/ocakciomursel-pixel) | **Two more soundness landings**: PR #52 (issue #51) — `atomic.pointer[T]`/`atomic.value` left the sendable class 2 (the atomic makes the pointer swap race-free, NOT the pointee — non-scalar atomics now fail closed E3005 citing GUARANTEES row 11); PR #61 (issue #60) — the non-owned-move guard: function/closure parameters, method receivers, closure captures, and non-channel range variables carry a `non_owned_origin`, and `move` of them at a boundary rejects E3004 | 2026-10 |
 | [area523ufo](https://github.com/area523ufo) | **Three soundness landings**: PR #59 (issue #57) — only top-level fns enter the fn table (a method can no longer impersonate a same-named top-level fn) plus pointer-receiver shape preservation; PR #56 (issue #54) — parallel A3 map-slot loans, A6 field-borrow checks for parallel/multi-return stores, view-loan window extension; PR #41 (issue #40) — scope events preserve MULTIPLE events per index (a nested construct and its enclosing if/for ending together used to drop a Pop and leak bindings) and select-recv defines get their own scope | 2026-10 |
