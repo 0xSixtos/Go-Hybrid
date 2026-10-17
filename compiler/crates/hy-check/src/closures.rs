@@ -1365,7 +1365,7 @@ fn stmt_moves_watched_binding(
         }
         Stmt::Select { arms, .. } => {
             for arm in arms {
-                if let SelectArmKind::Send { chan, value } = &arm.kind {
+                if let SelectArmKind::Send { chan, value, .. } = &arm.kind {
                     let desc = format!(
                         "the select move-send `{} <- {}`",
                         chan.render(),
