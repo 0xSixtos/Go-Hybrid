@@ -1111,6 +1111,8 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            // Every name is bound now: join results the callee returns twice.
+            self.link_multi_value_return_aliases(st, &l.values[0], &l.names);
         } else {
             for (name, value) in l.names.iter().zip(l.values.iter()) {
                 // Issue #148: constant initializer outside a fixed-width
@@ -1939,6 +1941,101 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The results of ONE call can alias each other: `return m, m` hands the
+    /// caller two bindings over the same storage. Each result is bound (and
+    /// frozen) per name, so without a share edge here `move a` freezes `a`
+    /// alone while `b` stays live on the same map — the E3003 shape, accepted.
+    ///
+    /// The callee is in the same file (`self.fns`), so its `return` positions
+    /// are compared by their rendered form: equal roots mean the two results
+    /// may share storage, and the pair joins the caller's may-share graph,
+    /// which the freeze rule already follows.
+    pub(crate) fn link_multi_value_return_aliases(
+        &self,
+        st: &mut FnState,
+        value: &Expr,
+        names: &[String],
+    ) {
+        if names.len() < 2 {
+            return;
+        }
+        for (i, j) in self.callee_shared_return_pairs(st, value) {
+            let (Some(a), Some(b)) = (names.get(i), names.get(j)) else {
+                continue;
+            };
+            if a == b || a == "_" || b == "_" {
+                continue;
+            }
+            let a_shares = self
+                .lookup_binding(st, a)
+                .map(|x| self.shape_may_share(&x.shape))
+                .unwrap_or(false);
+            let b_shares = self
+                .lookup_binding(st, b)
+                .map(|x| self.shape_may_share(&x.shape))
+                .unwrap_or(false);
+            if !a_shares || !b_shares {
+                continue;
+            }
+            st.share_edge(a, b);
+            st.aliases.entry(a.clone()).or_insert_with(|| b.clone());
+            st.aliases.entry(b.clone()).or_insert_with(|| a.clone());
+        }
+    }
+
+    /// Return-position pairs `(i, j)` whose values are the same expression in
+    /// a `return` of the called function (`return m, m`). Empty when the
+    /// callee is not a declared top-level `fn` with a body in this file.
+    fn callee_shared_return_pairs(&self, st: &FnState, value: &Expr) -> Vec<(usize, usize)> {
+        let call = match unwrap_parens(value) {
+            Expr::Try { operand, .. } => unwrap_parens(operand),
+            other => other,
+        };
+        let Expr::Call { callee, .. } = call else {
+            return Vec::new();
+        };
+        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+            return Vec::new();
+        };
+        // A local closure shadowing the fn name is not a static call.
+        if self.lookup_binding(st, name).is_some() {
+            return Vec::new();
+        }
+        let Some(f) = self.fns.get(name.as_str()).copied() else {
+            return Vec::new();
+        };
+        let Some(body) = f.body.as_ref() else {
+            return Vec::new();
+        };
+        let flat = walk::flatten(body);
+        let mut pairs: Vec<(usize, usize)> = Vec::new();
+        for (stmt, _) in flat.stmts.iter().copied() {
+            let Stmt::Return { values, .. } = stmt else {
+                continue;
+            };
+            if values.len() < 2 {
+                continue;
+            }
+            let keys: Vec<Option<String>> = values
+                .iter()
+                .map(|v| match unwrap_parens(v) {
+                    Expr::Move { .. } => None,
+                    e => Some(e.render()),
+                })
+                .collect();
+            for i in 0..keys.len() {
+                for j in (i + 1)..keys.len() {
+                    if keys[i].is_some() && keys[i] == keys[j] {
+                        pairs.push((i, j));
+                    }
+                }
+            }
+        }
+        pairs.sort_unstable();
+        pairs.dedup();
+        pairs
+    }
+
     /// Connected component of `name` across both `may_share` and `aliases`
     /// (both parent and child directions), excluding `name` itself.
     pub(crate) fn storage_peers(&self, st: &FnState, name: &str) -> Vec<String> {
@@ -2699,6 +2796,15 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            // Every target is rebound now: join results the callee returns twice.
+            let bound: Vec<String> = targets
+                .iter()
+                .map(|t| match &t.kind {
+                    PlaceKind::Ident(n) => n.clone(),
+                    _ => String::new(),
+                })
+                .collect();
+            self.link_multi_value_return_aliases(st, &values[0], &bound);
         }
     }
 
