@@ -230,8 +230,22 @@ impl<'a> Checker<'a> {
         }
         members.sort();
         members.dedup();
+        let mut origins = Vec::new();
         for m in &members {
+            let o = self.non_owned_origin_of(st, m).map(|(orig, via_share)| {
+                if via_share && !orig.starts_with("a may-share peer of ") {
+                    format!("a may-share peer of {}", orig)
+                } else {
+                    orig
+                }
+            });
+            origins.push(o);
+        }
+        for (m, orig) in members.iter().zip(origins) {
             if let Some(b) = st.env_lookup_mut(m) {
+                if b.non_owned_origin.is_none() {
+                    b.non_owned_origin = orig;
+                }
                 b.moved = Some(MoveInfo {
                     span,
                     kind,

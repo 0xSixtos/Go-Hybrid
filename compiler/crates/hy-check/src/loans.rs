@@ -862,9 +862,6 @@ impl<'a> Checker<'a> {
                     (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
                     (_, inferred) => (inferred, self.ty_of_expr(st, value)),
                 };
-                // `x := move y` — y is moved; x takes ownership (no alias);
-                // non-ident moves (`x := move s.data`) trigger HYB-E3004 (O5.4).
-                let moved_non_owned = self.moved_non_owned_origin_in_expr(st, value);
                 let shadowed_const = self.shape_may_share(&shape)
                     && self.value_reads_storage_of(st, value, name)
                     && self
@@ -882,6 +879,9 @@ impl<'a> Checker<'a> {
                     value,
                     format!("the move-define `{}`", value.render()),
                 );
+                // `x := move y` — y is moved; x takes ownership (no alias);
+                // non-ident moves (`x := move s.data`) trigger HYB-E3004 (O5.4).
+                let moved_non_owned = self.moved_non_owned_origin_in_expr(st, value);
                 if move_operand_ident(value).is_some()
                     || matches!(unwrap_parens(value), Expr::Move { .. })
                 {
@@ -928,6 +928,13 @@ impl<'a> Checker<'a> {
                 };
                 let is_view = matches!(shape, TypeShape::BorrowHandle(_));
                 self.define_binding(st, name, shape, ty, immutable, managed);
+                if let Some(origin) = &moved_non_owned {
+                    if let Some(b) = st.env_lookup_mut(name) {
+                        if b.non_owned_origin.is_none() {
+                            b.non_owned_origin = Some(origin.clone());
+                        }
+                    }
+                }
                 if reads_self {
                     if let Some(pa) = prior_alias {
                         if pa != *name {
@@ -1564,7 +1571,8 @@ impl<'a> Checker<'a> {
                             .and_then(|b| b.non_owned_origin.clone()),
                         other => move_operand_ident(other)
                             .and_then(|src| self.lookup_binding(st, &src))
-                            .and_then(|b| b.non_owned_origin.clone()),
+                            .and_then(|b| b.non_owned_origin.clone())
+                            .or_else(|| self.moved_non_owned_origin_in_expr(st, other)),
                     };
                     let (reads_self, shadowed_origin, prior_alias, prior_shares) = match &t.kind {
                         PlaceKind::Ident(name) => {
@@ -1737,16 +1745,30 @@ impl<'a> Checker<'a> {
     /// carry `immutable: true`, and `lookup_binding` resolves locals first,
     /// so a shadowing copy is never reported). Field/index places walk to
     /// their base: `cells[0]`, `cfg.tag`, and the plain rebind `cells = ...`
+    fn binding_const_root(&self, st: &FnState, name: &str) -> Option<String> {
+        if let Some(b) = self.lookup_binding(st, name) {
+            if b.immutable {
+                return Some(name.to_string());
+            }
+            if let Some(origin) = &b.non_owned_origin {
+                if let Some(idx) = origin.find("`const ") {
+                    let rest = &origin[idx + 7..];
+                    if let Some(end) = rest.find('`') {
+                        return Some(rest[..end].to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Resolve a write target to its `const` root. Fn-local and file-level
     /// all resolve through here (T22 / issue #37).
     fn const_write_root(&self, st: &FnState, p: &Place) -> Option<String> {
         match &p.kind {
             PlaceKind::Ident(name) => {
-                if self
-                    .lookup_binding(st, name)
-                    .filter(|b| b.immutable)
-                    .is_some()
-                {
-                    return Some(name.clone());
+                if let Some(hit) = self.binding_const_root(st, name) {
+                    return Some(hit);
                 }
                 // #123: a copy of a `const` (`alias := cells`, `let copy =
                 // cells`) points at the same backing storage, so writing
@@ -1759,12 +1781,8 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                     if let Some(parent) = st.aliases.get(&n) {
-                        if self
-                            .lookup_binding(st, parent)
-                            .filter(|b| b.immutable)
-                            .is_some()
-                        {
-                            return Some(parent.clone());
+                        if let Some(hit) = self.binding_const_root(st, parent) {
+                            return Some(hit);
                         }
                         stack.push(parent.clone());
                     }
@@ -1772,12 +1790,8 @@ impl<'a> Checker<'a> {
                         if seen.contains(&peer) {
                             continue;
                         }
-                        if self
-                            .lookup_binding(st, &peer)
-                            .filter(|b| b.immutable)
-                            .is_some()
-                        {
-                            return Some(peer);
+                        if let Some(hit) = self.binding_const_root(st, &peer) {
+                            return Some(hit);
                         }
                         stack.push(peer);
                     }
@@ -2070,6 +2084,18 @@ impl<'a> Checker<'a> {
         collect_ref_roots(inner, &mut roots);
         if roots.is_empty() {
             if let Some(r) = inner.root_ident() {
+                roots.push(r.to_string());
+            }
+        }
+        let mut move_ops = Vec::new();
+        crate::model::collect_move_operands(inner, &mut move_ops);
+        for (op, _) in move_ops {
+            let root = match op {
+                Expr::Ident { name, .. } => Some(name.as_str()),
+                Expr::Field { .. } => op.root_ident(),
+                _ => None,
+            };
+            if let Some(r) = root {
                 roots.push(r.to_string());
             }
         }
