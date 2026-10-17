@@ -92,6 +92,7 @@ enum Resolved {
     /// `recv.method(...)` — receiver root binding + its shape.
     Method {
         root: String,
+        root_span: Span,
         method: String,
         recv: TypeShape,
     },
@@ -100,6 +101,17 @@ enum Resolved {
         name: String,
     },
     None,
+}
+
+fn root_ident_span(expr: &Expr) -> Option<Span> {
+    match expr {
+        Expr::Ident { span, .. } => Some(*span),
+        Expr::Field { base, .. } | Expr::Index { base, .. } | Expr::Slice { base, .. } => {
+            root_ident_span(base)
+        }
+        Expr::Paren { inner, .. } => root_ident_span(inner),
+        _ => None,
+    }
 }
 
 impl<'a> Checker<'a> {
@@ -116,8 +128,10 @@ impl<'a> Checker<'a> {
                 }
                 if let Some(root) = base.root_ident() {
                     let recv = self.shape_of_expr(st, base);
+                    let root_span = root_ident_span(base).unwrap_or_else(|| base.span());
                     return Resolved::Method {
                         root: root.to_string(),
+                        root_span,
                         method: name.clone(),
                         recv,
                     };
@@ -139,16 +153,60 @@ impl<'a> Checker<'a> {
         cr: &CallRef,
         idx: usize,
         loop_end: Option<usize>,
+        stmt_consumes: &mut Vec<(Span, Span)>,
     ) {
         match self.resolve_call(st, cr) {
             Resolved::Package { pkg, method } => {
-                if foreign::package_mode(&pkg, &method) == CallMode::Borrow {
-                    // a borrow-mode package call lends its handle-typed args
-                    // for the call (`serde_json.to_string_pretty(doc)`)
-                    self.lend_handle_args(st, cr, idx);
+                match foreign::package_mode(&pkg, &method) {
+                    CallMode::Borrow => {
+                        // a borrow-mode package call lends its handle-typed args
+                        // for the call (`serde_json.to_string_pretty(doc)`) or
+                        // across the whole loop when iterating a view
+                        self.lend_handle_args(st, cr, idx, loop_end);
+                    }
+                    CallMode::Mutate => {
+                        for a in cr.args {
+                            if let Some(root) = a.value.root_ident() {
+                                let active_handle = self
+                                    .lookup_binding(st, root)
+                                    .map(|b| b.shape.is_handle() && b.moved.is_none())
+                                    .unwrap_or(false);
+                                if active_handle {
+                                    self.check_a2_conflict(st, cr, root, idx);
+                                }
+                            }
+                        }
+                    }
+                    CallMode::Consume => {
+                        for a in cr.args {
+                            if let Some(root) = a.value.root_ident() {
+                                let active_handle = self
+                                    .lookup_binding(st, root)
+                                    .map(|b| b.shape.is_handle() && b.moved.is_none())
+                                    .unwrap_or(false);
+                                if active_handle {
+                                    let rspan = root_ident_span(&a.value).unwrap_or(a.span);
+                                    self.mark_move(
+                                        st,
+                                        root,
+                                        cr.span,
+                                        format!("the consuming call `{}`", cr.callee.render()),
+                                        MoveKind::Consumed,
+                                    );
+                                    stmt_consumes.push((rspan, cr.span));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
-            Resolved::Method { root, method, recv } => {
+            Resolved::Method {
+                root,
+                root_span,
+                method,
+                recv,
+            } => {
                 self.check_call_const_writes(st, cr, &HashSet::new());
                 let Some(tname) = receiver_type_name(&recv) else {
                     return;
@@ -195,6 +253,7 @@ impl<'a> Checker<'a> {
                             format!("the consuming call `{}`", cr.callee.render()),
                             MoveKind::Consumed,
                         );
+                        stmt_consumes.push((root_span, cr.span));
                     }
                     _ => {}
                 }
@@ -225,7 +284,7 @@ impl<'a> Checker<'a> {
                     self.check_a3_call_conflict(st, cr, idx, &name);
                     // A7 borrow-by-default: a handle passed to a Hybrid
                     // function is lent for the call only
-                    self.lend_handle_args(st, cr, idx);
+                    self.lend_handle_args(st, cr, idx, None);
                 } else if st.closure_mutates.contains_key(&name) {
                     // A3 #111 form 4: a local closure whose body mutates a
                     // captured binding — event attributed to this call site.
@@ -266,23 +325,36 @@ impl<'a> Checker<'a> {
         );
     }
 
-    /// Handle-typed arguments of a call are lent for the call (call-scoped).
-    fn lend_handle_args(&self, st: &mut FnState, cr: &CallRef, idx: usize) {
+    /// Handle-typed arguments of a call are lent for the call (call-scoped) or
+    /// across the whole loop when the call is a for-loop ITERATE expression.
+    fn lend_handle_args(
+        &self,
+        st: &mut FnState,
+        cr: &CallRef,
+        idx: usize,
+        loop_end: Option<usize>,
+    ) {
+        let last = loop_end.unwrap_or(idx);
         for a in cr.args {
-            if let Expr::Ident { name, .. } = &a.value {
+            if let Some(name) = a.value.root_ident() {
                 if let Some(b) = self.lookup_binding(st, name) {
-                    if b.shape.is_handle() {
+                    if b.shape.is_handle() && b.moved.is_none() {
                         st.loans.push(Loan {
                             target: LoanTarget::Handle {
-                                handle: name.clone(),
+                                handle: name.to_string(),
                             },
                             created: idx,
-                            last: idx,
+                            last,
                             span: a.span,
                             desc: format!(
-                                "the argument `{}` lent to `{}` (A7 borrow-by-default)",
+                                "the argument `{}` lent to `{}`{}",
                                 name,
-                                cr.callee.render()
+                                cr.callee.render(),
+                                if loop_end.is_some() {
+                                    " (live across the whole loop)"
+                                } else {
+                                    " (A7 borrow-by-default)"
+                                }
                             ),
                         });
                     }
@@ -1310,12 +1382,32 @@ impl<'a> Checker<'a> {
         walk::expr_calls(value, &mut calls);
         let mut roots = Vec::new();
         for cr in &calls {
-            if let Resolved::Method { root, method, recv } = self.resolve_call(st, cr) {
-                if let Some(t) = receiver_type_name(&recv) {
-                    if foreign::method_mode(&t, &method) == CallMode::Borrow {
-                        roots.push(root);
+            match self.resolve_call(st, cr) {
+                Resolved::Method {
+                    root, method, recv, ..
+                } => {
+                    if let Some(t) = receiver_type_name(&recv) {
+                        if foreign::method_mode(&t, &method) == CallMode::Borrow {
+                            roots.push(root);
+                        }
                     }
                 }
+                Resolved::Package { pkg, method } => {
+                    if foreign::package_mode(&pkg, &method) == CallMode::Borrow {
+                        for a in cr.args {
+                            if let Some(root) = a.value.root_ident() {
+                                if self
+                                    .lookup_binding(st, root)
+                                    .map(|b| b.shape.is_handle())
+                                    .unwrap_or(false)
+                                {
+                                    roots.push(root.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         for loan in st.loans.iter_mut() {
