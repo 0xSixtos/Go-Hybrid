@@ -240,6 +240,13 @@ pub(crate) struct FnState {
     /// return-site nil checks). Empty for closure bodies (fn literals
     /// carry no result types on the AST surface yet).
     pub result_shapes: Vec<TypeShape>,
+    /// Declared named result bindings (`fn f() (out map[string]int)`), in
+    /// signature order. A bare `return` reads and returns each named result.
+    pub named_results: Vec<String>,
+    /// Bindings currently holding a function-local `&...` borrow (or a
+    /// composite literal containing `&...`), for O2 `LOAN-ESCAPE` on
+    /// named-result / variable returns (`out = &x; return` / `return out`).
+    pub borrow_bindings: HashSet<String>,
 }
 
 impl FnState {
