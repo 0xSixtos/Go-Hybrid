@@ -10,3 +10,5 @@
 - Wildcard spike PRs #405/#381/#384/#370/#416/#336 await recon + ledger attach; M1 verdicts land 2026-11-01 in #365 (artifacts: #379 W-015, #412 W-005 CONDITIONAL)
 - Standing: old-queue rebase assists, tools/kaggle batch, CI approvals stay per-landing (1 approve per landing, 8 this session); last review gate G3 PASSED 2026-10-13
 - PR #287 closeout: current-main integration validated (hy-emit 121 unit + 4 integration tests passed); remote CI and maintainer merge remain external gates.
+- PR #289 closeout: current-main integration validated (hy-emit 120 unit + 4 integration tests passed); remote CI and maintainer merge remain external gates.
+- PR #283 closeout: current-main integration validated (hy-emit 125 unit + 4 integration tests passed); remote CI and maintainer merge remain external gates.
