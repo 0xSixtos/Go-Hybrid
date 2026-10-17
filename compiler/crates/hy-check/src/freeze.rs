@@ -596,6 +596,11 @@ impl<'a> Checker<'a> {
                                     }
                                 }
                             }
+                            crate::walk::ScopeEvent::MatchBind { name, .. } => {
+                                if let Some(top) = shadow_scopes.last_mut() {
+                                    top.insert(name.to_string());
+                                }
+                            }
                         }
                     }
                 }
