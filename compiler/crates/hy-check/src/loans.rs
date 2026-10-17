@@ -1387,6 +1387,197 @@ impl<'a> Checker<'a> {
             .unwrap_or(false)
     }
 
+    /// Does `name` denote a mutable composite (including a scalar-field struct
+    /// or primitive-element array whose `TypeShape` is `Primitive`) that shares
+    /// backing storage when borrowed via `&x` or auto-addressed into a `*T`
+    /// parameter/receiver (#131)?
+    fn binding_can_be_borrowed(&self, st: &FnState, name: &str) -> bool {
+        let Some(b) = self.lookup_binding(st, name) else {
+            return false;
+        };
+        if self.shape_may_share(&b.shape)
+            || matches!(b.shape, TypeShape::Struct(_) | TypeShape::Array(_))
+        {
+            return true;
+        }
+        if let Some(ty) = &b.ty {
+            let resolved = self.resolve_type_alias(ty);
+            match &resolved {
+                hy_syntax::TypeExpr::Array { .. } => return true,
+                hy_syntax::TypeExpr::Named { name: tname, .. } => {
+                    let base = Self::base_named_type_str(tname);
+                    if self.structs.contains_key(base) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn call_param_is_pointer(&self, st: &FnState, callee: &Expr, idx: usize) -> bool {
+        match unwrap_parens(callee) {
+            Expr::Ident { name, .. } => {
+                if let Some(b) = self.lookup_binding(st, name) {
+                    if let Some(hy_syntax::TypeExpr::Fn { params, .. }) = &b.ty {
+                        return params
+                            .get(idx)
+                            .is_some_and(|p| matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. }));
+                    }
+                    return false;
+                }
+                let head = Self::base_named_type_str(name);
+                self.fns
+                    .get(name.as_str())
+                    .or_else(|| self.fns.get(head))
+                    .and_then(|f| f.params.get(idx))
+                    .is_some_and(|p| matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. }))
+            }
+            Expr::Field { base, name, .. } => {
+                let head = Self::base_named_type_str(name);
+                if let Expr::Ident { name: root, .. } = unwrap_parens(base) {
+                    if self.lookup_binding(st, root).is_none() {
+                        let full = format!("{}.{}", root, head);
+                        if let Some(f) = self.fns.get(full.as_str()) {
+                            return f
+                                .params
+                                .get(idx)
+                                .is_some_and(|p| matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. }));
+                        }
+                    }
+                }
+                let recv_base = self
+                    .ty_of_expr(st, base)
+                    .map(|t| self.resolve_type_alias(&t))
+                    .and_then(|t| Self::base_named_type(&t))
+                    .or_else(|| match self.shape_of_expr(st, base) {
+                        TypeShape::Struct(Some(s)) => {
+                            Some(Self::base_named_type_str(&s).to_string())
+                        }
+                        TypeShape::Pointer(inner) => match *inner {
+                            TypeShape::Struct(Some(s)) => {
+                                Some(Self::base_named_type_str(&s).to_string())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    });
+                recv_base
+                    .and_then(|rb| self.method_decls.get(&(rb, head.to_string())))
+                    .and_then(|f| f.params.get(idx))
+                    .is_some_and(|p| matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. }))
+            }
+            Expr::FnLit { params, .. } => params
+                .get(idx)
+                .is_some_and(|p| matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })),
+            _ => false,
+        }
+    }
+
+    fn call_receiver_is_pointer(&self, st: &FnState, callee: &Expr) -> bool {
+        let Expr::Field { base, name, .. } = unwrap_parens(callee) else {
+            return false;
+        };
+        let head = Self::base_named_type_str(name);
+        let recv_base = self
+            .ty_of_expr(st, base)
+            .map(|t| self.resolve_type_alias(&t))
+            .and_then(|t| Self::base_named_type(&t))
+            .or_else(|| match self.shape_of_expr(st, base) {
+                TypeShape::Struct(Some(s)) => Some(Self::base_named_type_str(&s).to_string()),
+                TypeShape::Pointer(inner) => match *inner {
+                    TypeShape::Struct(Some(s)) => Some(Self::base_named_type_str(&s).to_string()),
+                    _ => None,
+                },
+                _ => None,
+            });
+        recv_base
+            .and_then(|rb| self.method_decls.get(&(rb, head.to_string())))
+            .and_then(|f| f.receiver.as_ref())
+            .is_some_and(|r| r.is_pointer || matches!(r.ty, hy_syntax::TypeExpr::Pointer { .. }))
+    }
+
+    /// Collect root identifiers borrowed in `e` either via explicit address-of
+    /// (`&x`, `&m[k]`, `&s.f`) or via `hy-emit` auto-addressing of a value
+    /// argument/receiver into a `*T` parameter/receiver (`id_ptr(s)`, `s.ptr()`)
+    /// when the enclosing call/projection can return shared storage (#131).
+    fn collect_borrowed_roots(&self, st: &FnState, e: &Expr, out: &mut Vec<String>) {
+        collect_addr_of_roots(e, out);
+        let inner = unwrap_parens(e);
+        match inner {
+            Expr::AddrOf { operand, .. }
+            | Expr::Unary {
+                op: hy_syntax::UnOp::Addr,
+                operand,
+                ..
+            } => {
+                self.collect_borrowed_roots(st, operand, out);
+            }
+            Expr::Try { operand, .. } | Expr::Move { operand, .. } => {
+                self.collect_borrowed_roots(st, operand, out);
+            }
+            Expr::Slice { base, .. }
+            | Expr::Field { base, .. }
+            | Expr::Index { base, .. } => {
+                let proj_shape = self.shape_of_expr(st, inner);
+                if self.shape_may_share(&proj_shape) || matches!(proj_shape, TypeShape::Unknown) {
+                    self.collect_borrowed_roots(st, base, out);
+                }
+            }
+            Expr::StructLit { fields, .. } => {
+                for f in fields {
+                    self.collect_borrowed_roots(st, &f.value, out);
+                }
+            }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    self.collect_borrowed_roots(st, k, out);
+                    self.collect_borrowed_roots(st, v, out);
+                }
+            }
+            Expr::SliceLit { items, .. } => {
+                for it in items {
+                    self.collect_borrowed_roots(st, it, out);
+                }
+            }
+            Expr::Call { callee, args, .. } => {
+                let call_res = self.shape_of_expr(st, inner);
+                if self.shape_may_share(&call_res) || matches!(call_res, TypeShape::Unknown) {
+                    for (idx, a) in args.iter().enumerate() {
+                        if !matches!(unwrap_parens(&a.value), Expr::Move { .. }) {
+                            let arg_shape = self.shape_of_expr(st, &a.value);
+                            if !matches!(arg_shape, TypeShape::Pointer(_))
+                                && self.call_param_is_pointer(st, callee, idx)
+                            {
+                                if let Some(root) = a.value.root_ident() {
+                                    if self.binding_can_be_borrowed(st, root) {
+                                        out.push(root.to_string());
+                                    }
+                                }
+                            }
+                            self.collect_borrowed_roots(st, &a.value, out);
+                        }
+                    }
+                    if let Expr::Field { base, .. } = unwrap_parens(callee) {
+                        let recv_shape = self.shape_of_expr(st, base);
+                        if !matches!(recv_shape, TypeShape::Pointer(_))
+                            && self.call_receiver_is_pointer(st, callee)
+                        {
+                            if let Some(root) = base.root_ident() {
+                                if self.binding_can_be_borrowed(st, root) {
+                                    out.push(root.to_string());
+                                }
+                            }
+                        }
+                        self.collect_borrowed_roots(st, base, out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Record may-share edges for a define/rebind `name <op> value` (#27).
     /// Covers the four reported bypass forms: `h2 := h1` (shallow struct/
     /// array copy), `m2 := (agg)` / `s2 := s1[:]` (parenthesized / re-sliced
@@ -1491,7 +1682,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 let mut addr_roots = Vec::new();
-                collect_addr_of_roots(value, &mut addr_roots);
+                self.collect_borrowed_roots(st, value, &mut addr_roots);
                 for root in addr_roots {
                     if root != name {
                         st.share_edge(name, &root);
@@ -1693,6 +1884,8 @@ impl<'a> Checker<'a> {
                 {
                     let mut roots = Vec::new();
                     collect_ref_roots(value, &mut roots);
+                    let mut borrowed_roots = Vec::new();
+                    self.collect_borrowed_roots(st, value, &mut borrowed_roots);
                     for src in roots {
                         if src == name {
                             continue;
@@ -1702,6 +1895,8 @@ impl<'a> Checker<'a> {
                                 self.shape_carries_handle(&b.shape)
                             } else {
                                 b.shape.is_reference_alias()
+                                    || (borrowed_roots.iter().any(|r| r == &src)
+                                        && self.binding_can_be_borrowed(st, &src))
                             };
                             (ok, b.non_owned_origin.clone())
                         });
@@ -1722,9 +1917,9 @@ impl<'a> Checker<'a> {
 
     /// Record O5.2 alias links for pointer borrows (`p := &stats`, `slot := &m[k]`)
     /// so moving `p` freezes the underlying mutable binding `stats` (#33).
-    /// pr-312: the alias recording descends into NESTED address-of operands
-    /// inside composite literals (`p := stats{cpu: &usage}`) via
-    /// collect_addr_of_roots, not just the direct as_addr_of form.
+    /// pr-312 / #131: the alias recording descends into nested address-of
+    /// operands and auto-addressed `*T` call arguments/receivers via
+    /// `collect_borrowed_roots`, not just the direct `as_addr_of` form.
     pub(crate) fn record_local_borrow_aliases(&self, st: &mut FnState, l: &LocalDecl) {
         if l.names.len() == l.values.len() {
             for (name, value) in l.names.iter().zip(l.values.iter()) {
@@ -1743,14 +1938,24 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                     let mut addr_roots = Vec::new();
-                    collect_addr_of_roots(value, &mut addr_roots);
+                    self.collect_borrowed_roots(st, value, &mut addr_roots);
                     for src in addr_roots {
                         if src != *name {
-                            if let Some(b) = self.lookup_binding(st, &src) {
-                                if !b.shape.is_sendable_by_type() {
-                                    st.aliases.insert(name.clone(), src);
-                                    break;
+                            let matched = self.lookup_binding(st, &src).map(|b| {
+                                let ok = !b.shape.is_sendable_by_type()
+                                    || self.binding_can_be_borrowed(st, &src);
+                                (ok, b.non_owned_origin.clone())
+                            });
+                            if let Some((true, origin)) = matched {
+                                st.aliases.insert(name.clone(), src);
+                                if let Some(origin) = origin {
+                                    if let Some(nb) = st.env_lookup_mut(name) {
+                                        if nb.non_owned_origin.is_none() {
+                                            nb.non_owned_origin = Some(origin);
+                                        }
+                                    }
                                 }
+                                break;
                             }
                         }
                     }
@@ -1760,8 +1965,8 @@ impl<'a> Checker<'a> {
     }
 
     /// Record O5.2 alias links for pointer-borrow rebinds (`p = &stats`).
-    /// pr-312: nested address-of operands inside composite rebinds are
-    /// tracked the same way as the define form.
+    /// pr-312 / #131: nested address-of operands and auto-addressed `*T`
+    /// call arguments/receivers are tracked the same way as the define form.
     pub(crate) fn record_assign_borrow_aliases(
         &self,
         st: &mut FnState,
@@ -1787,14 +1992,24 @@ impl<'a> Checker<'a> {
                             continue;
                         }
                         let mut addr_roots = Vec::new();
-                        collect_addr_of_roots(v, &mut addr_roots);
+                        self.collect_borrowed_roots(st, v, &mut addr_roots);
                         for src in addr_roots {
                             if src != *name {
-                                if let Some(b) = self.lookup_binding(st, &src) {
-                                    if !b.shape.is_sendable_by_type() {
-                                        st.aliases.insert(name.clone(), src);
-                                        break;
+                                let matched = self.lookup_binding(st, &src).map(|b| {
+                                    let ok = !b.shape.is_sendable_by_type()
+                                        || self.binding_can_be_borrowed(st, &src);
+                                    (ok, b.non_owned_origin.clone())
+                                });
+                                if let Some((true, origin)) = matched {
+                                    st.aliases.insert(name.clone(), src);
+                                    if let Some(origin) = origin {
+                                        if let Some(nb) = st.env_lookup_mut(name) {
+                                            if nb.non_owned_origin.is_none() {
+                                                nb.non_owned_origin = Some(origin);
+                                            }
+                                        }
                                     }
+                                    break;
                                 }
                             }
                         }
@@ -1890,6 +2105,8 @@ impl<'a> Checker<'a> {
         }
         let mut roots = Vec::new();
         collect_ref_roots(value, &mut roots);
+        let mut borrowed_roots = Vec::new();
+        self.collect_borrowed_roots(st, value, &mut borrowed_roots);
         for root in &roots {
             if root == name {
                 continue;
@@ -1906,6 +2123,21 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        for root in &borrowed_roots {
+            if root != name {
+                st.share_edge(name, root);
+                if let Some(origin) = self
+                    .lookup_binding(st, root)
+                    .and_then(|b| b.non_owned_origin.clone())
+                {
+                    if let Some(nb) = st.env_lookup_mut(name) {
+                        if nb.non_owned_origin.is_none() {
+                            nb.non_owned_origin = Some(origin);
+                        }
+                    }
+                }
+            }
+        }
         if shape.is_reference_alias() || matches!(shape, TypeShape::OwnHandle(_)) {
             for src in &roots {
                 if src == name {
@@ -1916,6 +2148,8 @@ impl<'a> Checker<'a> {
                         self.shape_carries_handle(&b.shape)
                     } else {
                         b.shape.is_reference_alias()
+                            || (borrowed_roots.iter().any(|r| r == src)
+                                && self.binding_can_be_borrowed(st, src))
                     };
                     (ok, b.non_owned_origin.clone())
                 });
