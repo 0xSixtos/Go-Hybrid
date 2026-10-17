@@ -43,6 +43,7 @@ check:
 	@$(PY) -m unittest discover -s tools -p test_differential_loop.py -v
 	@$(PY) -m unittest discover -s tools -p test_check_versions.py -v
 	@$(PY) -m unittest discover -s tools -p test_corpus_harness.py -v
+	@$(PY) -m unittest discover -s tools -p test_package_version.py -v
 	@$(PY) -m unittest discover -s tools/runner -p test_runner.py -v
 	@$(PY) -m unittest discover -s tools -p test_check_test_registration.py -v
 	@$(PY) tools/check_test_registration.py && echo "test registration OK"
