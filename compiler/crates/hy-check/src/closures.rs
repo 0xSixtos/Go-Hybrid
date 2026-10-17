@@ -254,6 +254,27 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
     // perimeter discipline as the send-side checks below. Pure type
     // classification: no use/define ordering concerns.
     ck.check_stmt_recv_operands(st, stmt);
+    // #238: `copy(dst, src)` inside a closure body duplicates reference-bearing
+    // slice elements, so `dst` and `src` share mutable GC storage and a later
+    // `move` of either inside the closure must freeze the other (O5.2) and
+    // inherit non-owned capture/parameter origin (O5.1 / O5.4).
+    let mut calls = Vec::new();
+    if let Stmt::For {
+        kind: Iterate { expr, .. },
+        ..
+    } = stmt
+    {
+        crate::walk::expr_calls(expr, &mut calls);
+    } else {
+        crate::walk::own_calls(stmt, &mut calls);
+    }
+    for cr in &calls {
+        if let Expr::Ident { name, .. } = crate::model::unwrap_parens(cr.callee) {
+            if name == "copy" {
+                ck.record_copy_may_share(st, cr);
+            }
+        }
+    }
 
     match stmt {
         Stmt::Local(l) => {
@@ -321,6 +342,20 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     } else {
                         None
                     };
+                    let prior_children: Vec<String> = if reads_self {
+                        st.aliases
+                            .iter()
+                            .filter_map(|(k, v)| {
+                                if v == name && k != name {
+                                    Some(k.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     let prior_shares: Vec<String> = if reads_self {
                         st.may_share
                             .get(name)
@@ -328,6 +363,20 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                             .unwrap_or_default()
                     } else {
                         Vec::new()
+                    };
+                    let prior_shadow_links = if reads_self {
+                        st.shadow_links.get(name).cloned().unwrap_or_default()
+                    } else {
+                        std::collections::HashSet::new()
+                    };
+                    let outer_depth = if st
+                        .scopes
+                        .last()
+                        .is_some_and(|top| !top.contains_key(name))
+                    {
+                        st.lookup_depth(name)
+                    } else {
+                        None
                     };
                     ck.define_binding(st, name, shape, ty, immutable, managed);
                     if let Some(origin) = &moved_non_owned {
@@ -338,9 +387,26 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         }
                     }
                     if reads_self {
+                        if !prior_shadow_links.is_empty() {
+                            st.shadow_links
+                                .entry(name.clone())
+                                .or_default()
+                                .extend(prior_shadow_links);
+                        }
+                        if let Some(depth) = outer_depth {
+                            st.shadow_links
+                                .entry(name.clone())
+                                .or_default()
+                                .insert((name.clone(), depth));
+                        }
                         if let Some(pa) = prior_alias {
                             if pa != *name {
                                 st.aliases.insert(name.clone(), pa);
+                            }
+                        }
+                        for child in prior_children {
+                            if &child != name {
+                                st.aliases.insert(child, name.clone());
                             }
                         }
                         for peer in prior_shares {
@@ -379,6 +445,11 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             }
         }
         Stmt::Task { callee, args, span } => {
+            ck.mark_move_in_value(
+                st,
+                callee,
+                format!("the spawn callee `{}`", callee.render()),
+            );
             let desc = format!("the spawn `task {}(...)`", callee.render());
             let vals: Vec<&Expr> = args.iter().map(|a| &a.value).collect();
             let targets = ck.spawn_param_shapes(st, callee, args.len());
@@ -400,6 +471,11 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             is_move,
             span,
         } => {
+            ck.mark_move_in_value(
+                st,
+                chan,
+                format!("the send target `{}`", chan.render()),
+            );
             // Target classification (#77) first: a non-channel (or
             // unresolvable) send target is ill-typed — no value cascade.
             if ck.check_send_target(st, chan, *span) {
@@ -422,6 +498,11 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 st.scope_push();
                 match &arm.kind {
                     SelectArmKind::Send { chan, value } => {
+                        ck.mark_move_in_value(
+                            st,
+                            chan,
+                            format!("the select-send target `{}`", chan.render()),
+                        );
                         let span = chan.span().to(value.span());
                         if ck.check_send_target(st, chan, span) {
                             let desc =
@@ -432,6 +513,11 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         }
                     }
                     SelectArmKind::Recv { names, chan } => {
+                        ck.mark_move_in_value(
+                            st,
+                            chan,
+                            format!("the select-recv `{}`", chan.render()),
+                        );
                         // element shape when the channel resolves; `ok` is a
                         // bool; unresolvable stays Unknown (fail-closed, O4.9)
                         let elem = match ck.shape_of_expr(st, chan) {
@@ -461,6 +547,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
         }
         Stmt::If {
             init,
+            cond,
             then,
             otherwise,
             ..
@@ -473,6 +560,11 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 collect_stmt_direct_fnlits(i, st, nested);
             }
             check_stmt_own_uses(ck, st, stmt, managed);
+            ck.mark_move_in_value(
+                st,
+                cond,
+                format!("the condition `{}`", cond.render()),
+            );
             st.scope_push();
             check_body_boundaries(ck, st, then, managed, nested);
             st.scope_pop();
@@ -496,6 +588,11 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             st.scope_push(); // the loop vars' scope
             match kind {
                 Iterate { vars, expr } => {
+                    ck.mark_move_in_value(
+                        st,
+                        expr,
+                        format!("the loop header `{}`", expr.render()),
+                    );
                     let is_chan = matches!(ck.shape_of_expr(st, expr), TypeShape::Chan(_));
                     let shapes = ck.iterate_var_shapes(st, expr, vars.len());
                     for (name, shape) in vars.iter().zip(shapes) {
@@ -519,10 +616,27 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         }
                     }
                 }
-                Range { var, .. } => {
+                Range { var, lo, hi, .. } => {
+                    ck.mark_move_in_value(
+                        st,
+                        lo,
+                        format!("the range bound `{}`", lo.render()),
+                    );
+                    ck.mark_move_in_value(
+                        st,
+                        hi,
+                        format!("the range bound `{}`", hi.render()),
+                    );
                     ck.define_binding(st, var, TypeShape::Primitive, None, false, managed);
                 }
-                While { .. } | Infinite => {}
+                While { cond } => {
+                    ck.mark_move_in_value(
+                        st,
+                        cond,
+                        format!("the loop condition `{}`", cond.render()),
+                    );
+                }
+                Infinite => {}
             }
             st.scope_push(); // the body's own scope
             check_body_boundaries(ck, st, body, managed, nested);
@@ -534,11 +648,18 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 for (s, idx) in flat_body.stmts {
                     loop_stmts.push((s, idx + 1));
                 }
+                let loop_events: std::collections::HashMap<usize, Vec<crate::walk::ScopeEvent>> =
+                    flat_body
+                        .events
+                        .into_iter()
+                        .map(|(k, v)| (k + 1, v))
+                        .collect();
                 let mut reported_backedge = std::collections::HashSet::new();
                 ck.check_loop_backedge(
                     st,
                     outer_depth,
                     &loop_stmts,
+                    &loop_events,
                     body,
                     &pre_moved,
                     &mut reported_backedge,
@@ -552,9 +673,30 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             arms,
             span,
         } => {
+            ck.mark_move_in_value(
+                st,
+                subject,
+                format!("the match subject `{}`", subject.render()),
+            );
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    ck.mark_move_in_value(
+                        st,
+                        g,
+                        format!("the match guard `{}`", g.render()),
+                    );
+                }
+            }
             ck.check_match(st, subject, arms, *span);
             for arm in arms {
                 st.scope_push();
+                if let hy_syntax::MatchPattern::Path {
+                    binding: Some(name),
+                    ..
+                } = &arm.pattern
+                {
+                    ck.bind_match_arm(st, name, subject, managed);
+                }
                 check_body_boundaries(ck, st, &arm.body, managed, nested);
                 st.scope_pop();
             }
@@ -577,6 +719,20 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 ck.mark_move_in_value(st, v, format!("the move-return `{}`", v.render()));
             }
             ck.process_return(st, values, *span);
+        }
+        Stmt::Expr { expr, .. } => {
+            ck.mark_move_in_value(
+                st,
+                expr,
+                format!("the expression `{}`", expr.render()),
+            );
+        }
+        Stmt::Defer { call, .. } => {
+            ck.mark_move_in_value(
+                st,
+                call,
+                format!("the deferred call `defer {}`", call.render()),
+            );
         }
         _ => {}
     }
