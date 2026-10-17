@@ -34,8 +34,8 @@ use hy_syntax::{Block, Expr, LocalKind, SelectArmKind, Stmt};
 /// `body` (one env per closure, captures included). Called once per
 /// function, after the flat Pass B loop — the enclosing env is complete.
 pub(crate) fn check_closure_boundaries(ck: &mut Checker<'_>, st: &FnState, body: &Block) {
-    for (params, body) in collect_fnlits(body) {
-        check_one_closure(ck, st, params, body);
+    for (params, results, body) in collect_fnlits(body) {
+        check_one_closure(ck, st, params, results, body);
     }
 }
 
@@ -43,9 +43,11 @@ fn check_one_closure(
     ck: &mut Checker<'_>,
     st: &FnState,
     params: &[hy_syntax::Param],
+    results: &[hy_syntax::FnResult],
     body: &Block,
 ) {
-    // env: captures (the enclosing bindings) + the closure's ascribed params.
+    // env: captures (the enclosing bindings) + the closure's ascribed params
+    // and named result bindings.
     let mut cst = FnState {
         env: st.env.clone(),
         ..FnState::default()
@@ -76,6 +78,27 @@ fn check_one_closure(
             },
         );
     }
+    for r in results {
+        let shape = ck.shape_of_type(&r.ty);
+        if let Some(name) = &r.name {
+            if name != "_" {
+                cst.env.insert(
+                    name.clone(),
+                    Binding {
+                        shape: shape.clone(),
+                        ty: Some(r.ty.clone()),
+                        immutable: false,
+                        managed_taint: false,
+                        moved: None,
+                        non_owned_origin: None,
+                        slot_loan: false,
+                    },
+                );
+                cst.named_results.push(name.clone());
+            }
+        }
+        cst.result_shapes.push(shape);
+    }
     check_body_boundaries(ck, &mut cst, body, false);
 }
 
@@ -98,7 +121,7 @@ fn check_body_boundaries(ck: &mut Checker<'_>, st: &mut FnState, block: &Block, 
 
 fn check_stmt_own_uses(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, managed: bool) {
     let mut uses = Vec::new();
-    crate::walk::own_uses(stmt, &mut uses);
+    crate::walk::own_uses_with_results(stmt, &st.named_results, &mut uses);
     if !managed {
         for u in &uses {
             if u.via_move && !st.scopes.iter().any(|s| s.contains_key(&u.name)) {
@@ -445,10 +468,11 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
         } => {
             ck.process_closure_assign(st, targets, *op, values);
         }
-        Stmt::Return { values, .. } => {
+        Stmt::Return { values, span } => {
             for v in values {
                 ck.mark_move_in_value(st, v, format!("the move-return `{}`", v.render()));
             }
+            ck.process_return(st, values, *span);
         }
         _ => {}
     }
@@ -457,7 +481,13 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
 /// Every FnLit reachable from `block`, outermost-first, including closures
 /// nested inside other closures' bodies. walk.rs's use/call collectors skip
 /// FnLit deliberately (A5); this walker exists precisely to see them.
-fn collect_fnlits(block: &Block) -> Vec<(&[hy_syntax::Param], &Block)> {
+fn collect_fnlits(
+    block: &Block,
+) -> Vec<(
+    &[hy_syntax::Param],
+    &[hy_syntax::FnResult],
+    &Block,
+)> {
     let mut out = Vec::new();
     for s in &block.stmts {
         collect_stmt(s, &mut out);
@@ -465,7 +495,14 @@ fn collect_fnlits(block: &Block) -> Vec<(&[hy_syntax::Param], &Block)> {
     out
 }
 
-fn collect_stmt<'a>(stmt: &'a Stmt, out: &mut Vec<(&'a [hy_syntax::Param], &'a Block)>) {
+fn collect_stmt<'a>(
+    stmt: &'a Stmt,
+    out: &mut Vec<(
+        &'a [hy_syntax::Param],
+        &'a [hy_syntax::FnResult],
+        &'a Block,
+    )>,
+) {
     match stmt {
         Stmt::Local(l) => {
             for v in &l.values {
@@ -557,7 +594,11 @@ fn collect_stmt<'a>(stmt: &'a Stmt, out: &mut Vec<(&'a [hy_syntax::Param], &'a B
 
 fn collect_place<'a>(
     place: &'a hy_syntax::Place,
-    out: &mut Vec<(&'a [hy_syntax::Param], &'a Block)>,
+    out: &mut Vec<(
+        &'a [hy_syntax::Param],
+        &'a [hy_syntax::FnResult],
+        &'a Block,
+    )>,
 ) {
     match &place.kind {
         hy_syntax::PlaceKind::Ident(_) => {}
@@ -570,17 +611,36 @@ fn collect_place<'a>(
     }
 }
 
-fn collect_block<'a>(block: &'a Block, out: &mut Vec<(&'a [hy_syntax::Param], &'a Block)>) {
+fn collect_block<'a>(
+    block: &'a Block,
+    out: &mut Vec<(
+        &'a [hy_syntax::Param],
+        &'a [hy_syntax::FnResult],
+        &'a Block,
+    )>,
+) {
     for s in &block.stmts {
         collect_stmt(s, out);
     }
 }
 
-fn collect_expr<'a>(expr: &'a Expr, out: &mut Vec<(&'a [hy_syntax::Param], &'a Block)>) {
+fn collect_expr<'a>(
+    expr: &'a Expr,
+    out: &mut Vec<(
+        &'a [hy_syntax::Param],
+        &'a [hy_syntax::FnResult],
+        &'a Block,
+    )>,
+) {
     match expr {
         Expr::Ident { .. } => {}
-        Expr::FnLit { params, body, .. } => {
-            out.push((params, body));
+        Expr::FnLit {
+            params,
+            results,
+            body,
+            ..
+        } => {
+            out.push((params, results, body));
             // nested closures inside this closure's body
             for s in &body.stmts {
                 collect_stmt(s, out);
