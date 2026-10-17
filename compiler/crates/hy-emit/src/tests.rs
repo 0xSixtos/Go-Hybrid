@@ -403,7 +403,6 @@ fn compound_bit_assigns_emit() {
     assert!(go.contains("x >>= 1"), ":\n{}", go);
 }
 
-
 #[test]
 fn comparison_in_call_arg_parses_clean() {
     let go = emit("fn main() {\n    fmt.printf(\"%v\", 1 < 2)\n}");
@@ -514,7 +513,11 @@ fn managed_block_emits_marker_comment() {
     assert!(go.contains("// managed"), "audit marker greppable:\n{}", go);
     // row 14: the marker carries the category + reason + tickets
     assert!(go.contains("[mutex]"), "category in marker:\n{}", go);
-    assert!(go.contains("shared counter under a lock"), "reason in marker:\n{}", go);
+    assert!(
+        go.contains("shared counter under a lock"),
+        "reason in marker:\n{}",
+        go
+    );
     assert!(go.contains("PROJ-9"), "tickets in marker:\n{}", go);
     assert!(go.contains("go w(counter)"), ":\n{}", go);
 }
@@ -1365,12 +1368,10 @@ fn diff_composite_const_lands_as_var() {
 
 #[test]
 fn local_composite_const_lands_as_var() {
-    let go = emit("fn main() {\n    const thresholds = [10, 50]\n    fmt.println(\"{thresholds[0]}\")\n}");
-    assert!(
-        go.contains("var thresholds = []int{10, 50}"),
-        ":\n{}",
-        go
+    let go = emit(
+        "fn main() {\n    const thresholds = [10, 50]\n    fmt.println(\"{thresholds[0]}\")\n}",
     );
+    assert!(go.contains("var thresholds = []int{10, 50}"), ":\n{}", go);
     assert!(!go.contains("const thresholds"), ":\n{}", go);
 }
 
@@ -1595,8 +1596,16 @@ fn e3_short_circuit_and_or_with_try_guards_rhs_evaluation() {
         "|| must guard RHS try evaluation under `if !hyT3`:\n{}",
         go
     );
-    assert!(go.contains("a := hyT0"), "a binds hoisted short-circuit temp:\n{}", go);
-    assert!(go.contains("b := hyT3"), "b binds hoisted short-circuit temp:\n{}", go);
+    assert!(
+        go.contains("a := hyT0"),
+        "a binds hoisted short-circuit temp:\n{}",
+        go
+    );
+    assert!(
+        go.contains("b := hyT3"),
+        "b binds hoisted short-circuit temp:\n{}",
+        go
+    );
 }
 
 #[test]
@@ -1646,10 +1655,40 @@ fn non_exhaustive_option_match_rejects_at_check_and_emits_no_garbage() {
     let go_none_only = emit(
         "fn main() {\n    var x option[int] = some(1)\n    match x {\n        none: fmt.println(\"none\")\n    }\n}\n",
     );
-    assert!(!go_none_only.contains("} else {"), "orphan else came back:\n{}", go_none_only);
+    assert!(
+        !go_none_only.contains("} else {"),
+        "orphan else came back:\n{}",
+        go_none_only
+    );
 
     let go_some_only = emit(
         "fn main() {\n    var x option[int] = some(1)\n    match x {\n        some(v): fmt.println(v)\n    }\n}\n",
     );
-    assert!(!go_some_only.contains("} else {"), "orphan else came back:\n{}", go_some_only);
+    assert!(
+        !go_some_only.contains("} else {"),
+        "orphan else came back:\n{}",
+        go_some_only
+    );
+}
+
+#[test]
+fn user_struct_shadowing_primitive_zero_value_issue_326() {
+    let src = r#"
+struct rune {
+    count int
+}
+fn fail_helper() (int, error) {
+    return 0, nil
+}
+fn test_fn() (rune, error) {
+    fail_helper()?
+    return rune{ count: 1 }, nil
+}
+"#;
+    let go = emit(src);
+    assert!(
+        go.contains("return *new(rune), hyErr1"),
+        "expected return *new(rune), hyErr1, got:\n{}",
+        go
+    );
 }
