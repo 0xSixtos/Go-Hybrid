@@ -63,22 +63,22 @@ Everything the checker **accepts was proven** sendable; everything it
 ## Evidence inventory (what backs the ✅ rows)
 
 - **Adversarial corpus** — [tests/checker-corpus/](tests/checker-corpus/):
-  55 programs, each with an `EXPECTED-VERDICT` header. Programs 01–18 were
+  60 programs, each with an `EXPECTED-VERDICT` header. Programs 01–18 were
   **pre-registered before the checker existed** (the checker was built
   against them, not adjusted after); 19–20 were added during integration
   and 21+ after the checker landed, still hand-derived from the rule text
-  first. Current census: **39 REJECT / 14 ACCEPT / 2 ACCEPT-MANAGED**,
+  first. Current census: **43 REJECT / 15 ACCEPT / 2 ACCEPT-MANAGED**,
   pinned to specific diagnostic codes. Verdicts may change only by a logged
   amendment in [VERDICTS.md](tests/checker-corpus/VERDICTS.md).
 - **Differential loop** — [tools/differential_loop.py](tools/differential_loop.py):
-  accept-side programs must build and run byte-exact (16/16); reject-side
-  must be rejected for the pre-registered reason (39/39). Runs in CI on
+  accept-side programs must build and run byte-exact (17/17); reject-side
+  must be rejected for the pre-registered reason (43/43). Runs in CI on
   every push.
 - **Fail-closed tests** — dedicated checker tests (unknown initializer,
   unresolved name, unproven select-recv → `HYB-E3005`; managed escapes →
   `HYB-E8001`, counted) plus parser no-hang regressions. Full suite:
-  `cargo test --workspace` — **675 tests, 0 failures** on the
-  `main` CI run for `e2a5f7d` (run `39040028956`).
+  `cargo test --workspace` — **808 tests, 0 failures** on the
+  `main` CI run for `99c25a4` (run `39060436474`).
 - **Fuzzing** — [tools/fuzz/hyfuzz.py](tools/fuzz/hyfuzz.py): default
   `--cases 1200` (token salad + corpus mutations + nest bombs,
   deterministic seed): no hangs, no crashes, no internal errors;
