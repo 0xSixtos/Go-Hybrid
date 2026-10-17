@@ -327,19 +327,29 @@ fn integer_of_float(f: f64) -> String {
 }
 
 fn parse_int_lit(s: &str) -> Option<i128> {
-    let s = s.as_bytes();
-    if s.is_empty() {
+    let clean: String = s.chars().filter(|c| *c != '_').collect();
+    if clean.is_empty() {
         return None;
     }
-    if s.len() >= 2 && s[0] == b'0' {
-        match s[1].to_ascii_lowercase() {
-            b'x' => return i128::from_str_radix(std::str::from_utf8(&s[2..]).ok()?, 16).ok(),
-            b'b' => return i128::from_str_radix(std::str::from_utf8(&s[2..]).ok()?, 2).ok(),
-            b'o' => return i128::from_str_radix(std::str::from_utf8(&s[2..]).ok()?, 8).ok(),
-            _ => {}
+    let s = clean.as_str();
+    let (radix, digits) = if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        (16, rest)
+    } else if let Some(rest) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
+        (2, rest)
+    } else if let Some(rest) = s.strip_prefix("0o").or_else(|| s.strip_prefix("0O")) {
+        (8, rest)
+    } else if s.len() > 1 && s.starts_with('0') {
+        if s.chars().any(|c| c == '8' || c == '9') {
+            return None;
         }
+        (8, s)
+    } else {
+        (10, s)
+    };
+    if digits.is_empty() {
+        return None;
     }
-    i128::from_str_radix(std::str::from_utf8(s).ok()?, 10).ok()
+    i128::from_str_radix(digits, radix).ok()
 }
 
 #[cfg(test)]
