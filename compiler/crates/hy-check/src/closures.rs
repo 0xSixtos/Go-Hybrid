@@ -251,7 +251,16 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
         check_stmt_own_uses(ck, st, stmt, managed);
     }
 
-    // #238: `copy(dst, src)` inside a closure body duplicates reference-bearing
+    // Issue #411: closure bodies sit outside the Tier-0 flat walk, so the
+    // range-iterable rule (HYB-E2009/E3005) must fire here too — the same
+    // A5 perimeter discipline as the send-side checks below.
+    ck.check_stmt_range_iterable(st, stmt);
+
+    // Issue #409: closure bodies sit outside the Tier-0 flat walk, so the
+    // receive-operand rule (HYB-E2008/E3005) must fire here too — the same
+    // perimeter discipline as the send-side checks below. Pure type
+    // classification: no use/define ordering concerns.
+    ck.check_stmt_recv_operands(st, stmt);    // #238: `copy(dst, src)` inside a closure body duplicates reference-bearing
     // slice elements, so `dst` and `src` share mutable GC storage and a later
     // `move` of either inside the closure must freeze the other (O5.2) and
     // inherit non-owned capture/parameter origin (O5.1 / O5.4).
