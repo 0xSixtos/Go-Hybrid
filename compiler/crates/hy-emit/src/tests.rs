@@ -574,7 +574,7 @@ fn match_stmt_errors_cleanly() {
 #[test]
 fn select_emits_go_cases() {
     let go = emit(
-        "fn main() {\n    select {\n        v, ok := <-sq:\n            _ = ok\n        <-deadline:\n            _ = deadline\n    }\n}\n",
+        "fn main() {\n    select {\n        v, ok := <-sq:\n            _ = v\n            _ = ok\n        <-deadline:\n            _ = deadline\n    }\n}\n",
     );
     assert!(go.contains("select {"), ":\n{}", go);
     assert!(go.contains("case v, ok := <-sq:"), ":\n{}", go);
@@ -946,6 +946,123 @@ fn single_var_iterate_over_chan_binds_value() {
         go
     );
 }
+
+#[test]
+fn single_var_iterate_over_chan_typed_var_binds_value() {
+    let go = emit("fn f() {\n    var ch chan int\n    for v in ch {\n        _ = v\n    }\n}\n");
+    assert!(
+        go.contains("for v := range ch {"),
+        "typed chan var direct range:\n{}",
+        go
+    );
+}
+
+#[test]
+fn single_var_iterate_over_chan_call_binds_value() {
+    let go = emit("fn get_chan() chan int {\n    return make(chan int, 1)\n}\n\nfn f() {\n    for v in get_chan() {\n        _ = v\n    }\n}\n");
+    assert!(
+        go.contains("for v := range get_chan() {"),
+        "channel call range binds received value:\n{}",
+        go
+    );
+}
+
+#[test]
+fn single_var_iterate_over_chan_paren_binds_value() {
+    let go = emit("fn f(ch chan int) {\n    for v in (ch) {\n        _ = v\n    }\n}\n");
+    assert!(
+        go.contains("for v := range (ch) {") || go.contains("for v := range ch {"),
+        "channel paren range binds received value:\n{}",
+        go
+    );
+}
+
+#[test]
+fn single_var_iterate_over_chan_make_call_binds_value() {
+    let go = emit("fn f() {\n    for v in make(chan int, 2) {\n        _ = v\n    }\n}\n");
+    assert!(
+        go.contains("for v := range make(chan int, 2) {"),
+        "inline make chan range binds received value:\n{}",
+        go
+    );
+}
+
+#[test]
+fn two_var_iterate_over_chan_is_rejected() {
+    let err = emit_err("fn f(ch chan int) {\n    for a, b in ch {\n        _ = a\n        _ = b\n    }\n}\n");
+    assert!(
+        err.contains("cannot range over channel with two iteration variables"),
+        "expected two-var chan range rejection, got:\n{}",
+        err
+    );
+}
+
+#[test]
+fn single_var_iterate_over_make_slice_binds_element() {
+    let go = emit("fn f() {\n    for x in make([]int, 5) {\n        _ = x\n    }\n}\n");
+    assert!(
+        go.contains("for _, x := range make([]int, 5) {"),
+        "make slice range must bind element (for _, x := range ...):\n{}",
+        go
+    );
+    assert!(
+        !go.contains("for x := range make([]int, 5) {"),
+        "make slice range must not be lowered as channel range:\n{}",
+        go
+    );
+}
+
+#[test]
+fn single_var_iterate_over_make_slice_variable_binds_element() {
+    let go = emit("fn f() {\n    s := make([]int, 5)\n    for x in s {\n        _ = x\n    }\n}\n");
+    assert!(
+        go.contains("for _, x := range s {"),
+        "make slice variable range must bind element (for _, x := range s):\n{}",
+        go
+    );
+    assert!(
+        !go.contains("for x := range s {"),
+        "make slice variable must not be recorded as channel binding:\n{}",
+        go
+    );
+}
+
+#[test]
+fn single_var_iterate_over_map_variable_does_not_lower_as_channel() {
+    let go = emit("fn f() {\n    m := map[string]int{}\n    for k in m {\n        _ = k\n    }\n}\n");
+    assert!(
+        go.contains("for _, k := range m {"),
+        "map variable must not be lowered as channel:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("for k := range m {"),
+        "map variable single-var range must not be lowered as channel range:\n{}",
+        go
+    );
+}
+
+#[test]
+fn single_var_iterate_over_make_map_literal_does_not_lower_as_channel() {
+    let go = emit("fn f() {\n    m := make(map[string]int{})\n    for k in m {\n        _ = k\n    }\n}\n");
+    assert!(
+        go.contains("for _, k := range m {"),
+        "make(map) variable must not be lowered as channel:\n{}",
+        go
+    );
+}
+
+
+#[test]
+fn two_var_iterate_over_make_slice_allowed() {
+    let go = emit("fn f() {\n    for i, x in make([]int, 5) {\n        _ = i\n        _ = x\n    }\n}\n");
+    assert!(
+        go.contains("for i, x := range make([]int, 5) {"),
+        "two-var range over make slice must be allowed:\n{}",
+        go
+    );
+}
+
 
 #[test]
 fn set_insert_uses_prelude() {
@@ -1430,6 +1547,52 @@ fn diff_pointer_param_auto_address() {
 }
 
 #[test]
+fn pointer_param_forwarded_to_pointer_param_not_double_addressed() {
+    // A parameter already having a pointer type (*env) must NOT be auto-addressed
+    // with '&' when passed to a pointer parameter (*env), which would produce **env.
+    let go = emit(
+        "struct env {\n    n int\n}\n\nfn scale(e *env) {\n    _ = e\n}\n\nfn forward(p *env) {\n    scale(p)\n}\n",
+    );
+    assert!(go.contains("scale(p)"), ":\n{}", go);
+    assert!(
+        !go.contains("scale(&p)"),
+        "must not double-address pointer param:\n{}",
+        go
+    );
+}
+
+#[test]
+fn pointer_var_passed_to_pointer_param_not_double_addressed() {
+    // A variable declared with a pointer type (var p *env) must NOT be auto-addressed
+    // when passed to a pointer parameter.
+    let go = emit(
+        "struct env {\n    n int\n}\n\nfn scale(e *env) {\n    _ = e\n}\n\nfn main() {\n    var p *env\n    scale(p)\n}\n",
+    );
+    assert!(go.contains("scale(p)"), ":\n{}", go);
+    assert!(
+        !go.contains("scale(&p)"),
+        "must not double-address pointer var:\n{}",
+        go
+    );
+}
+
+#[test]
+fn pointer_binding_from_addrof_not_double_addressed() {
+    // A binding initialized from an address-of expression (p := &e) is already a
+    // pointer and must not be auto-addressed when passed to a pointer parameter.
+    let go = emit(
+        "struct env {\n    n int\n}\n\nfn scale(e *env) {\n    _ = e\n}\n\nfn main() {\n    e := env{}\n    p := &e\n    scale(p)\n}\n",
+    );
+    assert!(go.contains("p := &e"), ":\n{}", go);
+    assert!(go.contains("scale(p)"), ":\n{}", go);
+    assert!(
+        !go.contains("scale(&p)"),
+        "must not double-address pointer local:\n{}",
+        go
+    );
+}
+
+#[test]
 fn diff_hyfn_rust_typed_result_normalizes_methods() {
     // corpus 13: `s := summary(doc)?` — summary's declared result is
     // serde_json.value; `s.set(...)` normalizes like any rust-call result.
@@ -1565,6 +1728,29 @@ fn range_binding_mention_inside_a_closure_counts_as_read() {
         go
     );
 }
+
+#[test]
+fn single_range_binding_never_read_drops_to_for_range() {
+    let go = emit("fn main() {\n    xs := []int{1, 2, 3}\n    for x in xs {\n        fmt.println(\"item\")\n    }\n}\n");
+    assert!(
+        go.contains("for range xs {"),
+        "unread single binding must lower to `for range xs`:\n{}",
+        go
+    );
+    assert!(!go.contains("for _, x :="), "must not declare unread variable:\n{}", go);
+}
+
+#[test]
+fn single_range_binding_over_chan_never_read_drops_to_for_range() {
+    let go = emit("fn worker(jobs <-chan int) {\n    for j in jobs {\n        fmt.println(\"item\")\n    }\n}\n");
+    assert!(
+        go.contains("for range jobs {"),
+        "unread single channel binding must lower to `for range jobs`:\n{}",
+        go
+    );
+    assert!(!go.contains("for j :="), "must not declare unread variable:\n{}", go);
+}
+
 
 // Loop-label scope (HYB-E3010 companion; issue: break/continue loop with no
 // enclosing loop / match-arm label propagation)
@@ -1732,6 +1918,106 @@ fn test_fn() (rune, error) {
     assert!(
         go.contains("return *new(rune), hyErr1"),
         "expected return *new(rune), hyErr1, got:\n{}",
+        go
+    );
+}
+
+#[test]
+fn select_recv_single_var_unread_drops_to_bare_receive() {
+    let go = emit("fn main() {\n    select {\n        v := <-ch:\n            fmt.println(\"tick\")\n    }\n}\n");
+    assert!(
+        go.contains("case <-ch:"),
+        "unread single binding must lower to bare receive:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("case v"),
+        "must not declare unread variable in case:\n{}",
+        go
+    );
+    assert!(
+        !go.contains(":="),
+        "must not use := with no new variables:\n{}",
+        go
+    );
+}
+
+#[test]
+fn select_recv_single_var_blank_drops_to_bare_receive() {
+    let go = emit("fn main() {\n    select {\n        _ := <-ch:\n            fmt.println(\"tick\")\n    }\n}\n");
+    assert!(
+        go.contains("case <-ch:"),
+        "blank single binding must lower to bare receive:\n{}",
+        go
+    );
+    assert!(
+        !go.contains(":="),
+        "must not use := with blank variable:\n{}",
+        go
+    );
+}
+
+#[test]
+fn select_recv_two_var_neither_read_drops_to_bare_receive() {
+    let go = emit("fn main() {\n    select {\n        v, ok := <-ch:\n            fmt.println(\"tick\")\n    }\n}\n");
+    assert!(
+        go.contains("case <-ch:"),
+        "two unread bindings must drop to bare receive:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("case v"),
+        "must not declare unread variables in case:\n{}",
+        go
+    );
+    assert!(
+        !go.contains(":="),
+        "must not use := with no new variables:\n{}",
+        go
+    );
+}
+
+#[test]
+fn select_recv_two_var_neither_read_explicit_blank() {
+    let go = emit("fn main() {\n    select {\n        _, _ := <-ch:\n            fmt.println(\"tick\")\n    }\n}\n");
+    assert!(
+        go.contains("case <-ch:"),
+        "two blank bindings must drop to bare receive:\n{}",
+        go
+    );
+    assert!(
+        !go.contains(":="),
+        "must not emit invalid `case _, _ := <-ch:`:\n{}",
+        go
+    );
+}
+
+#[test]
+fn select_recv_two_var_first_only_read_blanks_second() {
+    let go = emit("fn main() {\n    select {\n        v, ok := <-ch:\n            fmt.println(\"{v}\")\n    }\n}\n");
+    assert!(
+        go.contains("case v, _ := <-ch:"),
+        "unread second binding must be blanked:\n{}",
+        go
+    );
+}
+
+#[test]
+fn select_recv_two_var_second_only_read_blanks_first() {
+    let go = emit("fn main() {\n    select {\n        v, ok := <-ch:\n            if ok {\n                fmt.println(\"open\")\n            }\n    }\n}\n");
+    assert!(
+        go.contains("case _, ok := <-ch:"),
+        "unread first binding must be blanked:\n{}",
+        go
+    );
+}
+
+#[test]
+fn select_recv_two_var_both_read_kept_intact() {
+    let go = emit("fn main() {\n    select {\n        v, ok := <-ch:\n            if ok {\n                fmt.println(\"{v}\")\n            }\n    }\n}\n");
+    assert!(
+        go.contains("case v, ok := <-ch:"),
+        "both read bindings must remain intact:\n{}",
         go
     );
 }

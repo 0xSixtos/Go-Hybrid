@@ -98,6 +98,7 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 
 ## Test Results
 - PR #289 integration closeout (2026-10-18): ported onto upstream e2a5f7d while retaining upstream changes; hy-emit 120 unit + 4 integration tests passed; git diff --check passed.
+- PR #283 integration closeout (2026-10-18): ported onto upstream e2a5f7d while retaining upstream changes; hy-emit 125 unit + 4 integration tests passed; git diff --check passed.
 
 - Checker JSON envelope validation (2026-10-15): reject malformed envelopes and contradictory supplied error/warning counts; retain omitted counts and extra fields. Focused corpus harness suite 14/14; top-level Python tools suite 70/70 in a normal clone. Full compiler/corpus suites not run locally (pinned rustc terminates with SIGBUS); owner CI remains required.
 - Compiler (session 5): **157 tests green** (8 diag + 75+4 parser + 25+2 checker + 48 emit) — corpus 20/20 verdict agreement, tripwire not fired (10.0% / 15.0% vs ~25%)

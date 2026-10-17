@@ -79,8 +79,10 @@ impl Emitter {
                 // greppable in the generated source and now carries the
                 // category + reason + tickets (row 14, discussion #4) — a
                 // reviewer greps the GO output, not just the .hy input.
-                let mut marker =
-                    format!("{{ // managed [{}] {} (audited via hyb check --report-managed)", category, reason);
+                let mut marker = format!(
+                    "{{ // managed [{}] {} (audited via hyb check --report-managed)",
+                    category, reason
+                );
                 if !tickets.is_empty() {
                     marker.push_str(&format!(" tickets: {}", tickets.join(", ")));
                 }
@@ -166,8 +168,42 @@ impl Emitter {
                             let c = self.emit_expr(chan, 0)?;
                             let head = match names.len() {
                                 0 => format!("case <-{}:", c),
-                                1 => format!("case {} := <-{}:", names[0], c),
-                                2 => format!("case {}, {} := <-{}:", names[0], names[1], c),
+                                1 => {
+                                    // An unread or blank single binding cannot emit
+                                    // `case _ := <-c:` (Go rejects: `no new variables on
+                                    // left side of :=`) or `case v := <-c:` (Go rejects:
+                                    // `v declared and not used`). Lower to bare receive.
+                                    let read = names[0] != "_"
+                                        && crate::rangebind::body_reads(&arm.body, &names[0]);
+                                    if read {
+                                        format!("case {} := <-{}:", names[0], c)
+                                    } else {
+                                        format!("case <-{}:", c)
+                                    }
+                                }
+                                2 => {
+                                    // Go rejects unread receive bindings (`declared and
+                                    // not used`) and rejects `case _, _ := <-c:` (`no new
+                                    // variables on left side of :=`).
+                                    // If both unread, drop to bare receive. If one is read,
+                                    // blank the unread slot with `_`.
+                                    let a_read = names[0] != "_"
+                                        && crate::rangebind::body_reads(&arm.body, &names[0]);
+                                    let b_read = names[1] != "_"
+                                        && crate::rangebind::body_reads(&arm.body, &names[1]);
+                                    match (a_read, b_read) {
+                                        (true, true) => {
+                                            format!("case {}, {} := <-{}:", names[0], names[1], c)
+                                        }
+                                        (true, false) => {
+                                            format!("case {}, _ := <-{}:", names[0], c)
+                                        }
+                                        (false, true) => {
+                                            format!("case _, {} := <-{}:", names[1], c)
+                                        }
+                                        (false, false) => format!("case <-{}:", c),
+                                    }
+                                }
                                 n => {
                                     return Err(EmitError::unsupported(format!(
                                         "select receive with {} names",
@@ -222,6 +258,11 @@ impl Emitter {
                 // Typed var decls carry receiver knowledge (Batch I):
                 // `var hits atomic.int64` → shape-known, not a pointer.
                 if let Some(t) = &l.ty {
+                    if matches!(t, TypeExpr::Pointer { .. }) {
+                        for n in &l.names {
+                            self.pointer_vars.insert(n.clone());
+                        }
+                    }
                     if let Some(kind) = self.binding_kind_of_ty(t) {
                         for n in &l.names {
                             self.bindings.insert(n.clone(), kind);
@@ -293,9 +334,7 @@ impl Emitter {
         // E3 expression form (Batch G): `?` nested anywhere else in the
         // values hoists to temp bindings + propagation, then substitutes.
         for (idx, v) in l.values.iter().enumerate() {
-            let later_has_try = l.values[idx + 1..]
-                .iter()
-                .any(Self::expr_has_hoistable_try);
+            let later_has_try = l.values[idx + 1..].iter().any(Self::expr_has_hoistable_try);
             if later_has_try {
                 self.hoist_order_before_try(v)?;
             } else {
@@ -376,9 +415,9 @@ impl Emitter {
                         .map(Self::expr_has_hoistable_try)
                         .unwrap_or(false)
             }
-            Expr::StructLit { fields, .. } => {
-                fields.iter().any(|f| Self::expr_has_hoistable_try(&f.value))
-            }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| Self::expr_has_hoistable_try(&f.value)),
             Expr::SliceLit { items, .. } => items.iter().any(Self::expr_has_hoistable_try),
             Expr::MapLit { entries, .. } => entries
                 .iter()
@@ -917,15 +956,18 @@ impl Emitter {
         if kind != BindingKind::Plain {
             self.bindings.insert(names[0].clone(), kind);
         }
+        if self.expr_is_pointer(&values[0]) {
+            self.pointer_vars.insert(names[0].clone());
+        }
     }
 
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
-        let call = match e {
+        let (call, args) = match e {
             Expr::Try { operand, .. } => match operand.as_ref() {
-                Expr::Call { callee, .. } => callee.as_ref(),
+                Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
                 _ => return BindingKind::Plain,
             },
-            Expr::Call { callee, .. } => callee.as_ref(),
+            Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
             _ => return BindingKind::Plain,
         };
         if let Expr::Field { base, name, .. } = call {
@@ -963,12 +1005,38 @@ impl Emitter {
             }
         }
         // make(chan …) → Chan (single-var range emits the value directly).
+        // Only classify as Chan if the first argument is a channel type.
+        // make([]T, n) (SliceLit) and make(map[K]V) (MapLit) must remain Plain
+        // so single-var range binds elements/keys rather than channel values.
         if matches!(call, Expr::Ident { name, .. } if name == "make") {
-            // args[0] is the type-as-value encoding; peek at its shape.
-            // (Verified against the parser's make encoding.)
-            return BindingKind::Chan;
+            if let Some(first) = args.first() {
+                if let Expr::StructLit {
+                    ty: Some(TypeExpr::Chan { .. }),
+                    ..
+                } = &first.value
+                {
+                    return BindingKind::Chan;
+                }
+            }
+            return BindingKind::Plain;
         }
         BindingKind::Plain
+    }
+
+    /// Whether an expression evaluates to a channel type (param, typed local,
+    /// make(chan ...), or a function returning a channel). Channel ranges in
+    /// Go permit only one iteration variable and bind the received value directly.
+    fn is_channel_expr(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Ident { name, .. } => {
+                matches!(self.bindings.get(name), Some(BindingKind::Chan))
+            }
+            Expr::Paren { inner, .. } => self.is_channel_expr(inner),
+            Expr::Call { .. } | Expr::Try { .. } => {
+                self.binding_kind_of(e) == BindingKind::Chan
+            }
+            _ => false,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1016,6 +1084,15 @@ impl Emitter {
                         }
                         return Ok(());
                     }
+                }
+            }
+        }
+        if targets.len() == 1 && values.len() == 1 && op == AssignOp::Assign {
+            if let PlaceKind::Ident(name) = &targets[0].kind {
+                if self.expr_is_pointer(&values[0]) {
+                    self.pointer_vars.insert(name.clone());
+                } else {
+                    self.pointer_vars.remove(name);
                 }
             }
         }
@@ -1447,10 +1524,7 @@ impl Emitter {
                         v, cont, lo_once, lo_once, hi_once, cont, v
                     )
                 } else {
-                    format!(
-                        "for {} := {}; {} < {}; {}++ {{",
-                        v, lo_t, v, hi_t, v
-                    )
+                    format!("for {} := {}; {} < {}; {}++ {{", v, lo_t, v, hi_t, v)
                 }
             }
             ForKind::Iterate { vars, expr } => {
@@ -1462,20 +1536,19 @@ impl Emitter {
                     1 => {
                         // `for _ in ch` drains without binding (corpus 17);
                         // `for range e` is Go's blank form for every
-                        // iterable. No variable to register.
-                        if vars[0] == "_" {
+                        // iterable. When a named loop variable is never read in
+                        // the body, Go rejects it (`declared and not used`).
+                        // Drop the binding to `for range e`, completing the
+                        // unread-binding lowering from issue #139.
+                        let read = vars[0] != "_" && crate::rangebind::body_reads(body, &vars[0]);
+                        if !read {
                             format!("for range {} {{", e)
                         } else {
                             // Hybrid's single-var iterate binds the VALUE.
                             // Go's single-var range binds the index (slices/
                             // maps) or the value (channels) — hence the Chan
                             // hint check.
-                            let over_chan = match expr {
-                                Expr::Ident { name, .. } => {
-                                    matches!(self.bindings.get(name), Some(BindingKind::Chan))
-                                }
-                                _ => false,
-                            };
+                            let over_chan = self.is_channel_expr(expr);
                             if over_chan {
                                 format!("for {} := range {} {{", vars[0], e)
                             } else {
@@ -1501,6 +1574,11 @@ impl Emitter {
                         }
                     }
                     2 => {
+                        if self.is_channel_expr(expr) {
+                            return Err(EmitError::unsupported(
+                                "cannot range over channel with two iteration variables: channels permit only one iteration variable (SPEC-LANGUAGE.md LX13)",
+                            ));
+                        }
                         // Go rejects a range binding the body never reads
                         // (`declared and not used`), and `for _, _ :=` is
                         // itself invalid (`no new variables on left side of
