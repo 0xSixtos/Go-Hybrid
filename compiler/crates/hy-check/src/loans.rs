@@ -18,8 +18,8 @@
 
 use crate::foreign::{self, CallMode};
 use crate::model::{
-    as_addr_of, collect_ref_roots, move_operand_ident, unwrap_parens, Binding, Checker, FnState,
-    Loan, LoanTarget, MoveKind, TypeShape,
+    as_addr_of, collect_addr_of_roots, collect_ref_roots, move_operand_ident, unwrap_parens,
+    Binding, Checker, FnState, Loan, LoanTarget, MoveKind, TypeShape,
 };
 use crate::shape::receiver_type_name;
 use crate::walk::{self, CallRef};
@@ -1394,7 +1394,13 @@ impl<'a> Checker<'a> {
                             // of the handle.
                             continue;
                         }
-                        if self.shape_may_share(&b.shape) {
+                        // pr-319 (#318): a slice of an ADDRESSABLE ARRAY
+                        // views the array's storage even when the element
+                        // type is primitive - link it so a later move
+                        // freezes the array too.
+                        if self.shape_may_share(&b.shape)
+                            || self.expr_slices_addressable_array(st, value, &root)
+                        {
                             st.share_edge(name, &root);
                         }
                     }
@@ -1406,8 +1412,104 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                let mut addr_roots = Vec::new();
+                collect_addr_of_roots(value, &mut addr_roots);
+                for root in addr_roots {
+                    if root != name {
+                        st.share_edge(name, &root);
+                        let origin = self
+                            .lookup_binding(st, &root)
+                            .and_then(|b| b.non_owned_origin.clone());
+                        if let Some(origin) = origin {
+                            if let Some(nb) = st.env_lookup_mut(name) {
+                                if nb.non_owned_origin.is_none() {
+                                    nb.non_owned_origin = Some(origin);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
+    }
+
+    /// True when `value` contains a slice whose base is an addressable
+    /// array rooted at `root`. A call that returns an array by value
+    /// (`clone(a)[:]`) is a copy: the slice base is the call, so it does
+    /// not match even though `collect_ref_roots` still sees `a`.
+    fn expr_slices_addressable_array(&self, st: &FnState, value: &Expr, root: &str) -> bool {
+        match value {
+            Expr::Slice { base, lo, hi, .. } => {
+                if self.addressable_array_root(st, base) == Some(root) {
+                    return true;
+                }
+                if self.expr_slices_addressable_array(st, base, root) {
+                    return true;
+                }
+                if let Some(lo) = lo {
+                    if self.expr_slices_addressable_array(st, lo, root) {
+                        return true;
+                    }
+                }
+                if let Some(hi) = hi {
+                    if self.expr_slices_addressable_array(st, hi, root) {
+                        return true;
+                    }
+                }
+                false
+            }
+            Expr::Paren { inner, .. }
+            | Expr::Move { operand: inner, .. }
+            | Expr::Try { operand: inner, .. }
+            | Expr::Unary { operand: inner, .. }
+            | Expr::AddrOf { operand: inner, .. } => {
+                self.expr_slices_addressable_array(st, inner, root)
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.expr_slices_addressable_array(st, lhs, root)
+                    || self.expr_slices_addressable_array(st, rhs, root)
+            }
+            Expr::Index { base, index, .. } => {
+                self.expr_slices_addressable_array(st, base, root)
+                    || self.expr_slices_addressable_array(st, index, root)
+            }
+            Expr::Field { base, .. } => self.expr_slices_addressable_array(st, base, root),
+            Expr::Call { callee, args, .. } => {
+                self.expr_slices_addressable_array(st, callee, root)
+                    || args
+                        .iter()
+                        .any(|a| self.expr_slices_addressable_array(st, &a.value, root))
+            }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| self.expr_slices_addressable_array(st, &f.value, root)),
+            Expr::SliceLit { items, .. } => items
+                .iter()
+                .any(|it| self.expr_slices_addressable_array(st, it, root)),
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
+                self.expr_slices_addressable_array(st, k, root)
+                    || self.expr_slices_addressable_array(st, v, root)
+            }),
+            Expr::Receive { chan, .. } => self.expr_slices_addressable_array(st, chan, root),
+            Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                hy_syntax::InterpPart::Expr(e) => {
+                    self.expr_slices_addressable_array(st, e, root)
+                }
+                hy_syntax::InterpPart::Lit(_) => false,
+            }),
+            // Closure bodies are checked as their own statements.
+            Expr::FnLit { .. } | Expr::Ident { .. } | Expr::Lit { .. } => false,
+        }
+    }
+
+    /// Binding an addressable `[N]T` expression is rooted at.
+    /// `a`, `b.data`, and `g[i]` qualify; a call does not (it yields a copy).
+    fn addressable_array_root<'e>(&self, st: &FnState, expr: &'e Expr) -> Option<&'e str> {
+        let expr = unwrap_parens(expr);
+        if !matches!(self.shape_of_expr(st, expr), TypeShape::Array(_)) {
+            return None;
+        }
+        expr.root_ident()
     }
     // `record_literal_ref` (pr-28's composite-literal recursion) is gone:
     // `record_may_share` now walks literals, calls and views with
@@ -1528,6 +1630,9 @@ impl<'a> Checker<'a> {
 
     /// Record O5.2 alias links for pointer borrows (`p := &stats`, `slot := &m[k]`)
     /// so moving `p` freezes the underlying mutable binding `stats` (#33).
+    /// pr-312: the alias recording descends into NESTED address-of operands
+    /// inside composite literals (`p := stats{cpu: &usage}`) via
+    /// collect_addr_of_roots, not just the direct as_addr_of form.
     pub(crate) fn record_local_borrow_aliases(&self, st: &mut FnState, l: &LocalDecl) {
         if l.names.len() == l.values.len() {
             for (name, value) in l.names.iter().zip(l.values.iter()) {
@@ -1541,13 +1646,18 @@ impl<'a> Checker<'a> {
                     st.borrow_bindings.remove(name);
                 }
                 if move_operand_ident(value).is_none() {
-                    if let Some(op) = as_addr_of(inner) {
-                        if let Some(src) = op.root_ident() {
-                            if src != name {
-                                if let Some(b) = self.lookup_binding(st, src) {
-                                    if !b.shape.is_sendable_by_type() {
-                                        st.aliases.insert(name.clone(), src.to_string());
-                                    }
+                    let shape = self.shape_of_expr(st, value);
+                    if field_borrow_kind(&shape).is_none() && !matches!(shape, TypeShape::Unknown) {
+                        continue;
+                    }
+                    let mut addr_roots = Vec::new();
+                    collect_addr_of_roots(value, &mut addr_roots);
+                    for src in addr_roots {
+                        if src != *name {
+                            if let Some(b) = self.lookup_binding(st, &src) {
+                                if !b.shape.is_sendable_by_type() {
+                                    st.aliases.insert(name.clone(), src);
+                                    break;
                                 }
                             }
                         }
@@ -1558,6 +1668,8 @@ impl<'a> Checker<'a> {
     }
 
     /// Record O5.2 alias links for pointer-borrow rebinds (`p = &stats`).
+    /// pr-312: nested address-of operands inside composite rebinds are
+    /// tracked the same way as the define form.
     pub(crate) fn record_assign_borrow_aliases(
         &self,
         st: &mut FnState,
@@ -1578,13 +1690,18 @@ impl<'a> Checker<'a> {
                         st.borrow_bindings.remove(name);
                     }
                     if move_operand_ident(v).is_none() {
-                        if let Some(addr_op) = as_addr_of(inner) {
-                            if let Some(src) = addr_op.root_ident() {
-                                if src != name {
-                                    if let Some(b) = self.lookup_binding(st, src) {
-                                        if !b.shape.is_sendable_by_type() {
-                                            st.aliases.insert(name.clone(), src.to_string());
-                                        }
+                        let shape = self.shape_of_expr(st, v);
+                        if field_borrow_kind(&shape).is_none() && !matches!(shape, TypeShape::Unknown) {
+                            continue;
+                        }
+                        let mut addr_roots = Vec::new();
+                        collect_addr_of_roots(v, &mut addr_roots);
+                        for src in addr_roots {
+                            if src != *name {
+                                if let Some(b) = self.lookup_binding(st, &src) {
+                                    if !b.shape.is_sendable_by_type() {
+                                        st.aliases.insert(name.clone(), src);
+                                        break;
                                     }
                                 }
                             }
@@ -1882,8 +1999,9 @@ impl<'a> Checker<'a> {
                     continue;
                 }
                 if matches!(t.kind, PlaceKind::Field { .. }) {
+                    let shape = self.shape_of_expr(st, v);
                     let is_borrow = as_addr_of(v).is_some()
-                        || matches!(self.shape_of_expr(st, v), TypeShape::BorrowHandle(_));
+                        || field_borrow_kind(&shape).is_some();
                     if is_borrow {
                         self.emit_a6_field_borrow_error(t);
                     }
@@ -1893,7 +2011,7 @@ impl<'a> Checker<'a> {
             let shapes = self.multi_value_shapes(st, &values[0], targets.len());
             for (t, shape) in targets.iter().zip(shapes.iter()) {
                 if matches!(t.kind, PlaceKind::Field { .. })
-                    && matches!(shape, TypeShape::BorrowHandle(_))
+                    && field_borrow_kind(shape).is_some()
                 {
                     self.emit_a6_field_borrow_error(t);
                 }
@@ -2126,20 +2244,9 @@ impl<'a> Checker<'a> {
                     st.closure_mutates.remove(name);
                     self.record_closure_mutations(st, name, v);
                 } else {
-                    // #392: a store into a field or an index of a composite
-                    // (`h.m = shared`) must materialize the may_share edge
-                    // from the composite's ROOT binding to every live
-                    // reference-bearing root on the RHS. Without the edge the
-                    // composite looks self-contained, so `move h` neither
-                    // reports an unproven spawn nor freezes `shared`, and both
-                    // writers reach the same map (GUARANTEES.md rows 1 and 3).
-                    //
-                    // The guard keeps this narrow: only composites that may
-                    // share mutable GC storage get an edge, so scalar field
-                    // stores (`svc.replicas = n`) stay unedged.
-                    let root = t.root().to_string();
-                    if !root.is_empty() && self.binding_may_share(st, &root) {
-                        self.record_may_share(st, &root, v);
+                    let root = t.root();
+                    if !root.is_empty() && self.binding_may_share(st, root) {
+                        self.record_may_share(st, root, v);
                     }
                 }
             }
@@ -3443,8 +3550,8 @@ impl<'a> Checker<'a> {
         for (sname, fields) in decls {
             for (fname, fty) in fields {
                 let shape = self.shape_of_type(&fty);
-                match &shape {
-                    TypeShape::BorrowHandle(_) => {
+                match field_borrow_kind(&shape) {
+                    Some("borrow-handle") => {
                         let msg = format!(
                             "struct field `{}.{}` has borrow-handle type `{}`",
                             sname,
@@ -3461,7 +3568,7 @@ impl<'a> Checker<'a> {
                                 .with_notes(notes),
                         );
                     }
-                    TypeShape::Pointer(inner) if !matches!(**inner, TypeShape::Atomic) => {
+                    Some("pointer") => {
                         // O12's own example (`cur &node`): pointer fields are
                         // borrows — store an id or the value instead.
                         let msg = format!(
@@ -3515,6 +3622,16 @@ impl<'a> Checker<'a> {
             non_owned_origin,
             slot_loan: false,
         }
+    }
+}
+
+fn field_borrow_kind(shape: &TypeShape) -> Option<&'static str> {
+    match shape {
+        TypeShape::BorrowHandle(_) => Some("borrow-handle"),
+        TypeShape::Pointer(inner) if !matches!(**inner, TypeShape::Atomic) => Some("pointer"),
+        TypeShape::Slice(elem) | TypeShape::Array(elem) => field_borrow_kind(elem),
+        TypeShape::Map(k, v) => field_borrow_kind(k).or_else(|| field_borrow_kind(v)),
+        _ => None,
     }
 }
 

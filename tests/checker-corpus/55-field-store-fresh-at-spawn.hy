@@ -1,5 +1,5 @@
 // ============================================================================
-// 54-field-store-fresh-at-spawn — Checker corpus #54 (issue #392)
+// 55-field-store-fresh-at-spawn — Checker corpus #55 (issue #392)
 //
 // PURPOSE: the positive control for #53. It pins that the #392 fix (a field
 // store materializes a may-share edge from the composite's root binding to

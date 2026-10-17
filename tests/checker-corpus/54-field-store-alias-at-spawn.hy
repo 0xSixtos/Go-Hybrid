@@ -1,5 +1,5 @@
 // ============================================================================
-// 53-field-store-alias-at-spawn — Checker corpus #53 (issue #392)
+// 54-field-store-alias-at-spawn — Checker corpus #54 (issue #392)
 //
 // PURPOSE: negative control for the field-store gap. The alias edge between a
 // composite and a live binding was materialized for composite LITERALS
