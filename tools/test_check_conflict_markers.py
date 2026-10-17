@@ -72,6 +72,66 @@ class MarkerDetectionTests(unittest.TestCase):
         self.assertEqual(list(MOD.scan(str(root))), [])
 
 
+class WorkflowStructureTests(unittest.TestCase):
+    """The other outage: a column-zero line that cannot parse as a mapping."""
+
+    def _tree(self, files):
+        tmp = tempfile.TemporaryDirectory(prefix="wfstruct-")
+        root = Path(tmp.name)
+        for rel, content in files.items():
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+        self.addCleanup(tmp.cleanup)
+        return root
+
+    def test_column_zero_shell_line_is_reported(self):
+        # This is the 96f0bc4 shape: an unindented duplicate of a `run: |`
+        # line, which ends the block scalar and breaks the mapping.
+        root = self._tree({
+            ".github/workflows/ci.yml": (
+                "name: ci\non:\n  push:\n    branches:\n      - main\n"
+                "jobs:\n  quick:\n    steps:\n      - name: t\n"
+                "        run: |\n          set -e\n"
+                "python3 -m py_compile tools/job.py\n"
+                "          python3 -m unittest discover -s tools\n"
+            ),
+        })
+        hits = [h for h in MOD.scan(str(root)) if h[3] == "workflow"]
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0][1], 12)
+
+    def test_well_formed_workflow_is_clean(self):
+        root = self._tree({
+            ".github/workflows/ci.yml": (
+                "# a comment\nname: ci\non:\n  push:\njobs:\n  quick:\n"
+                "    steps:\n      - name: t\n        run: |\n"
+                "          set -e\n          echo hi\n"
+            ),
+        })
+        self.assertEqual(list(MOD.scan(str(root))), [])
+
+    def test_document_marker_is_allowed(self):
+        root = self._tree({".github/workflows/ci.yml": "---\nname: ci\non: push\n"})
+        self.assertEqual(list(MOD.scan(str(root))), [])
+
+    def test_column_zero_key_is_allowed(self):
+        root = self._tree({
+            ".github/workflows/ci.yml": "name: ci\non: push\npermissions:\n  contents: read\njobs: {}\n",
+        })
+        self.assertEqual(list(MOD.scan(str(root))), [])
+
+    def test_non_workflow_yaml_is_not_checked_for_structure(self):
+        # Only `.github/workflows/*.yml` is a GitHub Actions mapping; a loose
+        # YAML file elsewhere may legitimately wrap lines at column zero.
+        root = self._tree({"jobs/001/x.yml": "python3 -m py_compile tools/job.py\n"})
+        self.assertEqual(list(MOD.scan(str(root))), [])
+
+    def test_fenced_block_in_markdown_is_not_checked(self):
+        root = self._tree({"doc.md": "```\npython3 -m py_compile tools/job.py\n```\n"})
+        self.assertEqual(list(MOD.scan(str(root))), [])
+
+
 class CliTests(unittest.TestCase):
     def _run(self, root):
         return subprocess.run(
@@ -101,6 +161,28 @@ class CliTests(unittest.TestCase):
             capture_output=True, text=True, timeout=20,
         )
         self.assertEqual(res.returncode, 2)
+
+    def test_broken_workflow_exits_one_and_names_the_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td, ".github", "workflows")
+            d.mkdir(parents=True)
+            Path(d, "ci.yml").write_text(
+                "name: ci\non: push\njobs:\n  quick:\n    steps:\n"
+                "      - name: t\n        run: |\n          set -e\n"
+                "python3 -m py_compile tools/job.py\n",
+                encoding="utf-8")
+            res = self._run(td)
+            self.assertEqual(res.returncode, 1, res.stderr)
+            self.assertIn("ci.yml", res.stderr)
+            self.assertIn("column zero", res.stderr)
+
+    def test_marker_takes_priority_in_the_same_run(self):
+        with tempfile.TemporaryDirectory() as td:
+            Path(td, "broken.yml").write_text(
+                "a\n<<<<<<< HEAD\nb\n=======\nc\n>>>>>>> main\n", encoding="utf-8")
+            res = self._run(td)
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("conflict marker", res.stderr.lower())
 
 
 if __name__ == "__main__":
