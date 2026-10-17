@@ -350,6 +350,18 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
                 via_move: true,
                 via_addr: false,
             }),
+            Expr::Field { .. } => {
+                if let Some(root) = crate::model::unwrap_parens(operand).root_ident() {
+                    out.push(Use {
+                        name: root.to_string(),
+                        span: *span,
+                        is_write: false,
+                        via_move: true,
+                    });
+                } else {
+                    expr_uses(operand, out);
+                }
+            }
             _ => expr_uses(operand, out),
         },
         Expr::Try { operand, .. } => expr_uses(operand, out),
