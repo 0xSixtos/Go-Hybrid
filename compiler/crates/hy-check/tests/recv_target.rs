@@ -172,3 +172,58 @@ fn select_recv_arm_from_channel_accepted() {
         "fn main() {\n    ch := make(chan int, 1)\n    ch <- 3\n    select {\n    v := <-ch:\n        _ = v\n    default:\n    }\n}\n",
     );
 }
+
+// ---- select-arm receives: the triage follow-up pins (issue #409) ----
+// The maintainer triage asked for regression coverage on select arms once
+// wired ("worth a regression test when select arms get wired"); these lock
+// every arm shape the flat walk and the closure walk classify.
+
+#[test]
+fn bare_select_recv_arm_non_chan_rejected_e2008() {
+    // The case-less arm head `<-m:` (spike6 04-pipeline's `<-deadline:`
+    // shape) — a bare receive AS the arm head.
+    let r = check(
+        "fn main() {\n    m := map[string]int{\"k\": 1}\n    select {\n    <-m:\n        fmt.println(\"fire\")\n    }\n}\n",
+    );
+    assert_has(&r, "HYB-E2008");
+}
+
+#[test]
+fn named_select_recv_arm_non_chan_rejected_e2008() {
+    // The named arm head `v, ok := <-m:`.
+    let r = check(
+        "fn main() {\n    m := map[string]int{\"k\": 1}\n    select {\n    v, ok := <-m:\n        fmt.println(v, ok)\n    }\n}\n",
+    );
+    assert_has(&r, "HYB-E2008");
+}
+
+#[test]
+fn recv_nested_in_select_arm_body_rejected_e2008() {
+    // A receive inside an arm BODY (not the head) — arrives as its own
+    // flattened statement and must classify too.
+    let r = check(
+        "fn main() {\n    m := map[string]int{\"k\": 1}\n    d := make(chan int, 1)\n    select {\n    <-d:\n        v := <-m\n        _ = v\n    }\n}\n",
+    );
+    assert_has(&r, "HYB-E2008");
+}
+
+#[test]
+fn closure_select_recv_arm_unknown_fail_closed_e3005() {
+    // The closure twin: a select arm inside an FnLit body (outside the
+    // flat walk) with an unresolvable channel fails closed (O4.9).
+    let r = check(
+        "fn noop() {\n}\n\nfn main() {\n    f := fn() {\n        select {\n        <-noop():\n            fmt.println(\"x\")\n        }\n    }\n    f()\n}\n",
+    );
+    assert_has(&r, "HYB-E3005");
+}
+
+#[test]
+fn select_timeout_idiom_arm_stays_accepted() {
+    // The spike6 04-pipeline shape: `deadline := time.after(...)`, then a
+    // case-less `<-deadline:` arm — the foreign-decl resolution classifies
+    // the arm's channel, so the timeout idiom stays accepted (no E3005
+    // false positive on unannotated foreign calls).
+    assert_accepts(
+        "fn main() {\n    deadline := time.after(time.seconds(2))\n    d := make(chan int, 1)\n    d <- 1\n    select {\n    v := <-d:\n        _ = v\n    <-deadline:\n        fmt.println(\"timed out\")\n    }\n}\n",
+    );
+}
