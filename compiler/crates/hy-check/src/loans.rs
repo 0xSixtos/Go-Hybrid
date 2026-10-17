@@ -614,10 +614,24 @@ impl<'a> Checker<'a> {
                     return true;
                 }
             }
-            Stmt::Match { arms, .. } => {
+            Stmt::Match { subject, arms, .. } => {
+                let mut sroots = Vec::new();
+                collect_ref_roots(subject, &mut sroots);
+                let subject_reaches_param = sroots.iter().any(|r| r == param);
                 for arm in arms {
                     if self.block_mutates_param(&arm.body, param, depth) {
                         return true;
+                    }
+                    if subject_reaches_param {
+                        if let hy_syntax::MatchPattern::Path {
+                            binding: Some(bname),
+                            ..
+                        } = &arm.pattern
+                        {
+                            if self.block_mutates_param(&arm.body, bname, depth) {
+                                return true;
+                            }
+                        }
                     }
                 }
             }
@@ -754,6 +768,8 @@ impl<'a> Checker<'a> {
         let mut local_aliases: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         let mut local_shadows: HashSet<String> = bound.clone();
+        let mut match_aliases: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
         let resolve = |raw: &str,
                        aliases: &std::collections::HashMap<String, String>,
                        shadows: &HashSet<String>|
@@ -797,6 +813,23 @@ impl<'a> Checker<'a> {
                                 local_aliases.remove(name.as_str());
                                 local_shadows.insert(name.clone());
                             }
+                        }
+                    }
+                }
+                Stmt::Match { subject, arms, .. } => {
+                    let mut sroots = Vec::new();
+                    collect_ref_roots(subject, &mut sroots);
+                    sroots.retain(|r| !bound.contains(r));
+                    for arm in arms {
+                        if let hy_syntax::MatchPattern::Path {
+                            binding: Some(bname),
+                            ..
+                        } = &arm.pattern
+                        {
+                            match_aliases
+                                .entry(bname.clone())
+                                .or_default()
+                                .extend(sroots.iter().cloned());
                         }
                     }
                 }
@@ -923,6 +956,38 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+        }
+        for _ in 0..8 {
+            let mut added = Vec::new();
+            for r in &out {
+                if let Some(targets) = match_aliases.get(r) {
+                    for t in targets {
+                        if !bound.contains(t) && !out.contains(t) {
+                            added.push(t.clone());
+                        }
+                    }
+                }
+            }
+            if added.is_empty() {
+                break;
+            }
+            out.extend(added);
+        }
+        for _ in 0..8 {
+            let mut added = Vec::new();
+            for r in &out {
+                if let Some(targets) = match_aliases.get(r) {
+                    for t in targets {
+                        if !bound.contains(t) && !out.contains(t) {
+                            added.push(t.clone());
+                        }
+                    }
+                }
+            }
+            if added.is_empty() {
+                break;
+            }
+            out.extend(added);
         }
         out
     }
@@ -1625,6 +1690,115 @@ impl<'a> Checker<'a> {
         );
     }
 
+    /// Bind the payload variable `name` of a `match subject { some(name): ... }`
+    /// arm in the arm's block scope (`#243`). `option[T]` lowers to
+    /// `hyb_opt_T{v: T, ok: bool}`, so `some(name)` copies `subject.v` and
+    /// shares mutable GC storage with `subject`, inherits its `non_owned_origin`
+    /// and `moved` state, and links to any `const` root of `subject`.
+    pub(crate) fn bind_match_arm(
+        &mut self,
+        st: &mut FnState,
+        name: &str,
+        subject: &Expr,
+        managed: bool,
+    ) {
+        let shape = self.shape_of_expr(st, subject);
+        let ty = match self.ty_of_expr(st, subject) {
+            Some(hy_syntax::TypeExpr::Option { elem, .. }) => Some(*elem),
+            other => other,
+        };
+
+        let mut roots = Vec::new();
+        collect_ref_roots(subject, &mut roots);
+
+        let pre_tainted = roots.iter().any(|r| {
+            self.lookup_binding(st, r)
+                .map(|b| b.managed_taint)
+                .unwrap_or(false)
+        });
+        let pre_moved = roots.iter().find_map(|r| {
+            self.lookup_binding(st, r).and_then(|b| b.moved.clone())
+        });
+        let pre_origin = if self.shape_may_share(&shape) {
+            roots.iter().find_map(|r| {
+                self.non_owned_origin_of(st, r).map(|(o, via_share)| {
+                    if via_share || (!shape.is_reference_alias() && r != name) {
+                        format!("a may-share peer of {}", o)
+                    } else {
+                        o
+                    }
+                })
+            })
+        } else {
+            None
+        };
+        let pre_const_root = roots.iter().find_map(|r| {
+            let p = Place {
+                kind: PlaceKind::Ident(r.clone()),
+                span: subject.span(),
+            };
+            self.const_write_root(st, &p)
+        });
+
+        let mut pre_share_peers: Vec<String> = Vec::new();
+        let mut pre_alias_root: Option<String> = None;
+        for r in &roots {
+            if self.binding_may_share(st, r) {
+                pre_share_peers.push(r.clone());
+                pre_share_peers.extend(st.share_group(r));
+            }
+            if pre_alias_root.is_none()
+                && self
+                    .lookup_binding(st, r)
+                    .map(|b| b.shape.is_reference_alias())
+                    .unwrap_or(false)
+            {
+                pre_alias_root = Some(crate::freeze::resolve_alias(st, r));
+            }
+        }
+
+        let self_shadows_const = pre_const_root.as_deref() == Some(name);
+        self.define_binding(
+            st,
+            name,
+            shape.clone(),
+            ty,
+            self_shadows_const,
+            managed || pre_tainted,
+        );
+
+        self.record_may_share(st, name, subject);
+        self.record_alias(st, name, subject);
+
+        for peer in &pre_share_peers {
+            if peer != name {
+                st.share_edge(name, peer);
+            }
+        }
+        if let Some(aroot) = pre_alias_root {
+            st.aliases.entry(name.to_string()).or_insert(aroot);
+        } else if pre_share_peers.iter().any(|p| p == name) {
+            st.aliases
+                .entry(name.to_string())
+                .or_insert_with(|| name.to_string());
+        }
+        if let Some(croot) = pre_const_root {
+            if croot != name {
+                st.share_edge(name, &croot);
+                st.aliases.entry(name.to_string()).or_insert(croot);
+            }
+        }
+
+        if let Some(b) = st.env_lookup_mut(name) {
+            if b.moved.is_none() {
+                b.moved = pre_moved;
+            }
+            if b.non_owned_origin.is_none() {
+                b.non_owned_origin = pre_origin;
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Assignments (A3 inserts, A6 field stores, whole-binding rebinds)
     // -----------------------------------------------------------------------
@@ -2103,6 +2277,51 @@ impl<'a> Checker<'a> {
                                     TypeShape::Primitive
                                 };
                                 self.define_binding(&mut cst, n, shape, None, false, false);
+                            }
+                        }
+                        walk::ScopeEvent::MatchBind { name, subject } => {
+                            // pr-244 (#243): match-arm `some(v)` bindings
+                            // inherit the subject's const-root state — a
+                            // binding over a const composite freezes like the
+                            // const itself (E3006 surface); a plain binding
+                            // shadows and clears alias/share state.
+                            let mut roots = Vec::new();
+                            collect_ref_roots(subject, &mut roots);
+                            let croot = roots.iter().find_map(|r| {
+                                if self.lookup_binding(&cst, r).is_none() {
+                                    return None;
+                                }
+                                let p = Place {
+                                    kind: PlaceKind::Ident(r.clone()),
+                                    span: subject.span(),
+                                };
+                                self.const_write_root(&cst, &p)
+                            });
+                            if let Some(cr) = &croot {
+                                if name == cr {
+                                    self.define_binding(
+                                        &mut cst,
+                                        name,
+                                        TypeShape::Unknown,
+                                        None,
+                                        true,
+                                        false,
+                                    );
+                                } else {
+                                    cst.aliases.insert(name.to_string(), cr.clone());
+                                    cst.share_edge(name, cr);
+                                }
+                            } else {
+                                self.define_binding(
+                                    &mut cst,
+                                    name,
+                                    TypeShape::Unknown,
+                                    None,
+                                    false,
+                                    false,
+                                );
+                                cst.aliases.remove(*name);
+                                cst.share_clear(name);
                             }
                         }
                     }
