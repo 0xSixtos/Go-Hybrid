@@ -763,6 +763,49 @@ fn match_multi_some_arms_retains_all_arms() {
 }
 
 #[test]
+fn match_unguarded_some_first_emits_buildable_go() {
+    // An UNGUARDED `some` arm placed before another `some` arm matches
+    // whenever `ok` is true, so later arms are unreachable. The emitter
+    // must not chain a `} else {` onto a chain that has no preceding `if`
+    // (that produced an orphan `else` and unbuildable Go, while `hyb check`
+    // reported 0 diagnostics).
+    let go = emit(
+        "fn main() {\n    opt := some(3)\n    match opt {\n        some(v): {\n            fmt.println(\"small\")\n        }\n        some(v) if v > 10: {\n            fmt.println(\"big\")\n        }\n        none: {\n            fmt.println(\"none\")\n        }\n    }\n}\n",
+    );
+    let opens = go.matches('{').count();
+    let closes = go.matches('}').count();
+    assert_eq!(opens, closes, "unbalanced braces (orphan else):\n{}", go);
+    assert_eq!(
+        go.matches("} else {").count(),
+        1,
+        "expected exactly one else (the none arm):\n{}",
+        go
+    );
+    let ok = go.find("if hyMatch0.ok {").expect("ok branch");
+    let small = go.find("fmt.Println(\"small\")").expect("small arm body");
+    let els = go.find("} else {").expect("none arm");
+    assert!(
+        ok < small && small < els,
+        "unguarded arm body must be inside the ok branch, before the else:\n{}",
+        go
+    );
+}
+
+#[test]
+fn match_guarded_then_unguarded_some_still_chains() {
+    // Guarded-first ordering must keep working: the guarded arm is an `if`
+    // and the first unguarded arm is its `else`.
+    let go = emit(
+        "fn main() {\n    opt := some(15)\n    match opt {\n        some(v) if v > 10: {\n            fmt.println(\"big\")\n        }\n        some(v): {\n            fmt.println(\"small\")\n        }\n        none: {\n            fmt.println(\"none\")\n        }\n    }\n}\n",
+    );
+    assert_eq!(go.matches('{').count(), go.matches('}').count(), ":\n{}", go);
+    assert!(go.contains("if v > 10 {"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"big\")"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"small\")"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"none\")"), ":\n{}", go);
+}
+
+#[test]
 fn match_guarded_some_with_wildcard_fallback() {
     // Issue #204: with guarded some arms and wildcard, failed guard must fall through to wildcard.
     let go = emit(

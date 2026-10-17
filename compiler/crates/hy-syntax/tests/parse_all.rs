@@ -1,6 +1,6 @@
 //! Integration test: EVERY must-parse file parses cleanly.
 //!
-//!   * tests/checker-corpus/*.hy            (51 programs — the checker corpus)
+//!   * tests/checker-corpus/*.hy            (52 programs — the checker corpus)
 //!   * spikes/spike6-ownership/work/*.hy    (10 programs â€” Tier-0 rewrites)
 //!   * tests/checker-corpus/*.hy            (32 programs — the checker corpus)
 //!   * spikes/spike6-ownership/work/*.hy    (10 programs — Tier-0 rewrites)
