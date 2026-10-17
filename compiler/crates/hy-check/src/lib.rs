@@ -52,12 +52,16 @@ mod emit_guard;
 mod foreign;
 mod freeze;
 mod loans;
+mod const_init;
 mod model;
+mod resolve;
 mod sendability;
 mod shape;
 mod tuple;
 mod walk;
 mod builtins;
+mod range_iter;
+mod recv;
 
 use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
 
@@ -100,6 +104,12 @@ pub fn check_file(file: &File) -> CheckResult {
 
     build_tables(&mut ck);
     ck.check_struct_decls(); // A6: borrow-handle / pointer struct fields
+
+    // Issue #228 family A: value-position names nothing declares must be
+    // HYB-E1001 here, not `undefined: X` at go build. Const initializers and
+    // declaration-signature expressions (array lengths) at file level; each
+    // function body inside check_fn below.
+    ck.check_file_undefined_names();
 
     let fns: Vec<&FnDecl> = file.fns().collect();
     for f in fns {
@@ -172,6 +182,10 @@ fn build_tables(ck: &mut Checker<'_>) {
                 ck.declare_pkg_name(&c.name, "const", c.span);
                 let b = ck.const_binding(c);
                 ck.consts.insert(c.name.clone(), b);
+                // Issue #205: file-level `const c = get_val()` must not pass check then fail go build.
+                // Placed after insert so this hook sits below main's E6002 overflow check and
+                // 3-way-merges cleanly (same pattern as PR #191 relocated hooks).
+                ck.check_const_init_is_constant(&c.name, &c.value, None);
             }
             Decl::Struct(s) => {
                 // Issue #201-C: package-scope names are unique across
@@ -299,6 +313,11 @@ fn build_tables(ck: &mut Checker<'_>) {
 
 fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     let Some(body) = &f.body else { return };
+
+    // Issue #228 family A: `undefined_fn()`, reads/assigns of names nothing
+    // declares — HYB-E1001 before emit ever runs. Dotted package-prefix
+    // first segments stay exempt (resolve.rs Field arm).
+    ck.check_fn_undefined_names(f);
 
     // environment seed: receiver + params
     let mut st = FnState::default();
@@ -576,6 +595,16 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         // inserts around check_uses (const-zero-divisor / LX14).
         ck.check_stmt_builtins(stmt);
 
+        // Issue #411: the iterable of `for x in e` must resolve to a
+        // slice/array/string/map/chan (LX13) — HYB-E2009; fail-closed
+        // E3005 (O4.9). Same accepted-should-emit-buildable-Go family as
+        // the send-target (#77) classification.
+        ck.check_stmt_range_iterable(&st, stmt);
+        // Issue #409: every receive operand must resolve to a channel
+        // (HYB-E2008; fail-closed E3005) — the mirror of the send-side
+        // target classification (#77, HYB-E3007).
+        ck.check_stmt_recv_operands(&st, stmt);
+
         match stmt {
             Stmt::Local(l) => {
                 ck.process_local(&mut st, l, idx, managed);
@@ -676,8 +705,12 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     let shapes = ck.iterate_var_shapes(&st, expr, vars.len());
                     for (name, shape) in vars.iter().zip(shapes) {
                         let is_ref = shape.is_reference_alias();
+                        let may_share = ck.shape_may_share(&shape);
                         ck.define_binding(&mut st, name, shape, None, false, managed);
                         if !is_chan {
+                            if may_share {
+                                ck.record_may_share(&mut st, name, expr);
+                            }
                             if is_ref {
                                 if let Some(root) = expr.root_ident() {
                                     if ck.lookup_binding(&st, root).is_some() {
@@ -724,7 +757,12 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             Stmt::Select { arms, .. } => {
                 for arm in arms {
                     match &arm.kind {
-                        SelectArmKind::Send { chan, value } => {
+                        SelectArmKind::Send {
+                            chan,
+                            value,
+                            is_move,
+                            ..
+                        } => {
                             ck.mark_move_in_value(
                                 &mut st,
                                 chan,
@@ -732,11 +770,28 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                             );
                             let span = chan.span().to(value.span());
                             if ck.check_send_target(&st, chan, span) {
-                                let desc = format!(
-                                    "the select-send `{} <- {}`",
-                                    chan.render(),
-                                    value.render()
-                                );
+                                // C5: a select send clause is a sendability
+                                // check-site "exactly like statement sends", so
+                                // the class-3 owned-move route (`ch <- move v`)
+                                // must be available here too. The is_move marker
+                                // the send-statement parser produced used to be
+                                // dropped when the statement became a select
+                                // arm: the move was invisible to the checker, so
+                                // a legal owned move-send rejected as A1c and the
+                                // sender's later use was never frozen (O5.2).
+                                let desc = if *is_move {
+                                    format!(
+                                        "the move-send `{} <- move {}`",
+                                        chan.render(),
+                                        value.render()
+                                    )
+                                } else {
+                                    format!(
+                                        "the select-send `{} <- {}`",
+                                        chan.render(),
+                                        value.render()
+                                    )
+                                };
                                 let vals: Vec<&Expr> = vec![value];
                                 let targets = ck.chan_elem_shape(&st, chan);
                                 ck.check_site(
@@ -746,7 +801,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                                     &vals,
                                     managed,
                                     &desc,
-                                    false,
+                                    *is_move,
                                     None,
                                     targets.as_deref(),
                                 );
@@ -1426,10 +1481,16 @@ mod tests {
         );
         assert_eq!(r_borrow.verdict, Verdict::Reject);
 
+        // Fixture note (issue #228 family A): the unproven value is a
+        // DEFINED binding of Unknown shape (recv from an unresolvable-elem
+        // channel — the same idiom as fc_select_recv_unknown_element above),
+        // not an undefined factory call: HYB-E1001 owns names nothing
+        // declares, so it would (correctly) become the first error here.
         let r_unknown = check(
             "fn send_val(v any) {}\n\
              fn main() {\n\
-               u := mystery_factory()\n\
+               ch := make(chan mystery, 1)\n\
+               u := <-ch\n\
                task send_val(move u)\n\
              }",
         );
@@ -2081,12 +2142,19 @@ mod tests {
     #[test]
     fn fc_unproven_name_via_managed_escapes() {
         // the SAME unproven value inside a managed block escapes through the
-        // explicit hatch: warning only, counted — never a silent pass
+        // explicit hatch: warning only, counted — never a silent pass.
+        // Fixture note (issue #228 family A): the unproven value is now a
+        // DEFINED binding of Unknown shape (`v := <-ch` with an unresolvable
+        // element type) instead of the old undefined-name placeholder —
+        // HYB-E1001 rejects a name nothing declares, which is a different
+        // (and also correct) claim than the managed-hatch claim under test.
         let r = check(
             "fn handle(x int) { fmt.println(x) }\n\
              fn main() {\n\
                managed(\"test-only handler; name shape pinned by the fixture\", \"other\") {\n\
-                 task handle(nosuch)\n\
+                 ch := make(chan mystery, 1)\n\
+                 v := <-ch\n\
+                 task handle(v)\n\
                }\n\
              }",
         );
@@ -3189,6 +3257,95 @@ mod tests {
              }",
         );
         assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    /// C5: a select send clause (`ch <- v:`) is a sendability check-site
+    /// "exactly like statement sends", so the class-3 owned-move route
+    /// (`ch <- move v`) must work there too.
+    ///
+    /// The parser's `is_move` marker was dropped when a send statement was
+    /// converted into a select arm (`SelectArmKind::Send` carried no flag),
+    /// and both check sites passed a hardcoded `false` as `implicit_move`.
+    /// Consequences: `select { out <- move m: {} }` was rejected A1c
+    /// (HYB-E3002) even though the statement-send twin `out <- move m` was
+    /// accepted, and — the half that matters for the guarantee — the move
+    /// was never recorded, so the O5.2 freeze on `m` never began and the
+    /// sender could keep writing the value it had just handed away.
+    #[test]
+    fn select_send_move_marker_is_honored_and_freezes_the_source() {
+        // 1. The repro: a legal owned move-send inside a select arm.
+        let r = check(
+            "fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               out := make(chan map[string]int, 1)\n\
+               select {\n\
+                 out <- move m: {}\n\
+               }\n\
+               fmt.println(\"sent\")\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+
+        // 2. Statement-send control: the same route already worked there.
+        let r_stmt = check(
+            "fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               out := make(chan map[string]int, 1)\n\
+               out <- move m\n\
+               fmt.println(\"sent\")\n\
+             }",
+        );
+        assert_eq!(r_stmt.verdict, Verdict::Accept, "{:?}", r_stmt.diagnostics);
+
+        // 3. Negative control: WITHOUT `move` the same arm still rejects.
+        //    The fix must not widen the sendability rule.
+        let r_plain = check(
+            "fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               out := make(chan map[string]int, 1)\n\
+               select {\n\
+                 out <- m: {}\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r_plain.verdict, Verdict::Reject, "{:?}", r_plain.diagnostics);
+        assert!(r_plain.diagnostics.iter().any(|d| d.code == "HYB-E3002"));
+
+        // 4. The freeze now begins at the select-send: the sender's later
+        //    write is A1b / HYB-E3003, exactly as after a statement send.
+        let r_freeze = check(
+            "fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               out := make(chan map[string]int, 1)\n\
+               select {\n\
+                 out <- move m: {}\n\
+               }\n\
+               m[\"k\"] = 1\n\
+             }",
+        );
+        assert_eq!(r_freeze.verdict, Verdict::Reject, "{:?}", r_freeze.diagnostics);
+        assert_eq!(first_error_rule(&r_freeze).as_deref(), Some("A1b"));
+        assert!(r_freeze.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // 5. The non-ident form keeps its own rule: `move h.m` in a select
+        //    arm is O5.4 / HYB-E3004, same as the statement-send spelling.
+        let r_field = check(
+            "struct holder { m map[string]int }\n\
+             fn main() {\n\
+               h := holder{m: map[string]int{\"k\": 0}}\n\
+               out := make(chan map[string]int, 1)\n\
+               select {\n\
+                 out <- move h.m: {}\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r_field.verdict, Verdict::Reject, "{:?}", r_field.diagnostics);
+        assert!(
+            r_field.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+            "{:?}",
+            r_field.diagnostics
+        );
     }
 
     #[test]
