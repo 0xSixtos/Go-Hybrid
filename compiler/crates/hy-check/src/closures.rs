@@ -280,6 +280,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 ck.record_copy_may_share(st, cr);
             }
         }
+        ck.record_callee_param_stores(st, cr);
     }
 
     match stmt {
