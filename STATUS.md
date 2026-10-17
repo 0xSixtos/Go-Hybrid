@@ -1,5 +1,4 @@
 # STATUS (for the human — 15 lines max)
-- Contributor Actions pagination: all artifact pages fetched before ZIP downloads; Mini CLI 9/9 (baseline 5 failure records), Python total 57/57, Rust 591/0, corpus and differential 52/52 each. Upstream CI/review pending; no award claimed.
 
 - Phase: **MVP DONE + v0.1.0 released + community OPEN** — session-17: **7 more PRs landed (#420 #447 #421 #290 #236 #208 #235) + 8 same-fix credit closes** — cargo 808/0, corpus 60/60, differential FULL (17+43)
 - **Operand-type family closed**: #420 (receive E2008/E3005, fixes #409) + #447 (for-in E2009/E3005 superset of #424 — fail-closed unknowns, method resolution, generic-in fold; fixes #411); credit closes #413/#414/#424/#426/#427
