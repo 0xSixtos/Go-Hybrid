@@ -210,6 +210,7 @@ impl<'a> Checker<'a> {
                 recv,
             } => {
                 self.check_call_const_writes(st, cr, &HashSet::new());
+                self.record_callee_param_stores(st, cr);
                 let Some(tname) = receiver_type_name(&recv) else {
                     return;
                 };
@@ -279,6 +280,7 @@ impl<'a> Checker<'a> {
                     self.check_delete_const(st, cr, &HashSet::new());
                 }
                 self.check_call_const_writes(st, cr, &HashSet::new());
+                self.record_callee_param_stores(st, cr);
                 if self.fns.contains_key(&name) {
                     // A3 #111: the callee may insert/delete through the
                     // argument — that event runs inside THIS call site's
@@ -295,6 +297,7 @@ impl<'a> Checker<'a> {
             }
             Resolved::None => {
                 self.check_call_const_writes(st, cr, &HashSet::new());
+                self.record_callee_param_stores(st, cr);
             }
         }
     }
@@ -1648,6 +1651,737 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Issue #455: interprocedural out-parameter / receiver store tracking.
+    ///
+    /// When a helper function, user-defined struct method, or inline closure
+    /// stores one reference-bearing parameter/receiver (or a value derived from
+    /// it) into an index or field rooted at another parameter/receiver (or
+    /// copies elements between them via `copy(dst, src)` or a transitive
+    /// helper call), the caller's destination and source bindings share mutable
+    /// GC storage after the call returns. Record `st.share_edge(dst, src)` and
+    /// propagate any `non_owned_origin` so a subsequent `move` of either caller
+    /// binding freezes the other (O5.2, `HYB-E3003`) and cannot launder a
+    /// non-owned parameter/capture/const across a concurrency boundary
+    /// (O5.1 / O5.4, `HYB-E3004`; T22, `HYB-E3006`).
+    pub(crate) fn record_callee_param_stores(&self, st: &mut FnState, cr: &CallRef) {
+        let Some((slots, body)) = self.resolve_callee_slots_and_body(st, cr) else {
+            return;
+        };
+        if slots.len() < 2 {
+            return;
+        }
+        let slots_meta: Vec<(&str, Option<&hy_syntax::TypeExpr>)> = slots
+            .iter()
+            .map(|(name, ty, _)| (name.as_str(), ty.as_ref()))
+            .collect();
+        let pairs = self.collect_callee_param_stores(&slots_meta, body, 0);
+        for (dst_idx, src_idx) in pairs {
+            if dst_idx == src_idx {
+                continue;
+            }
+            let (Some((_, _, dst_expr)), Some((_, _, src_expr))) =
+                (slots.get(dst_idx), slots.get(src_idx))
+            else {
+                continue;
+            };
+            let mut dst_roots = Vec::new();
+            collect_ref_roots(dst_expr, &mut dst_roots);
+            collect_addr_of_roots(dst_expr, &mut dst_roots);
+
+            let mut src_roots = Vec::new();
+            collect_ref_roots(src_expr, &mut src_roots);
+            collect_addr_of_roots(src_expr, &mut src_roots);
+            let mut move_ops = Vec::new();
+            crate::model::collect_move_operands(src_expr, &mut move_ops);
+            for (op, _) in move_ops {
+                if let Expr::Ident { name, .. } = op {
+                    src_roots.push(name.clone());
+                } else if let Some(r) = op.root_ident() {
+                    src_roots.push(r.to_string());
+                }
+            }
+
+            for d in &dst_roots {
+                if !self.binding_may_share(st, d) {
+                    continue;
+                }
+                for s in &src_roots {
+                    if d != s && self.binding_may_share(st, s) {
+                        st.share_edge(d, s);
+                    }
+                }
+            }
+            if let Some(origin) = self.moved_non_owned_origin_in_expr(st, src_expr) {
+                let peer_origin = if origin.starts_with("a may-share peer of ") {
+                    origin
+                } else {
+                    format!("a may-share peer of {}", origin)
+                };
+                for d in &dst_roots {
+                    if self.binding_may_share(st, d) {
+                        if let Some(db) = st.env_lookup_mut(d) {
+                            if db.non_owned_origin.is_none() {
+                                db.non_owned_origin = Some(peer_origin.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn resolve_callee_slots_and_body<'c>(
+        &self,
+        st: &FnState,
+        cr: &'c CallRef<'c>,
+    ) -> Option<(Vec<(String, Option<hy_syntax::TypeExpr>, &'c Expr)>, &'a Block)> {
+        match crate::model::unwrap_parens(cr.callee) {
+            Expr::Ident { name, .. } => {
+                if name == "copy"
+                    || name == "delete"
+                    || name == "make"
+                    || name == "append"
+                    || name == "some"
+                    || name == "new"
+                    || name == "close"
+                    || A3_PURE_FNS.contains(&name.as_str())
+                {
+                    return None;
+                }
+                if self.lookup_binding(st, name).is_some() {
+                    return None;
+                }
+                let decl = *self.fns.get(name.as_str())?;
+                let body = decl.body.as_ref()?;
+                let mut slots = Vec::new();
+                for (i, p) in decl.params.iter().enumerate() {
+                    if let Some(arg) = cr.args.get(i) {
+                        slots.push((p.name.clone(), Some(p.ty.clone()), &arg.value));
+                    }
+                }
+                Some((slots, body))
+            }
+            Expr::Field {
+                base,
+                name: method_name,
+                ..
+            } => {
+                if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) {
+                    if self.lookup_binding(st, pkg).is_none() && self.known_package(pkg) {
+                        return None;
+                    }
+                }
+                let recv_struct = match self.shape_of_expr(st, base) {
+                    TypeShape::Struct(Some(s)) => {
+                        Some(Self::base_named_type_str(&s).to_string())
+                    }
+                    TypeShape::Pointer(inner) => match *inner {
+                        TypeShape::Struct(Some(s)) => {
+                            Some(Self::base_named_type_str(&s).to_string())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let decl = if let Some(s) = recv_struct {
+                    self.method_decls
+                        .get(&(s, method_name.clone()))
+                        .copied()
+                } else {
+                    let mut matching = self
+                        .method_decls
+                        .iter()
+                        .filter(|((_, m), _)| m == method_name)
+                        .map(|(_, d)| *d);
+                    let first = matching.next()?;
+                    if matching.next().is_some() {
+                        None
+                    } else {
+                        Some(first)
+                    }
+                }?;
+                let body = decl.body.as_ref()?;
+                let mut slots = Vec::new();
+                if let Some(r) = &decl.receiver {
+                    slots.push((r.name.clone(), Some(r.ty.clone()), base.as_ref()));
+                }
+                for (i, p) in decl.params.iter().enumerate() {
+                    if let Some(arg) = cr.args.get(i) {
+                        slots.push((p.name.clone(), Some(p.ty.clone()), &arg.value));
+                    }
+                }
+                Some((slots, body))
+            }
+            _ => None,
+        }
+    }
+
+    fn collect_callee_param_stores(
+        &self,
+        slots: &[(&str, Option<&hy_syntax::TypeExpr>)],
+        body: &Block,
+        depth: usize,
+    ) -> Vec<(usize, usize)> {
+        if depth > 4 || slots.len() < 2 {
+            return Vec::new();
+        }
+        let mut cst = FnState::default();
+        let mut aliases: std::collections::HashMap<String, HashSet<usize>> =
+            std::collections::HashMap::new();
+        let mut param_names: HashSet<String> = HashSet::new();
+        for (idx, (name, ty)) in slots.iter().enumerate() {
+            let shape = ty
+                .map(|t| self.shape_of_type(t))
+                .unwrap_or(TypeShape::Unknown);
+            cst.env_define(
+                name,
+                Binding {
+                    shape,
+                    ty: ty.cloned(),
+                    immutable: false,
+                    managed_taint: false,
+                    moved: None,
+                    non_owned_origin: None,
+                    slot_loan: false,
+                },
+            );
+            aliases.insert((*name).to_string(), HashSet::from([idx]));
+            param_names.insert((*name).to_string());
+        }
+        let mut out: HashSet<(usize, usize)> = HashSet::new();
+        self.walk_block_param_stores(
+            body,
+            &mut cst,
+            &mut aliases,
+            &param_names,
+            depth,
+            &mut out,
+        );
+        let mut pairs: Vec<(usize, usize)> = out.into_iter().collect();
+        pairs.sort_unstable();
+        pairs
+    }
+
+    fn raw_expr_slot_origins(
+        expr: &Expr,
+        aliases: &std::collections::HashMap<String, HashSet<usize>>,
+    ) -> HashSet<usize> {
+        let mut roots = Vec::new();
+        let inner = crate::model::unwrap_parens(expr);
+        collect_ref_roots(inner, &mut roots);
+        collect_addr_of_roots(inner, &mut roots);
+        let mut move_ops = Vec::new();
+        crate::model::collect_move_operands(inner, &mut move_ops);
+        for (op, _) in move_ops {
+            if let Expr::Ident { name, .. } = op {
+                roots.push(name.clone());
+            } else if let Some(r) = op.root_ident() {
+                roots.push(r.to_string());
+            }
+        }
+        let mut set = HashSet::new();
+        for r in roots {
+            if let Some(origins) = aliases.get(&r) {
+                set.extend(origins.iter().copied());
+            }
+        }
+        set
+    }
+
+    fn expr_slot_origins(
+        &self,
+        cst: &FnState,
+        expr: &Expr,
+        aliases: &std::collections::HashMap<String, HashSet<usize>>,
+    ) -> HashSet<usize> {
+        let inner = crate::model::unwrap_parens(expr);
+        let shape = self.shape_of_expr(cst, inner);
+        if !self.shape_may_share(&shape) && !matches!(shape, TypeShape::Unknown) {
+            return HashSet::new();
+        }
+        Self::raw_expr_slot_origins(inner, aliases)
+    }
+
+    fn walk_block_param_stores(
+        &self,
+        block: &Block,
+        cst: &mut FnState,
+        aliases: &mut std::collections::HashMap<String, HashSet<usize>>,
+        param_names: &HashSet<String>,
+        depth: usize,
+        out: &mut HashSet<(usize, usize)>,
+    ) {
+        for s in &block.stmts {
+            self.walk_stmt_param_stores(s, cst, aliases, param_names, depth, out);
+        }
+    }
+
+    fn walk_stmt_param_stores(
+        &self,
+        stmt: &Stmt,
+        cst: &mut FnState,
+        aliases: &mut std::collections::HashMap<String, HashSet<usize>>,
+        param_names: &HashSet<String>,
+        depth: usize,
+        out: &mut HashSet<(usize, usize)>,
+    ) {
+        // 1. Nested calls inside `stmt` (including `copy(dst, src)` and transitive helper calls)
+        let mut calls = Vec::new();
+        if let Stmt::For {
+            kind: hy_syntax::ForKind::Iterate { expr, .. },
+            ..
+        } = stmt
+        {
+            walk::expr_calls(expr, &mut calls);
+        } else {
+            walk::own_calls(stmt, &mut calls);
+        }
+        for cr in &calls {
+            self.walk_call_param_stores(cr, cst, aliases, param_names, depth, out);
+        }
+
+        // 2. Statement-specific alias & store updates
+        match stmt {
+            Stmt::Local(l) => {
+                if l.values.is_empty() {
+                    let shape = l
+                        .ty
+                        .as_ref()
+                        .map(|t| self.shape_of_type(t))
+                        .unwrap_or(TypeShape::Unknown);
+                    for name in &l.names {
+                        cst.env_define(
+                            name,
+                            Binding {
+                                shape: shape.clone(),
+                                ty: l.ty.clone(),
+                                immutable: false,
+                                managed_taint: false,
+                                moved: None,
+                                non_owned_origin: None,
+                                slot_loan: false,
+                            },
+                        );
+                        aliases.remove(name);
+                    }
+                } else if l.names.len() == l.values.len() {
+                    let rhs_info: Vec<(TypeShape, Option<hy_syntax::TypeExpr>, HashSet<usize>)> = l
+                        .values
+                        .iter()
+                        .map(|v| {
+                            let inferred = self.shape_of_expr(cst, v);
+                            let (shape, ty) = match (&l.ty, inferred) {
+                                (Some(t), TypeShape::Unknown) => {
+                                    (self.shape_of_type(t), Some(t.clone()))
+                                }
+                                (_, inf) => (inf, self.ty_of_expr(cst, v).or_else(|| l.ty.clone())),
+                            };
+                            let origins = if self.shape_may_share(&shape)
+                                || matches!(shape, TypeShape::Unknown)
+                            {
+                                Self::raw_expr_slot_origins(v, aliases)
+                            } else {
+                                HashSet::new()
+                            };
+                            (shape, ty, origins)
+                        })
+                        .collect();
+                    for (name, (shape, ty, origins)) in l.names.iter().zip(rhs_info) {
+                        cst.env_define(
+                            name,
+                            Binding {
+                                shape,
+                                ty,
+                                immutable: false,
+                                managed_taint: false,
+                                moved: None,
+                                non_owned_origin: None,
+                                slot_loan: false,
+                            },
+                        );
+                        if origins.is_empty() {
+                            aliases.remove(name);
+                        } else {
+                            aliases.insert(name.clone(), origins);
+                        }
+                    }
+                } else if l.values.len() == 1 && l.names.len() > 1 {
+                    let shapes = self.multi_value_shapes(cst, &l.values[0], l.names.len());
+                    let tys = self.multi_value_tys(cst, &l.values[0], l.names.len());
+                    let raw = Self::raw_expr_slot_origins(&l.values[0], aliases);
+                    for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
+                        let carries =
+                            self.shape_may_share(&shape) || matches!(shape, TypeShape::Unknown);
+                        cst.env_define(
+                            name,
+                            Binding {
+                                shape,
+                                ty,
+                                immutable: false,
+                                managed_taint: false,
+                                moved: None,
+                                non_owned_origin: None,
+                                slot_loan: false,
+                            },
+                        );
+                        if carries && !raw.is_empty() {
+                            aliases.insert(name.clone(), raw.clone());
+                        } else {
+                            aliases.remove(name);
+                        }
+                    }
+                }
+            }
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                if targets.len() == values.len() {
+                    let rhs_info: Vec<(TypeShape, Option<hy_syntax::TypeExpr>, HashSet<usize>)> =
+                        values
+                            .iter()
+                            .map(|v| {
+                                let shape = self.shape_of_expr(cst, v);
+                                let ty = self.ty_of_expr(cst, v);
+                                let origins = self.expr_slot_origins(cst, v, aliases);
+                                (shape, ty, origins)
+                            })
+                            .collect();
+                    for (t, (v_shape, v_ty, src_slots)) in targets.iter().zip(rhs_info) {
+                        match &t.kind {
+                            PlaceKind::Ident(name) => {
+                                if let Some(b) = cst.env_lookup_mut(name) {
+                                    if !matches!(v_shape, TypeShape::Unknown) || b.ty.is_none() {
+                                        b.shape = v_shape;
+                                    }
+                                    if v_ty.is_some() || b.ty.is_none() {
+                                        b.ty = v_ty;
+                                    }
+                                }
+                                if src_slots.is_empty() {
+                                    aliases.remove(name);
+                                } else {
+                                    aliases.insert(name.clone(), src_slots);
+                                }
+                            }
+                            PlaceKind::Index { .. } | PlaceKind::Field { .. } => {
+                                let t_shape =
+                                    self.place_shape(cst, t).unwrap_or(TypeShape::Unknown);
+                                let tgt_shares = self.shape_may_share(&t_shape)
+                                    || matches!(t_shape, TypeShape::Unknown);
+                                if tgt_shares && !src_slots.is_empty() {
+                                    let t_root = t.root();
+                                    if let Some(dst_slots) = aliases.get(t_root).cloned() {
+                                        for d in &dst_slots {
+                                            for s in &src_slots {
+                                                if d != s {
+                                                    out.insert((*d, *s));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if !t_root.is_empty() && !param_names.contains(t_root) {
+                                        aliases
+                                            .entry(t_root.to_string())
+                                            .or_default()
+                                            .extend(src_slots);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                } else if values.len() == 1 && targets.len() > 1 {
+                    let shapes = self.multi_value_shapes(cst, &values[0], targets.len());
+                    let raw = Self::raw_expr_slot_origins(&values[0], aliases);
+                    for (t, shape) in targets.iter().zip(shapes) {
+                        let carries =
+                            self.shape_may_share(&shape) || matches!(shape, TypeShape::Unknown);
+                        let src_slots = if carries { raw.clone() } else { HashSet::new() };
+                        match &t.kind {
+                            PlaceKind::Ident(name) => {
+                                if src_slots.is_empty() {
+                                    aliases.remove(name);
+                                } else {
+                                    aliases.insert(name.clone(), src_slots);
+                                }
+                            }
+                            PlaceKind::Index { .. } | PlaceKind::Field { .. } => {
+                                let t_shape =
+                                    self.place_shape(cst, t).unwrap_or(TypeShape::Unknown);
+                                let tgt_shares = self.shape_may_share(&t_shape)
+                                    || matches!(t_shape, TypeShape::Unknown);
+                                if tgt_shares && !src_slots.is_empty() {
+                                    let t_root = t.root();
+                                    if let Some(dst_slots) = aliases.get(t_root).cloned() {
+                                        for d in &dst_slots {
+                                            for s in &src_slots {
+                                                if d != s {
+                                                    out.insert((*d, *s));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if !t_root.is_empty() && !param_names.contains(t_root) {
+                                        aliases
+                                            .entry(t_root.to_string())
+                                            .or_default()
+                                            .extend(src_slots);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Stmt::If {
+                init,
+                then,
+                otherwise,
+                ..
+            } => {
+                let mut branch_cst = cst.clone();
+                let mut branch_aliases = aliases.clone();
+                if let Some(i) = init {
+                    self.walk_stmt_param_stores(
+                        i,
+                        &mut branch_cst,
+                        &mut branch_aliases,
+                        param_names,
+                        depth,
+                        out,
+                    );
+                }
+                let mut then_cst = branch_cst.clone();
+                let mut then_aliases = branch_aliases.clone();
+                self.walk_block_param_stores(
+                    then,
+                    &mut then_cst,
+                    &mut then_aliases,
+                    param_names,
+                    depth,
+                    out,
+                );
+                for (k, v) in then_aliases {
+                    aliases.entry(k).or_default().extend(v);
+                }
+                if let Some(o) = otherwise {
+                    let mut else_cst = branch_cst;
+                    let mut else_aliases = branch_aliases;
+                    self.walk_stmt_param_stores(
+                        o,
+                        &mut else_cst,
+                        &mut else_aliases,
+                        param_names,
+                        depth,
+                        out,
+                    );
+                    for (k, v) in else_aliases {
+                        aliases.entry(k).or_default().extend(v);
+                    }
+                }
+            }
+            Stmt::For { kind, body, .. } => {
+                let mut body_cst = cst.clone();
+                let mut body_aliases = aliases.clone();
+                if let hy_syntax::ForKind::Iterate { vars, expr } = kind {
+                    let shapes = self.iterate_var_shapes(&body_cst, expr, vars.len());
+                    let raw = Self::raw_expr_slot_origins(expr, &body_aliases);
+                    for (vname, vshape) in vars.iter().zip(shapes) {
+                        let carries =
+                            self.shape_may_share(&vshape) || matches!(vshape, TypeShape::Unknown);
+                        body_cst.env_define(
+                            vname,
+                            Binding {
+                                shape: vshape,
+                                ty: None,
+                                immutable: false,
+                                managed_taint: false,
+                                moved: None,
+                                non_owned_origin: None,
+                                slot_loan: false,
+                            },
+                        );
+                        if carries && !raw.is_empty() {
+                            body_aliases.insert(vname.clone(), raw.clone());
+                        } else {
+                            body_aliases.remove(vname);
+                        }
+                    }
+                }
+                self.walk_block_param_stores(
+                    body,
+                    &mut body_cst,
+                    &mut body_aliases,
+                    param_names,
+                    depth,
+                    out,
+                );
+                for (k, v) in body_aliases {
+                    if aliases.contains_key(&k) {
+                        aliases.entry(k).or_default().extend(v);
+                    }
+                }
+            }
+            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+                self.walk_block_param_stores(body, cst, aliases, param_names, depth, out);
+            }
+            Stmt::Match { subject, arms, .. } => {
+                let subj_origins = self.expr_slot_origins(cst, subject, aliases);
+                let subj_shape = self.shape_of_expr(cst, subject);
+                for arm in arms {
+                    let mut arm_cst = cst.clone();
+                    let mut arm_aliases = aliases.clone();
+                    if let hy_syntax::MatchPattern::Path {
+                        binding: Some(bname),
+                        ..
+                    } = &arm.pattern
+                    {
+                        arm_cst.env_define(
+                            bname,
+                            Binding {
+                                shape: subj_shape.clone(),
+                                ty: None,
+                                immutable: false,
+                                managed_taint: false,
+                                moved: None,
+                                non_owned_origin: None,
+                                slot_loan: false,
+                            },
+                        );
+                        if subj_origins.is_empty() {
+                            arm_aliases.remove(bname);
+                        } else {
+                            arm_aliases.insert(bname.clone(), subj_origins.clone());
+                        }
+                    }
+                    self.walk_block_param_stores(
+                        &arm.body,
+                        &mut arm_cst,
+                        &mut arm_aliases,
+                        param_names,
+                        depth,
+                        out,
+                    );
+                    for (k, v) in arm_aliases {
+                        if aliases.contains_key(&k) {
+                            aliases.entry(k).or_default().extend(v);
+                        }
+                    }
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                for arm in arms {
+                    let mut arm_cst = cst.clone();
+                    let mut arm_aliases = aliases.clone();
+                    self.walk_block_param_stores(
+                        &arm.body,
+                        &mut arm_cst,
+                        &mut arm_aliases,
+                        param_names,
+                        depth,
+                        out,
+                    );
+                    for (k, v) in arm_aliases {
+                        if aliases.contains_key(&k) {
+                            aliases.entry(k).or_default().extend(v);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn walk_call_param_stores(
+        &self,
+        cr: &CallRef,
+        cst: &FnState,
+        aliases: &mut std::collections::HashMap<String, HashSet<usize>>,
+        param_names: &HashSet<String>,
+        depth: usize,
+        out: &mut HashSet<(usize, usize)>,
+    ) {
+        if let Expr::Ident { name, .. } = crate::model::unwrap_parens(cr.callee) {
+            if name == "copy" {
+                let (Some(dst), Some(src)) = (cr.args.first(), cr.args.get(1)) else {
+                    return;
+                };
+                let elem_shares = [&dst.value, &src.value].into_iter().any(|arg| {
+                    match self.shape_of_expr(cst, crate::model::unwrap_parens(arg)) {
+                        TypeShape::Slice(elem) => {
+                            self.shape_may_share(&elem) || matches!(*elem, TypeShape::Unknown)
+                        }
+                        TypeShape::Unknown => true,
+                        _ => false,
+                    }
+                });
+                if !elem_shares {
+                    return;
+                }
+                let dst_slots = Self::raw_expr_slot_origins(&dst.value, aliases);
+                let src_slots = Self::raw_expr_slot_origins(&src.value, aliases);
+                for d in &dst_slots {
+                    for s in &src_slots {
+                        if d != s {
+                            out.insert((*d, *s));
+                        }
+                    }
+                }
+                if let Some(d_root) = dst.value.root_ident() {
+                    if !param_names.contains(d_root) && !src_slots.is_empty() {
+                        aliases
+                            .entry(d_root.to_string())
+                            .or_default()
+                            .extend(src_slots);
+                    }
+                }
+                return;
+            }
+        }
+        if depth >= 4 {
+            return;
+        }
+        let Some((sub_slots, sub_body)) = self.resolve_callee_slots_and_body(cst, cr) else {
+            return;
+        };
+        if sub_slots.len() < 2 {
+            return;
+        }
+        let sub_meta: Vec<(&str, Option<&hy_syntax::TypeExpr>)> = sub_slots
+            .iter()
+            .map(|(n, ty, _)| (n.as_str(), ty.as_ref()))
+            .collect();
+        let sub_pairs = self.collect_callee_param_stores(&sub_meta, sub_body, depth + 1);
+        for (sub_dst, sub_src) in sub_pairs {
+            if sub_dst == sub_src {
+                continue;
+            }
+            let (Some((_, _, dst_expr)), Some((_, _, src_expr))) =
+                (sub_slots.get(sub_dst), sub_slots.get(sub_src))
+            else {
+                continue;
+            };
+            let dst_slots = self.expr_slot_origins(cst, dst_expr, aliases);
+            let src_slots = self.expr_slot_origins(cst, src_expr, aliases);
+            for d in &dst_slots {
+                for s in &src_slots {
+                    if d != s {
+                        out.insert((*d, *s));
+                    }
+                }
+            }
+            if let Some(d_root) = dst_expr.root_ident() {
+                if !param_names.contains(d_root) && !src_slots.is_empty() {
+                    aliases
+                        .entry(d_root.to_string())
+                        .or_default()
+                        .extend(src_slots);
+                }
+            }
+        }
+    }
+
     /// Record a binding-level alias created by `name := value` (#38).
     ///
     /// The original check only saw a bare reference-typed `Ident` copy
@@ -2902,6 +3636,12 @@ impl<'a> Checker<'a> {
                 for cr in &calls {
                     self.check_delete_const(&cst, cr, &HashSet::new());
                     self.check_call_const_writes(&cst, cr, &HashSet::new());
+                    if let Expr::Ident { name, .. } = crate::model::unwrap_parens(cr.callee) {
+                        if name == "copy" {
+                            self.record_copy_may_share(&mut cst, cr);
+                        }
+                    }
+                    self.record_callee_param_stores(&mut cst, cr);
                 }
             }
 
@@ -2958,6 +3698,11 @@ impl<'a> Checker<'a> {
                                 cst.share_clear(name);
                                 self.record_may_share(&mut cst, name, v);
                                 self.record_alias(&mut cst, name, v);
+                            } else {
+                                let root = t.root();
+                                if !root.is_empty() && self.binding_may_share(&cst, root) {
+                                    self.record_may_share(&mut cst, root, v);
+                                }
                             }
                         }
                         self.record_assign_borrow_aliases(&mut cst, targets, *op, values);
