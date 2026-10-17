@@ -37,6 +37,12 @@ impl Emitter {
             Stmt::Send { chan, value, .. } => {
                 // `move` markers drop here: ownership transfer is a CHECKER
                 // concept; Go sends the value either way.
+                if Self::expr_has_hoistable_try(value) {
+                    self.hoist_order_before_try(chan)?;
+                } else {
+                    self.hoist_tries_expr(chan)?;
+                }
+                self.hoist_tries_expr(value)?;
                 let ch = self.emit_expr(chan, 0)?;
                 let v = self.emit_expr(value, 0)?;
                 self.push(&format!("{} <- {}", ch, v));
@@ -73,8 +79,10 @@ impl Emitter {
                 // greppable in the generated source and now carries the
                 // category + reason + tickets (row 14, discussion #4) — a
                 // reviewer greps the GO output, not just the .hy input.
-                let mut marker =
-                    format!("{{ // managed [{}] {} (audited via hyb check --report-managed)", category, reason);
+                let mut marker = format!(
+                    "{{ // managed [{}] {} (audited via hyb check --report-managed)",
+                    category, reason
+                );
                 if !tickets.is_empty() {
                     marker.push_str(&format!(" tickets: {}", tickets.join(", ")));
                 }
@@ -89,19 +97,55 @@ impl Emitter {
                 Ok(())
             }
             Stmt::Break { label, .. } => {
-                // `break loop` → Go label `hyLoop` (`loop` is a Go keyword).
-                // The enclosing loop labels itself when it owns a labeled
-                // break — see emit_for.
+                // `break loop` → the Go label of the innermost labeled
+                // loop in THIS function (pr-136's per-loop labels), refused
+                // when no enclosing loop exists at all (pr-101: the label
+                // would have no target — the checker rejects fn bodies with
+                // HYB-E3010; this guards closure bodies).
                 match label {
-                    Some(_) => self.push("break hyLoop"),
-                    None => self.push("break"),
+                    Some(_) => {
+                        if self.for_depth == 0 && self.loop_labels.is_empty() {
+                            return Err(EmitError::unsupported(
+                                "`break loop` with no enclosing loop in this function or closure \
+                                 — the loop label would have no target (LX14)",
+                            ));
+                        }
+                        self.flush_loans_for_loop(true);
+                        let name = self
+                            .loop_labels
+                            .last()
+                            .cloned()
+                            .unwrap_or_else(|| "hyLoop".to_string());
+                        self.push(&format!("break {}", name));
+                    }
+                    None => {
+                        self.flush_loans_for_loop(false);
+                        self.push("break");
+                    }
                 }
                 Ok(())
             }
             Stmt::Continue { label, .. } => {
                 match label {
-                    Some(_) => self.push("continue hyLoop"),
-                    None => self.push("continue"),
+                    Some(_) => {
+                        if self.for_depth == 0 && self.loop_labels.is_empty() {
+                            return Err(EmitError::unsupported(
+                                "`continue loop` with no enclosing loop in this function or \
+                                 closure — the loop label would have no target (LX14)",
+                            ));
+                        }
+                        self.flush_loans_for_loop(true);
+                        let name = self
+                            .loop_labels
+                            .last()
+                            .cloned()
+                            .unwrap_or_else(|| "hyLoop".to_string());
+                        self.push(&format!("continue {}", name));
+                    }
+                    None => {
+                        self.flush_loans_for_loop(false);
+                        self.push("continue");
+                    }
                 }
                 Ok(())
             }
@@ -124,8 +168,42 @@ impl Emitter {
                             let c = self.emit_expr(chan, 0)?;
                             let head = match names.len() {
                                 0 => format!("case <-{}:", c),
-                                1 => format!("case {} := <-{}:", names[0], c),
-                                2 => format!("case {}, {} := <-{}:", names[0], names[1], c),
+                                1 => {
+                                    // An unread or blank single binding cannot emit
+                                    // `case _ := <-c:` (Go rejects: `no new variables on
+                                    // left side of :=`) or `case v := <-c:` (Go rejects:
+                                    // `v declared and not used`). Lower to bare receive.
+                                    let read = names[0] != "_"
+                                        && crate::rangebind::body_reads(&arm.body, &names[0]);
+                                    if read {
+                                        format!("case {} := <-{}:", names[0], c)
+                                    } else {
+                                        format!("case <-{}:", c)
+                                    }
+                                }
+                                2 => {
+                                    // Go rejects unread receive bindings (`declared and
+                                    // not used`) and rejects `case _, _ := <-c:` (`no new
+                                    // variables on left side of :=`).
+                                    // If both unread, drop to bare receive. If one is read,
+                                    // blank the unread slot with `_`.
+                                    let a_read = names[0] != "_"
+                                        && crate::rangebind::body_reads(&arm.body, &names[0]);
+                                    let b_read = names[1] != "_"
+                                        && crate::rangebind::body_reads(&arm.body, &names[1]);
+                                    match (a_read, b_read) {
+                                        (true, true) => {
+                                            format!("case {}, {} := <-{}:", names[0], names[1], c)
+                                        }
+                                        (true, false) => {
+                                            format!("case {}, _ := <-{}:", names[0], c)
+                                        }
+                                        (false, true) => {
+                                            format!("case _, {} := <-{}:", names[1], c)
+                                        }
+                                        (false, false) => format!("case <-{}:", c),
+                                    }
+                                }
                                 n => {
                                     return Err(EmitError::unsupported(format!(
                                         "select receive with {} names",
@@ -135,7 +213,7 @@ impl Emitter {
                             };
                             self.push(&head);
                         }
-                        SelectArmKind::Send { chan, value } => {
+                        SelectArmKind::Send { chan, value, .. } => {
                             let c = self.emit_expr(chan, 0)?;
                             let v = self.emit_expr(value, 0)?;
                             self.push(&format!("case {} <- {}:", c, v));
@@ -156,16 +234,22 @@ impl Emitter {
     // -----------------------------------------------------------------------
 
     fn emit_local(&mut self, l: &LocalDecl) -> Result<(), EmitError> {
+        self.emit_local_in_seq(l, &[])
+    }
+
+    fn emit_local_in_seq(&mut self, l: &LocalDecl, rest: &[Stmt]) -> Result<(), EmitError> {
         match l.kind {
             LocalKind::Var => {
                 let ty = l.ty.as_ref().map(|t| self.type_text(t));
                 match (&ty, l.values.first()) {
                     (Some(t), None) => self.push(&format!("var {} {}", l.names.join(", "), t)),
                     (Some(t), Some(v)) => {
+                        self.hoist_tries_expr(v)?;
                         let e = self.emit_expr(v, 0)?;
                         self.push(&format!("var {} {} = {}", l.names.join(", "), t, e));
                     }
                     (None, Some(v)) => {
+                        self.hoist_tries_expr(v)?;
                         let e = self.emit_expr(v, 0)?;
                         self.push(&format!("var {} = {}", l.names.join(", "), e));
                     }
@@ -178,6 +262,11 @@ impl Emitter {
                 // Typed var decls carry receiver knowledge (Batch I):
                 // `var hits atomic.int64` → shape-known, not a pointer.
                 if let Some(t) = &l.ty {
+                    if matches!(t, TypeExpr::Pointer { .. }) {
+                        for n in &l.names {
+                            self.pointer_vars.insert(n.clone());
+                        }
+                    }
                     if let Some(kind) = self.binding_kind_of_ty(t) {
                         for n in &l.names {
                             self.bindings.insert(n.clone(), kind);
@@ -191,19 +280,23 @@ impl Emitter {
                 return Ok(());
             }
             LocalKind::Const => {
-                let value = self.emit_expr(
-                    l.values
-                        .first()
-                        .ok_or_else(|| EmitError::unsupported("`const` without an initializer"))?,
-                    0,
-                )?;
+                let first = l
+                    .values
+                    .first()
+                    .ok_or_else(|| EmitError::unsupported("`const` without an initializer"))?;
+                let value = self.emit_expr(first, 0)?;
+                let composite = matches!(
+                    first,
+                    Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
+                );
+                let kw = if composite { "var" } else { "const" };
                 let names = l.names.join(", ");
                 match &l.ty {
                     Some(t) => {
                         let ty = self.type_text(t);
-                        self.push(&format!("const {} {} = {}", names, ty, value));
+                        self.push(&format!("{} {} {} = {}", kw, names, ty, value));
                     }
-                    None => self.push(&format!("const {} = {}", names, value)),
+                    None => self.push(&format!("{} {} = {}", kw, names, value)),
                 }
                 return Ok(());
             }
@@ -211,28 +304,6 @@ impl Emitter {
             // immutability is a checker-level contract (D14 folded
             // `let x := e` into this shape).
             LocalKind::Define | LocalKind::Let => {}
-        }
-
-        // `x := &m[k]` / `x := &s.field` — the O8 map-slot loan. Go cannot
-        // take a map-index address; the ownership model's answer (O9: Go-heap
-        // reads are copies) lowers to copy-read now + store-back at the
-        // declaring block's end. A plain `&x` (local var address) is legal
-        // Go and stays verbatim.
-        if l.values.len() == 1 {
-            if let Expr::AddrOf { operand, .. } = &l.values[0] {
-                if matches!(operand.as_ref(), Expr::Index { .. } | Expr::Field { .. }) {
-                    let place = self.emit_expr(operand, 0)?;
-                    let names = l.names.join(", ");
-                    self.push(&format!("{} := {}", names, place));
-                    if l.names.len() == 1 {
-                        if let Some(frame) = self.loan_frames.last_mut() {
-                            frame.push((l.names[0].clone(), place));
-                        }
-                        self.bindings.insert(l.names[0].clone(), BindingKind::Plain);
-                    }
-                    return Ok(());
-                }
-            }
         }
 
         // `x := f()?` — the try desugar. Values.len() == 1, a Try node.
@@ -244,8 +315,59 @@ impl Emitter {
 
         // E3 expression form (Batch G): `?` nested anywhere else in the
         // values hoists to temp bindings + propagation, then substitutes.
-        for v in &l.values {
-            self.hoist_tries_expr(v)?;
+        for (idx, v) in l.values.iter().enumerate() {
+            let later_has_try = l.values[idx + 1..].iter().any(Self::expr_has_hoistable_try);
+            if later_has_try {
+                self.hoist_order_before_try(v)?;
+            } else {
+                self.hoist_tries_expr(v)?;
+            }
+        }
+
+        if l.ty.is_some() {
+            return Err(EmitError::unsupported(
+                "type-ascribed `:=` — write `var x T = e` or `x := e`",
+            ));
+        }
+
+        // `x := &m[k]` / `x := &s.field` (including parallel defines) — the
+        // O8 map-slot/field loan. Go cannot take a map-index address; the
+        // ownership model's answer (O9: Go-heap reads are copies) lowers to
+        // copy-read now + store-back when the loan's non-lexical window ends
+        // (or at the declaring block's end). A plain `&x` (local var address)
+        // is legal Go and stays verbatim.
+        if l.names.len() == l.values.len()
+            && l.values
+                .iter()
+                .any(|v| Self::as_slot_loan_operand(v).is_some())
+        {
+            let mut val_texts = Vec::with_capacity(l.values.len());
+            let mut new_loans = Vec::new();
+            for (name, v) in l.names.iter().zip(l.values.iter()) {
+                if let Some(operand) = Self::as_slot_loan_operand(v) {
+                    let (read_place, write_place) =
+                        self.emit_slot_loan_place(operand, name, rest)?;
+                    val_texts.push(read_place);
+                    if name != "_" {
+                        new_loans.push((name.clone(), write_place));
+                        self.bindings.insert(name.clone(), BindingKind::Plain);
+                    }
+                } else {
+                    val_texts.push(self.emit_expr(v, 0)?);
+                }
+            }
+            for (loan_name, _) in &new_loans {
+                self.flush_loan_for_name(loan_name);
+            }
+            self.push(&format!(
+                "{} := {}",
+                l.names.join(", "),
+                val_texts.join(", ")
+            ));
+            if let Some(frame) = self.loan_frames.last_mut() {
+                frame.extend(new_loans);
+            }
+            return Ok(());
         }
 
         let values = l
@@ -254,14 +376,7 @@ impl Emitter {
             .map(|v| self.emit_expr(v, 0))
             .collect::<Result<Vec<_>, _>>()?;
         let names = l.names.join(", ");
-        match (l.ty.as_ref(), values.len()) {
-            (Some(_), _) => {
-                return Err(EmitError::unsupported(
-                    "type-ascribed `:=` — write `var x T = e` or `x := e`",
-                ));
-            }
-            (None, _) => self.push(&format!("{} := {}", names, values.join(", "))),
-        }
+        self.push(&format!("{} := {}", names, values.join(", ")));
         // A struct-literal define carries the receiver's struct name
         // (Batch I): `stats := pool_stats{}` — field chains type through
         // struct_fields (18's `stats.mu.lock()`).
@@ -271,6 +386,150 @@ impl Emitter {
             }
         }
         self.hint_from_values(&l.names, &l.values);
+        Ok(())
+    }
+
+    pub(crate) fn expr_key(e: &Expr) -> usize {
+        e as *const Expr as usize
+    }
+
+    fn peel_parens(mut e: &Expr) -> &Expr {
+        while let Expr::Paren { inner, .. } = e {
+            e = inner;
+        }
+        e
+    }
+
+    /// True if `e` contains a `?` in the current lexical scope (does not
+    /// descend into `Expr::FnLit`, which hoists its own tries).
+    pub(crate) fn expr_has_hoistable_try(e: &Expr) -> bool {
+        match e {
+            Expr::Try { .. } => true,
+            Expr::Binary { lhs, rhs, .. } => {
+                Self::expr_has_hoistable_try(lhs) || Self::expr_has_hoistable_try(rhs)
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Paren { inner: operand, .. }
+            | Expr::Field { base: operand, .. }
+            | Expr::Receive { chan: operand, .. } => Self::expr_has_hoistable_try(operand),
+            Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                InterpPart::Expr(x) => Self::expr_has_hoistable_try(x),
+                InterpPart::Lit(_) => false,
+            }),
+            Expr::Call { callee, args, .. } => {
+                Self::expr_has_hoistable_try(callee)
+                    || args.iter().any(|a| Self::expr_has_hoistable_try(&a.value))
+            }
+            Expr::Index { base, index, .. } => {
+                Self::expr_has_hoistable_try(base) || Self::expr_has_hoistable_try(index)
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                Self::expr_has_hoistable_try(base)
+                    || lo
+                        .as_deref()
+                        .map(Self::expr_has_hoistable_try)
+                        .unwrap_or(false)
+                    || hi
+                        .as_deref()
+                        .map(Self::expr_has_hoistable_try)
+                        .unwrap_or(false)
+            }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| Self::expr_has_hoistable_try(&f.value)),
+            Expr::SliceLit { items, .. } => items.iter().any(Self::expr_has_hoistable_try),
+            Expr::MapLit { entries, .. } => entries
+                .iter()
+                .any(|(k, v)| Self::expr_has_hoistable_try(k) || Self::expr_has_hoistable_try(v)),
+            Expr::FnLit { .. } | Expr::Lit { .. } | Expr::Ident { .. } => false,
+        }
+    }
+
+    pub(crate) fn stmt_has_hoistable_try(s: &Stmt) -> bool {
+        match s {
+            Stmt::Local(l) => l.values.iter().any(Self::expr_has_hoistable_try),
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                targets.iter().any(Self::place_has_hoistable_try)
+                    || values.iter().any(Self::expr_has_hoistable_try)
+            }
+            Stmt::Expr { expr, .. } => Self::expr_has_hoistable_try(expr),
+            _ => false,
+        }
+    }
+
+    fn place_has_hoistable_try(p: &Place) -> bool {
+        match &p.kind {
+            PlaceKind::Ident(_) => false,
+            PlaceKind::Index { base, index } => {
+                Self::place_has_hoistable_try(base) || Self::expr_has_hoistable_try(index)
+            }
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                Self::place_has_hoistable_try(base)
+            }
+        }
+    }
+
+    fn expr_has_call_or_recv(e: &Expr) -> bool {
+        match e {
+            Expr::Call { .. } | Expr::Receive { .. } | Expr::Try { .. } => true,
+            Expr::Binary { lhs, rhs, .. } => {
+                Self::expr_has_call_or_recv(lhs) || Self::expr_has_call_or_recv(rhs)
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Paren { inner: operand, .. }
+            | Expr::Field { base: operand, .. } => Self::expr_has_call_or_recv(operand),
+            Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                InterpPart::Expr(x) => Self::expr_has_call_or_recv(x),
+                InterpPart::Lit(_) => false,
+            }),
+            Expr::Index { base, index, .. } => {
+                Self::expr_has_call_or_recv(base) || Self::expr_has_call_or_recv(index)
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                Self::expr_has_call_or_recv(base)
+                    || lo
+                        .as_deref()
+                        .map(Self::expr_has_call_or_recv)
+                        .unwrap_or(false)
+                    || hi
+                        .as_deref()
+                        .map(Self::expr_has_call_or_recv)
+                        .unwrap_or(false)
+            }
+            Expr::StructLit { fields, .. } => {
+                fields.iter().any(|f| Self::expr_has_call_or_recv(&f.value))
+            }
+            Expr::SliceLit { items, .. } => items.iter().any(Self::expr_has_call_or_recv),
+            Expr::MapLit { entries, .. } => entries
+                .iter()
+                .any(|(k, v)| Self::expr_has_call_or_recv(k) || Self::expr_has_call_or_recv(v)),
+            Expr::FnLit { .. } | Expr::Lit { .. } | Expr::Ident { .. } => false,
+        }
+    }
+
+    /// Preserve left-to-right operand evaluation order when a later sibling
+    /// operand contains a hoisted `?`.
+    fn hoist_order_before_try(&mut self, e: &Expr) -> Result<(), EmitError> {
+        self.hoist_tries_expr(e)?;
+        let inner = Self::peel_parens(e);
+        if matches!(inner, Expr::Try { .. })
+            || self.expr_temps.contains_key(&Self::expr_key(e))
+            || self.expr_temps.contains_key(&Self::expr_key(inner))
+        {
+            return Ok(());
+        }
+        if Self::expr_has_call_or_recv(inner) {
+            let text = self.emit_expr(e, 0)?;
+            let temp = self.next_temp("hyT");
+            self.push(&format!("{} := {}", temp, text));
+            self.expr_temps.insert(Self::expr_key(e), temp);
+        }
         Ok(())
     }
 
@@ -302,36 +561,103 @@ impl Emitter {
                 self.hoist_tries_expr(operand)?;
                 self.hoist_one_try(operand, (span.start.line, span.start.col))?;
             }
-            Expr::Binary { lhs, rhs, .. } => {
-                self.hoist_tries_expr(lhs)?;
-                self.hoist_tries_expr(rhs)?;
+            Expr::Binary { op, lhs, rhs, .. } => {
+                if matches!(op, BinOp::And | BinOp::Or) && Self::expr_has_hoistable_try(rhs) {
+                    self.hoist_tries_expr(lhs)?;
+                    let lhs_text = self.emit_expr(lhs, 0)?;
+                    let temp = self.next_temp("hyT");
+                    self.push(&format!("{} := {}", temp, lhs_text));
+                    let cond_head = match op {
+                        BinOp::And => format!("if {} {{", temp),
+                        BinOp::Or => format!("if !{} {{", temp),
+                        _ => unreachable!(),
+                    };
+                    self.push(&cond_head);
+                    self.indent += 1;
+                    self.hoist_tries_expr(rhs)?;
+                    let rhs_text = self.emit_expr(rhs, 0)?;
+                    self.push(&format!("{} = {}", temp, rhs_text));
+                    self.indent -= 1;
+                    self.push("}");
+                    self.expr_temps.insert(Self::expr_key(e), temp);
+                } else {
+                    if Self::expr_has_hoistable_try(rhs) {
+                        self.hoist_order_before_try(lhs)?;
+                    } else {
+                        self.hoist_tries_expr(lhs)?;
+                    }
+                    self.hoist_tries_expr(rhs)?;
+                }
             }
             Expr::Unary { operand, .. }
             | Expr::AddrOf { operand, .. }
             | Expr::Move { operand, .. }
             | Expr::Paren { inner: operand, .. } => self.hoist_tries_expr(operand)?,
             Expr::Interp { parts, .. } => {
-                for p in parts {
+                for (idx, p) in parts.iter().enumerate() {
                     if let InterpPart::Expr(x) = p {
-                        self.hoist_tries_expr(x)?;
+                        let later_has_try = parts[idx + 1..].iter().any(|rest| {
+                            matches!(rest, InterpPart::Expr(rx) if Self::expr_has_hoistable_try(rx))
+                        });
+                        if later_has_try {
+                            self.hoist_order_before_try(x)?;
+                        } else {
+                            self.hoist_tries_expr(x)?;
+                        }
                     }
                 }
             }
             Expr::Call { callee, args, .. } => {
-                self.hoist_tries_expr(callee)?;
-                for a in args {
-                    self.hoist_tries_expr(&a.value)?;
+                let any_arg_has_try = args.iter().any(|a| Self::expr_has_hoistable_try(&a.value));
+                if any_arg_has_try {
+                    match callee.as_ref() {
+                        Expr::Field { base, .. } => self.hoist_order_before_try(base)?,
+                        Expr::Call { .. } => self.hoist_order_before_try(callee)?,
+                        _ => self.hoist_tries_expr(callee)?,
+                    }
+                } else {
+                    self.hoist_tries_expr(callee)?;
+                }
+                for (idx, a) in args.iter().enumerate() {
+                    let later_has_try = args[idx + 1..]
+                        .iter()
+                        .any(|rest| Self::expr_has_hoistable_try(&rest.value));
+                    if later_has_try {
+                        self.hoist_order_before_try(&a.value)?;
+                    } else {
+                        self.hoist_tries_expr(&a.value)?;
+                    }
                 }
             }
             Expr::Field { base, .. } => self.hoist_tries_expr(base)?,
             Expr::Index { base, index, .. } => {
-                self.hoist_tries_expr(base)?;
+                if Self::expr_has_hoistable_try(index) {
+                    self.hoist_order_before_try(base)?;
+                } else {
+                    self.hoist_tries_expr(base)?;
+                }
                 self.hoist_tries_expr(index)?;
             }
             Expr::Slice { base, lo, hi, .. } => {
-                self.hoist_tries_expr(base)?;
+                let lo_try = lo
+                    .as_deref()
+                    .map(Self::expr_has_hoistable_try)
+                    .unwrap_or(false);
+                let hi_try = hi
+                    .as_deref()
+                    .map(Self::expr_has_hoistable_try)
+                    .unwrap_or(false);
+                if lo_try || hi_try {
+                    self.hoist_order_before_try(base)?;
+                } else {
+                    self.hoist_tries_expr(base)?;
+                }
                 if let Some(l) = lo {
-                    self.hoist_tries_expr(l)?;
+                    if hi_try {
+                        self.hoist_order_before_try(l)?;
+                    } else {
+                        self.hoist_tries_expr(l)?;
+                    }
                 }
                 if let Some(h) = hi {
                     self.hoist_tries_expr(h)?;
@@ -339,19 +665,42 @@ impl Emitter {
             }
             Expr::Receive { chan, .. } => self.hoist_tries_expr(chan)?,
             Expr::StructLit { fields, .. } => {
-                for f in fields {
-                    self.hoist_tries_expr(&f.value)?;
+                for (idx, f) in fields.iter().enumerate() {
+                    let later_has_try = fields[idx + 1..]
+                        .iter()
+                        .any(|rest| Self::expr_has_hoistable_try(&rest.value));
+                    if later_has_try {
+                        self.hoist_order_before_try(&f.value)?;
+                    } else {
+                        self.hoist_tries_expr(&f.value)?;
+                    }
                 }
             }
             Expr::SliceLit { items, .. } => {
-                for i in items {
-                    self.hoist_tries_expr(i)?;
+                for (idx, i) in items.iter().enumerate() {
+                    let later_has_try = items[idx + 1..].iter().any(Self::expr_has_hoistable_try);
+                    if later_has_try {
+                        self.hoist_order_before_try(i)?;
+                    } else {
+                        self.hoist_tries_expr(i)?;
+                    }
                 }
             }
             Expr::MapLit { entries, .. } => {
-                for (k, v) in entries {
-                    self.hoist_tries_expr(k)?;
-                    self.hoist_tries_expr(v)?;
+                for (idx, (k, v)) in entries.iter().enumerate() {
+                    let later_entry_try = entries[idx + 1..].iter().any(|(rk, rv)| {
+                        Self::expr_has_hoistable_try(rk) || Self::expr_has_hoistable_try(rv)
+                    });
+                    if Self::expr_has_hoistable_try(v) || later_entry_try {
+                        self.hoist_order_before_try(k)?;
+                    } else {
+                        self.hoist_tries_expr(k)?;
+                    }
+                    if later_entry_try {
+                        self.hoist_order_before_try(v)?;
+                    } else {
+                        self.hoist_tries_expr(v)?;
+                    }
                 }
             }
             // A closure body hoists its OWN tries (its emission runs its
@@ -515,6 +864,7 @@ impl Emitter {
         //     declared propagation (http.Error on the writer) is the
         //     contract instead. ---
         if let Some(w) = self.handler_writer.clone() {
+            self.hoist_tries_expr(call)?;
             let temp = self.next_temp("hyErr");
             let call_text = self.emit_expr(call, 0)?;
             let mut names = l.names.clone();
@@ -539,6 +889,7 @@ impl Emitter {
                 "`?` outside main (functions-with-error-results land after the walking skeleton)",
             ));
         }
+        self.hoist_tries_expr(call)?;
         let temp = self.next_temp("hyErr");
         let call_text = self.emit_expr(call, 0)?;
         let mut names = l.names.clone();
@@ -626,15 +977,18 @@ impl Emitter {
         if kind != BindingKind::Plain {
             self.bindings.insert(names[0].clone(), kind);
         }
+        if self.expr_is_pointer(&values[0]) {
+            self.pointer_vars.insert(names[0].clone());
+        }
     }
 
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
-        let call = match e {
+        let (call, args) = match e {
             Expr::Try { operand, .. } => match operand.as_ref() {
-                Expr::Call { callee, .. } => callee.as_ref(),
+                Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
                 _ => return BindingKind::Plain,
             },
-            Expr::Call { callee, .. } => callee.as_ref(),
+            Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
             _ => return BindingKind::Plain,
         };
         if let Expr::Field { base, name, .. } = call {
@@ -672,17 +1026,62 @@ impl Emitter {
             }
         }
         // make(chan …) → Chan (single-var range emits the value directly).
+        // Only classify as Chan if the first argument is a channel type.
+        // make([]T, n) (SliceLit) and make(map[K]V) (MapLit) must remain Plain
+        // so single-var range binds elements/keys rather than channel values.
         if matches!(call, Expr::Ident { name, .. } if name == "make") {
-            // args[0] is the type-as-value encoding; peek at its shape.
-            // (Verified against the parser's make encoding.)
-            return BindingKind::Chan;
+            if let Some(first) = args.first() {
+                if let Expr::StructLit {
+                    ty: Some(TypeExpr::Chan { .. }),
+                    ..
+                } = &first.value
+                {
+                    return BindingKind::Chan;
+                }
+            }
+            return BindingKind::Plain;
         }
         BindingKind::Plain
+    }
+
+    /// Whether an expression evaluates to a channel type (param, typed local,
+    /// make(chan ...), or a function returning a channel). Channel ranges in
+    /// Go permit only one iteration variable and bind the received value directly.
+    fn is_channel_expr(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Ident { name, .. } => {
+                matches!(self.bindings.get(name), Some(BindingKind::Chan))
+            }
+            Expr::Paren { inner, .. } => self.is_channel_expr(inner),
+            Expr::Call { .. } | Expr::Try { .. } => {
+                self.binding_kind_of(e) == BindingKind::Chan
+            }
+            _ => false,
+        }
     }
 
     // -----------------------------------------------------------------------
     // Assignment
     // -----------------------------------------------------------------------
+
+    fn hoist_tries_place(&mut self, p: &Place, later_has_try: bool) -> Result<(), EmitError> {
+        match &p.kind {
+            PlaceKind::Ident(_) => Ok(()),
+            PlaceKind::Index { base, index } => {
+                let idx_try = Self::expr_has_hoistable_try(index);
+                self.hoist_tries_place(base, idx_try || later_has_try)?;
+                if later_has_try {
+                    self.hoist_order_before_try(index)?;
+                } else {
+                    self.hoist_tries_expr(index)?;
+                }
+                Ok(())
+            }
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                self.hoist_tries_place(base, later_has_try)
+            }
+        }
+    }
 
     fn emit_assign(
         &mut self,
@@ -690,6 +1089,84 @@ impl Emitter {
         op: AssignOp,
         values: &[Expr],
     ) -> Result<(), EmitError> {
+        self.emit_assign_in_seq(targets, op, values, &[])
+    }
+
+    fn emit_assign_in_seq(
+        &mut self,
+        targets: &[Place],
+        op: AssignOp,
+        values: &[Expr],
+        rest: &[Stmt],
+    ) -> Result<(), EmitError> {
+        // `x = &m[k]` / `x = &s.field` — the O8 map-slot loan (single or parallel).
+        // Go cannot take a map-index address; the ownership model's answer (O9: Go-heap
+        // reads are copies) lowers to copy-read now + store-back at the loan's last use
+        // (or declaring block's end). Rebinding an existing slot-loan variable flushes
+        // its previous store-back before overwriting the variable.
+        if op == AssignOp::Assign
+            && targets.len() == values.len()
+            && !values.is_empty()
+            && targets
+                .iter()
+                .all(|t| matches!(&t.kind, PlaceKind::Ident(_)))
+            && values.iter().any(|v| Self::as_slot_loan_operand(v).is_some())
+        {
+            for (idx, v) in values.iter().enumerate() {
+                let later_has_try = values[idx + 1..].iter().any(Self::expr_has_hoistable_try);
+                if later_has_try {
+                    self.hoist_order_before_try(v)?;
+                } else {
+                    self.hoist_tries_expr(v)?;
+                }
+            }
+            let names: Vec<String> = targets
+                .iter()
+                .map(|t| match &t.kind {
+                    PlaceKind::Ident(n) => n.clone(),
+                    _ => unreachable!(),
+                })
+                .collect();
+            for name in &names {
+                if name != "_" {
+                    self.flush_loan_for_name(name);
+                }
+            }
+            let mut rhs_texts = Vec::with_capacity(values.len());
+            let mut new_loans = Vec::new();
+            for (name, v) in names.iter().zip(values.iter()) {
+                if let Some(operand) = Self::as_slot_loan_operand(v) {
+                    let (read_place, write_place) =
+                        self.emit_slot_loan_place(operand, name, rest)?;
+                    rhs_texts.push(read_place);
+                    if name != "_" {
+                        new_loans.push((name.clone(), write_place));
+                    }
+                } else {
+                    rhs_texts.push(self.emit_expr(v, 0)?);
+                }
+            }
+            self.push(&format!("{} = {}", names.join(", "), rhs_texts.join(", ")));
+            if let Some(frame) = self.loan_frames.last_mut() {
+                frame.extend(new_loans);
+            }
+            return Ok(());
+        }
+        if targets.len() == 1 && values.len() == 1 && op == AssignOp::Assign {
+            if let PlaceKind::Ident(name) = &targets[0].kind {
+                if self.expr_is_pointer(&values[0]) {
+                    self.pointer_vars.insert(name.clone());
+                } else {
+                    self.pointer_vars.remove(name);
+                }
+            }
+        }
+
+        let any_val_try = values.iter().any(Self::expr_has_hoistable_try);
+        for (idx, t) in targets.iter().enumerate() {
+            let later_target_try = targets[idx + 1..].iter().any(Self::place_has_hoistable_try);
+            self.hoist_tries_place(t, later_target_try || any_val_try)?;
+        }
         let op_text = match op {
             AssignOp::Assign => "=",
             AssignOp::AddAssign => "+=",
@@ -714,8 +1191,13 @@ impl Emitter {
             }
         };
         // E3 expression form: hoist nested `?` before emitting (Batch G).
-        for v in values {
-            self.hoist_tries_expr(v)?;
+        for (idx, v) in values.iter().enumerate() {
+            let later_has_try = values[idx + 1..].iter().any(Self::expr_has_hoistable_try);
+            if later_has_try {
+                self.hoist_order_before_try(v)?;
+            } else {
+                self.hoist_tries_expr(v)?;
+            }
         }
         let ts = targets
             .iter()
@@ -794,9 +1276,29 @@ impl Emitter {
         then: &Block,
         otherwise: Option<&Stmt>,
     ) -> Result<(), EmitError> {
+        // When `if <init>; <cond>` has a `?` in either `<init>` or `<cond>`,
+        // lower to a scoped block `{ <init>; <hoist(cond)>; if <cond> { … } }`
+        // so bindings introduced by `<init>` are in scope for `<cond>`'s
+        // hoisted statements and remain scoped to the if/else construct.
+        if let Some(i) = init {
+            if Self::stmt_has_hoistable_try(i) || Self::expr_has_hoistable_try(cond) {
+                self.push("{");
+                self.loan_frames.push(Vec::new());
+                self.indent += 1;
+                self.emit_stmt(i)?;
+                self.hoist_tries_expr(cond)?;
+                self.emit_if_at(None, cond, then, otherwise, true)?;
+                let frame = self.loan_frames.pop().unwrap_or_default();
+                for (name, place) in frame {
+                    self.push(&format!("{} = {}", place, name));
+                }
+                self.indent -= 1;
+                self.push("}");
+                return Ok(());
+            }
+        }
         // E3 expression form: a `?` in the condition hoists BEFORE the if
-        // (Batch G). Only on the line-start path — an else-if cond with a
-        // `?` would hoist mid-line; that shape errors cleanly below.
+        // (Batch G).
         self.hoist_tries_expr(cond)?;
         self.emit_if_at(init, cond, then, otherwise, true)
     }
@@ -841,8 +1343,21 @@ impl Emitter {
                 otherwise,
                 ..
             }) => {
-                self.push_raw("} else ");
-                self.emit_if_at(init.as_deref(), cond, then, otherwise.as_deref(), false)?;
+                if init
+                    .as_deref()
+                    .map(Self::stmt_has_hoistable_try)
+                    .unwrap_or(false)
+                    || Self::expr_has_hoistable_try(cond)
+                {
+                    self.push("} else {");
+                    self.indent += 1;
+                    self.emit_if(init.as_deref(), cond, then, otherwise.as_deref())?;
+                    self.indent -= 1;
+                    self.push("}");
+                } else {
+                    self.push_raw("} else ");
+                    self.emit_if_at(init.as_deref(), cond, then, otherwise.as_deref(), false)?;
+                }
             }
             Some(Stmt::Block { block, .. }) => {
                 // `else { … }` — emit the block's statements directly (a
@@ -885,22 +1400,77 @@ impl Emitter {
     }
 
     /// Every block body goes through this: a loan frame is pushed, the
-    /// statements render, and the frame's store-backs flush at the block's
-    /// end (before the closing brace). This is what makes the O8 slot-loan
-    /// desugar sound: mutations through the loaned copy persist exactly for
-    /// the loan's lexical window.
+    /// statements render (flushing any loan whose non-lexical `last_use`
+    /// ended at a statement), and any remaining store-backs flush at the
+    /// block's end (before the closing brace) unless the block already
+    /// terminated via `return`, `break`, or `continue` (#218/#203 flush
+    /// active loans before the control-flow transfer). This is what makes
+    /// the O8 slot-loan desugar sound: mutations through the loaned copy
+    /// persist exactly for the loan's non-lexical live window.
     pub fn emit_block_body(&mut self, stmts: &[Stmt]) -> Result<(), EmitError> {
         self.loan_frames.push(Vec::new());
         self.indent += 1;
-        for st in stmts {
-            self.emit_stmt(st)?;
-        }
-        let frame = self.loan_frames.pop().unwrap_or_default();
-        for (name, place) in frame {
-            self.push(&format!("{} = {}", place, name));
-        }
+        self.emit_stmts_with_loans(stmts)?;
         self.indent -= 1;
         Ok(())
+    }
+
+    fn block_terminates(b: &Block) -> bool {
+        b.stmts.iter().any(Self::stmt_terminates)
+    }
+
+    fn stmt_terminates(s: &Stmt) -> bool {
+        match s {
+            Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => true,
+            Stmt::Block { block, .. } | Stmt::Managed { body: block, .. } => {
+                Self::block_terminates(block)
+            }
+            Stmt::If {
+                then,
+                otherwise: Some(else_stmt),
+                ..
+            } => Self::block_terminates(then) && Self::stmt_terminates(else_stmt),
+            Stmt::Match { arms, .. } => {
+                !arms.is_empty()
+                    && arms
+                        .iter()
+                        .all(|a| a.guard.is_none() && Self::block_terminates(&a.body))
+            }
+            _ => false,
+        }
+    }
+
+    fn flush_loans_for_return(&mut self) {
+        let mut stores: Vec<(String, String)> = Vec::new();
+        for frame in self.loan_frames.iter().rev() {
+            if frame.first().map(|(n, _)| n.is_empty()).unwrap_or(false) {
+                continue;
+            }
+            for (name, place) in frame {
+                stores.push((name.clone(), place.clone()));
+            }
+        }
+        for (name, place) in stores {
+            self.push(&format!("{} = {}", place, name));
+        }
+    }
+
+    fn flush_loans_for_loop(&mut self, labeled: bool) {
+        let mut stores: Vec<(String, String)> = Vec::new();
+        for frame in self.loan_frames.iter().rev() {
+            if frame.first().map(|(n, _)| n.is_empty()).unwrap_or(false) {
+                if !labeled || !frame[0].1.is_empty() {
+                    break;
+                }
+                continue;
+            }
+            for (name, place) in frame {
+                stores.push((name.clone(), place.clone()));
+            }
+        }
+        for (name, place) in stores {
+            self.push(&format!("{} = {}", place, name));
+        }
     }
 
     fn emit_for(&mut self, kind: &ForKind, body: &Block) -> Result<(), EmitError> {
@@ -908,11 +1478,54 @@ impl Emitter {
         // inside a nested loop — that one labels itself) makes this loop the
         // Go label target: `hyLoop:` + the for head, `break hyLoop` inside.
         let needs_label = self.block_has_loop_break(body);
+        // Two sibling loops each owning a `break loop` would both declare
+        // `hyLoop:` — Go rejects that (`label hyLoop already declared`), and
+        // no emission can fix a duplicate declaration, so each labeled loop
+        // takes a fresh name (`hyLoop`, `hyLoop1`, …). The label is pushed
+        // BEFORE the body renders (so the breaks inside pick it up) and
+        // pushed/pop popped around the body.
+        let label = if needs_label {
+            // A per-function counter, not the stack depth: sibling loops
+            // unwind the stack between them, so depth would hand both the
+            // same name.
+            let n = self.loop_label_n;
+            self.loop_label_n += 1;
+            let name = if n == 0 {
+                "hyLoop".to_string()
+            } else {
+                format!("hyLoop{}", n)
+            };
+            self.loop_labels.push(name.clone());
+            Some(name)
+        } else {
+            None
+        };
         // gofmt puts a loop label on its OWN line (`hyLoop:` then the for
         // head one level in) — emit it as a separate line, never inline.
-        if needs_label {
-            self.push("hyLoop:");
+        if let Some(l) = &label {
+            self.push(&format!("{}:", l));
         }
+        if let ForKind::While { cond } = kind {
+            if Self::expr_has_hoistable_try(cond) {
+                self.push("for {");
+                self.loan_frames.push(Vec::new());
+                self.indent += 1;
+                self.hoist_tries_expr(cond)?;
+                let c = self.emit_expr(cond, ATOM)?;
+                self.push(&format!("if !{} {{", c));
+                self.indent += 1;
+                self.push("break");
+                self.indent -= 1;
+                self.push("}");
+                self.emit_stmts_with_loans(&body.stmts)?;
+                self.indent -= 1;
+                self.push("}");
+                return Ok(());
+            }
+        }
+        // When set, the inclusive-range arm asks us to inject
+        // `cont = v != hi` as the first body statement (see #322).
+        let mut inclusive_stop: Option<(String, String, String)> = None;
         let head = match kind {
             ForKind::Infinite => "for {".to_string(),
             ForKind::While { cond } => {
@@ -924,9 +1537,14 @@ impl Emitter {
                 hi,
                 inclusive,
             } => {
+                if Self::expr_has_hoistable_try(hi) {
+                    self.hoist_order_before_try(lo)?;
+                } else {
+                    self.hoist_tries_expr(lo)?;
+                }
+                self.hoist_tries_expr(hi)?;
                 let lo_t = self.emit_expr(lo, 0)?;
                 let hi_t = self.emit_expr(hi, 0)?;
-                let op = if *inclusive { "<=" } else { "<" };
                 // `for _ in a..b` (differential corpus 16/17/18): Go has no
                 // blank := variable — a fresh temp carries the count. The
                 // semantics are identical: the variable is never read.
@@ -935,10 +1553,29 @@ impl Emitter {
                 } else {
                     var.clone()
                 };
-                format!(
-                    "for {} := {}; {} {} {}; {}++ {{",
-                    v, lo_t, v, op, hi_t, v
-                )
+                if *inclusive {
+                    // Issue #322: `for v := lo; v <= hi; v++` wraps past the
+                    // type maximum (int8 127..=127 never stops). Emit a
+                    // continue-safe form that still runs the body once at
+                    // `hi` and exits even when `continue` hits the post:
+                    //   hyLo := lo; hyHi := hi
+                    //   for v, cont := hyLo, hyLo <= hyHi; cont; v++ {
+                    //       cont = v != hyHi
+                    //       body
+                    //   }
+                    let lo_once = self.next_temp("hyLo");
+                    let hi_once = self.next_temp("hyHi");
+                    let cont = self.next_temp("hyCont");
+                    self.push(&format!("{} := {}", lo_once, lo_t));
+                    self.push(&format!("{} := {}", hi_once, hi_t));
+                    inclusive_stop = Some((cont.clone(), v.clone(), hi_once.clone()));
+                    format!(
+                        "for {}, {} := {}, {} <= {}; {}; {}++ {{",
+                        v, cont, lo_once, lo_once, hi_once, cont, v
+                    )
+                } else {
+                    format!("for {} := {}; {} < {}; {}++ {{", v, lo_t, v, hi_t, v)
+                }
             }
             ForKind::Iterate { vars, expr } => {
                 // E3 expression form: `for u in v.array(k)? { … }` hoists
@@ -949,20 +1586,19 @@ impl Emitter {
                     1 => {
                         // `for _ in ch` drains without binding (corpus 17);
                         // `for range e` is Go's blank form for every
-                        // iterable. No variable to register.
-                        if vars[0] == "_" {
+                        // iterable. When a named loop variable is never read in
+                        // the body, Go rejects it (`declared and not used`).
+                        // Drop the binding to `for range e`, completing the
+                        // unread-binding lowering from issue #139.
+                        let read = vars[0] != "_" && crate::rangebind::body_reads(body, &vars[0]);
+                        if !read {
                             format!("for range {} {{", e)
                         } else {
                             // Hybrid's single-var iterate binds the VALUE.
                             // Go's single-var range binds the index (slices/
                             // maps) or the value (channels) — hence the Chan
                             // hint check.
-                            let over_chan = match expr {
-                                Expr::Ident { name, .. } => {
-                                    matches!(self.bindings.get(name), Some(BindingKind::Chan))
-                                }
-                                _ => false,
-                            };
+                            let over_chan = self.is_channel_expr(expr);
                             if over_chan {
                                 format!("for {} := range {} {{", vars[0], e)
                             } else {
@@ -987,7 +1623,35 @@ impl Emitter {
                             }
                         }
                     }
-                    2 => format!("for {}, {} := range {} {{", vars[0], vars[1], e),
+                    2 => {
+                        if self.is_channel_expr(expr) {
+                            return Err(EmitError::unsupported(
+                                "cannot range over channel with two iteration variables: channels permit only one iteration variable (SPEC-LANGUAGE.md LX13)",
+                            ));
+                        }
+                        // Go rejects a range binding the body never reads
+                        // (`declared and not used`), and `for _, _ :=` is
+                        // itself invalid (`no new variables on left side of
+                        // :=`) - so an unread slot lowers to `_`, and a body
+                        // that reads neither binding drops the list entirely.
+                        // Same lowering the one-variable form already uses.
+                        // Issue #139.
+                        let a = if crate::rangebind::body_reads(body, &vars[0]) {
+                            vars[0].clone()
+                        } else {
+                            "_".to_string()
+                        };
+                        let c = if crate::rangebind::body_reads(body, &vars[1]) {
+                            vars[1].clone()
+                        } else {
+                            "_".to_string()
+                        };
+                        if a == "_" && c == "_" {
+                            format!("for range {} {{", e)
+                        } else {
+                            format!("for {}, {} := range {} {{", a, c, e)
+                        }
+                    }
                     n => {
                         return Err(EmitError::unsupported(format!(
                             "for-in with {} loop variables",
@@ -999,8 +1663,27 @@ impl Emitter {
             }
         };
         self.push(&head);
-        self.emit_block_body(&body.stmts)?;
+        self.for_depth += 1;
+        let sentinel_label = label.clone().unwrap_or_default();
+        self.loan_frames.push(vec![(String::new(), sentinel_label)]);
+        // Inclusive-range stop-flag (#322): `hyCont = v != hyHi` runs as the
+        // FIRST body statement, so `continue` still evaluates it on the last
+        // value and the loop exits instead of wrapping past the type maximum.
+        // The body itself goes through emit_block_body so terminator flushes
+        // and the loan-frame sentinel machinery apply unchanged.
+        if let Some((cont, v, hi_once)) = &inclusive_stop {
+            self.indent += 1;
+            self.push(&format!("{} = {} != {}", cont, v, hi_once));
+            self.indent -= 1;
+        }
+        let body_r = self.emit_block_body(&body.stmts);
+        self.loan_frames.pop();
+        self.for_depth -= 1;
+        body_r?;
         self.push("}");
+        if label.is_some() {
+            self.loop_labels.pop();
+        }
         Ok(())
     }
 
@@ -1033,6 +1716,13 @@ impl Emitter {
             Stmt::Block { block, .. } | Stmt::Managed { body: block, .. } => {
                 self.block_has_loop_break(block)
             }
+            Stmt::Match { arms, .. } => {
+                // A labeled break/continue inside a match arm still targets
+                // THIS loop (the arm is not a new loop) — without this arm
+                // the loop skipped its `hyLoop:` label and the emitted
+                // `break hyLoop` failed go vet (invalid break label).
+                arms.iter().any(|a| self.block_has_loop_break(&a.body))
+            }
             Stmt::Select { arms, .. } => arms.iter().any(|a| self.block_has_loop_break(&a.body)),
             _ => false,
         }
@@ -1043,6 +1733,15 @@ impl Emitter {
     // -----------------------------------------------------------------------
 
     fn emit_return(&mut self, values: &[Expr]) -> Result<(), EmitError> {
+        self.flush_loans_for_return();
+        for (idx, v) in values.iter().enumerate() {
+            let later_has_try = values[idx + 1..].iter().any(Self::expr_has_hoistable_try);
+            if later_has_try {
+                self.hoist_order_before_try(v)?;
+            } else {
+                self.hoist_tries_expr(v)?;
+            }
+        }
         // Inside a function literal the closure owns the return — plain.
         if self.fnlit_depth > 0 {
             let vs = values
@@ -1099,7 +1798,14 @@ impl Emitter {
                 }
             } else if matches!(v, Expr::Ident { name, .. } if name == "_") {
                 match &self.cur_fn_error_returns {
-                    Some(zeros) if i < zeros.len() => vs.push(zeros[i].clone()),
+                    Some(zeros) if i < zeros.len() => {
+                        let z = &zeros[i];
+                        vs.push(if z.is_empty() {
+                            "nil".to_string()
+                        } else {
+                            z.clone()
+                        });
+                    }
                     _ => {
                         return Err(EmitError::unsupported(
                             "`return _` needs a fn whose results end in `error` (E3's zero-fill)",
@@ -1126,7 +1832,11 @@ impl Emitter {
                 });
             }
         }
-        self.push(&format!("return {}", vs.join(", ")));
+        if vs.is_empty() {
+            self.push("return");
+        } else {
+            self.push(&format!("return {}", vs.join(", ")));
+        }
         Ok(())
     }
 
@@ -1192,60 +1902,563 @@ impl Emitter {
         let s = self.emit_expr(subject, 0)?;
         self.push(&format!("{} := {}", temp, s));
 
-        let mut some_arm: Option<(&ArmKind, &MatchArm)> = None;
-        let mut else_arm: Option<&MatchArm> = None;
+        let mut some_arms: Vec<(&String, &MatchArm)> = Vec::new();
+        let mut none_arm: Option<&MatchArm> = None;
+        let mut wildcard_arm: Option<&MatchArm> = None;
         for (kind, arm) in &classified {
             match kind {
-                ArmKind::Some(_) => some_arm = Some((kind, arm)),
-                ArmKind::NoneArm | ArmKind::Wildcard => else_arm = Some(arm),
+                ArmKind::Some(binding) => some_arms.push((binding, *arm)),
+                ArmKind::NoneArm => none_arm = Some(*arm),
+                ArmKind::Wildcard => wildcard_arm = Some(*arm),
             }
         }
 
-        match some_arm {
-            Some((ArmKind::Some(binding), arm)) => {
-                let head = match &arm.guard {
+        if some_arms.is_empty() {
+            // No some-arm: the checker's exhaustiveness (E5001) rejects
+            // this before emission; nothing to lower.
+            return Ok(());
+        }
+
+        let has_unguarded_some = some_arms.iter().any(|(_, arm)| arm.guard.is_none());
+
+        if has_unguarded_some {
+            let else_arm = none_arm.or(wildcard_arm);
+            self.push(&format!("if {}.ok {{", temp));
+            self.indent += 1;
+            let primary_binding = some_arms[0].0;
+            self.push(&format!("{} := {}.val", primary_binding, temp));
+            // Arms run top-to-bottom. A guarded arm chains as `if`/`else if`;
+            // the FIRST unguarded `some` arm is the chain's unconditional
+            // catch-all and every arm after it is unreachable, so emission
+            // stops there. When that first arm is itself unguarded (index 0)
+            // it matches whenever `ok` is true, so its body is emitted
+            // directly — the old code always emitted `} else {` for an
+            // unguarded arm, which for an unguarded FIRST arm produced an
+            // orphan `else` with no preceding `if` and Go that does not
+            // compile (HYB accepted the program with 0 diagnostics).
+            let mut chain_opened = false;
+            for (binding, arm) in some_arms.iter() {
+                match &arm.guard {
                     Some(g) => {
-                        // The binding is not yet in scope for the guard —
-                        // lower the guard INSIDE the ok-branch.
-                        let _ = g;
-                        format!("if {}.ok {{", temp)
+                        let gt = self.emit_expr(g, 0)?;
+                        if chain_opened {
+                            self.push(&format!("}} else if {} {{", gt));
+                        } else {
+                            self.push(&format!("if {} {{", gt));
+                        }
+                        self.indent += 1;
+                        if binding.as_str() != primary_binding.as_str() {
+                            self.push(&format!("{} := {}", binding, primary_binding));
+                        }
+                        // Arm bodies are blocks: per-arm loan frame so O8 slot
+                        // loans flush inside the arm (non-lexical last_use).
+                        self.loan_frames.push(Vec::new());
+                        self.emit_stmts_with_loans(&arm.body.stmts)?;
+                        self.indent -= 1;
+                        chain_opened = true;
                     }
-                    None => format!("if {}.ok {{", temp),
-                };
-                self.push(&head);
-                self.indent += 1;
-                self.push(&format!("{} := {}.val", binding, temp));
-                if let Some(g) = &arm.guard {
-                    let gt = self.emit_expr(g, 0)?;
+                    None => {
+                        if chain_opened {
+                            self.push("} else {");
+                            self.indent += 1;
+                        }
+                        if binding.as_str() != primary_binding.as_str() {
+                            self.push(&format!("{} := {}", binding, primary_binding));
+                        }
+                        // Arm bodies are blocks: per-arm loan frame so O8
+                        // slot loans flush inside the arm (non-lexical
+                        // last_use), not at the enclosing block's end.
+                        self.loan_frames.push(Vec::new());
+                        self.emit_stmts_with_loans(&arm.body.stmts)?;
+                        if chain_opened {
+                            self.indent -= 1;
+                            self.push("}");
+                        }
+                        break; // later some-arms are unreachable
+                    }
+                }
+            }
+            self.indent -= 1;
+            match else_arm {
+                Some(arm) => {
+                    self.push("} else {");
+                    self.emit_block_body(&arm.body.stmts)?;
+                    self.push("}");
+                }
+                None => {
+                    self.push("}");
+                }
+            }
+        } else {
+            let matched_temp = self.next_temp("hyMatched");
+            self.push(&format!("{} := false", matched_temp));
+            self.push(&format!("if {}.ok {{", temp));
+            self.indent += 1;
+            let primary_binding = some_arms[0].0;
+            self.push(&format!("{} := {}.val", primary_binding, temp));
+            for (i, (binding, arm)) in some_arms.iter().enumerate() {
+                self.hoist_tries_expr(arm.guard.as_ref().unwrap())?;
+                let gt = self.emit_expr(arm.guard.as_ref().unwrap(), 0)?;
+                if i == 0 {
                     self.push(&format!("if {} {{", gt));
+                } else {
+                    self.push(&format!("}} else if {} {{", gt));
+                }
+                self.indent += 1;
+                self.push(&format!("{} = true", matched_temp));
+                if binding.as_str() != primary_binding.as_str() {
+                    self.push(&format!("{} := {}", binding, primary_binding));
+                }
+                // Arm bodies are blocks: give each its own loan frame so O8
+                // slot loans flush at arm exit (non-lexical last_use within
+                // the arm, remaining store-backs at the arm's closing brace).
+                self.loan_frames.push(Vec::new());
+                self.emit_stmts_with_loans(&arm.body.stmts)?;
+                self.indent -= 1;
+            }
+            self.push("}");
+            self.indent -= 1;
+            self.push("}");
+
+            if let Some(arm) = none_arm {
+                if wildcard_arm.is_some() {
+                    self.push(&format!("if !{} && !{}.ok {{", matched_temp, temp));
                     self.indent += 1;
-                    for st in &arm.body.stmts {
-                        self.emit_stmt(st)?;
-                    }
+                    self.push(&format!("{} = true", matched_temp));
+                    self.loan_frames.push(Vec::new());
+                    self.emit_stmts_with_loans(&arm.body.stmts)?;
                     self.indent -= 1;
                     self.push("}");
                 } else {
-                    for st in &arm.body.stmts {
-                        self.emit_stmt(st)?;
-                    }
+                    self.push(&format!("if !{} && !{}.ok {{", matched_temp, temp));
+                    self.indent += 1;
+                    self.loan_frames.push(Vec::new());
+                    self.emit_stmts_with_loans(&arm.body.stmts)?;
+                    self.indent -= 1;
+                    self.push("}");
                 }
+            }
+
+            if let Some(arm) = wildcard_arm {
+                self.push(&format!("if !{} {{", matched_temp));
+                self.indent += 1;
+                self.loan_frames.push(Vec::new());
+                self.emit_stmts_with_loans(&arm.body.stmts)?;
                 self.indent -= 1;
-            }
-            _ => {
-                // No some-arm: the checker's exhaustiveness (E5001) rejects
-                // this before emission; nothing to lower.
-            }
-        }
-        match else_arm {
-            Some(arm) => {
-                self.push("} else {");
-                self.emit_block_body(&arm.body.stmts)?;
-                self.push("}");
-            }
-            None => {
                 self.push("}");
             }
         }
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // O8 slot-loan helpers (non-lexical last_use flush, rebind flush, key snapshot)
+    // -----------------------------------------------------------------------
+
+    /// Returns `Some(operand)` when `expr` is an O8 slot-loan `&m[k]` or `&s.field`.
+    fn as_slot_loan_operand(expr: &Expr) -> Option<&Expr> {
+        match expr {
+            Expr::AddrOf { operand, .. }
+            | Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                ..
+            } if matches!(operand.as_ref(), Expr::Index { .. } | Expr::Field { .. }) => {
+                Some(operand.as_ref())
+            }
+            _ => None,
+        }
+    }
+
+    /// Emits the read-place and store-back-place for an O8 slot loan `&operand`
+    /// bound to `loan_var`, snapshotting the index expression into a fresh
+    /// `hyKeyN` temporary when the index is non-trivial or is mutated before
+    /// the loan's store-back.
+    fn emit_slot_loan_place(
+        &mut self,
+        operand: &Expr,
+        loan_var: &str,
+        rest: &[Stmt],
+    ) -> Result<(String, String), EmitError> {
+        if let Expr::Index { base, index, .. } = operand {
+            let needs_key_snapshot = match index.as_ref() {
+                Expr::Lit { .. } => false,
+                Expr::Ident { name, .. } => {
+                    name == loan_var
+                        || rest.iter().any(|s| Self::stmt_modifies_ident(s, name))
+                }
+                _ => true,
+            };
+            let base_mentions_loan_var =
+                loan_var != "_" && Self::expr_mentions_ident(base, loan_var);
+            if needs_key_snapshot || base_mentions_loan_var {
+                let base_text = self.emit_expr(base, ATOM)?;
+                let idx_text = self.emit_expr(index, 0)?;
+                let key_place = if needs_key_snapshot {
+                    let kt = self.next_temp("hyKey");
+                    self.push(&format!("{} := {}", kt, idx_text));
+                    kt
+                } else {
+                    idx_text
+                };
+                let place = format!("{}[{}]", base_text, key_place);
+                return Ok((place.clone(), place));
+            }
+        }
+        let place = self.emit_expr(operand, 0)?;
+        Ok((place.clone(), place))
+    }
+
+    /// Flushes and removes any active slot-loan entries for `target_name` in
+    /// the current loan frame (used before rebinding `target_name = &...`).
+    fn flush_loan_for_name(&mut self, target_name: &str) {
+        let mut to_flush = Vec::new();
+        if let Some(frame) = self.loan_frames.last_mut() {
+            let mut i = 0;
+            while i < frame.len() {
+                if frame[i].0 == target_name {
+                    to_flush.push(frame.remove(i));
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        for (name, place) in to_flush {
+            self.push(&format!("{} = {}", place, name));
+        }
+    }
+
+    /// Emits a sequence of statements inside the current loan frame, flushing
+    /// each active slot loan as soon as the remaining statements in the block
+    /// no longer reference the loan variable (matching `hy-check`'s non-lexical
+    /// `last_use` window), and flushing any still-active loans at block exit.
+    fn emit_stmts_with_loans(&mut self, stmts: &[Stmt]) -> Result<(), EmitError> {
+        for (idx, st) in stmts.iter().enumerate() {
+            let rest = &stmts[idx + 1..];
+            match st {
+                Stmt::Local(l) => self.emit_local_in_seq(l, rest)?,
+                Stmt::Assign {
+                    targets,
+                    op,
+                    values,
+                    ..
+                } => self.emit_assign_in_seq(targets, *op, values, rest)?,
+                _ => self.emit_stmt(st)?,
+            }
+            // If `rest` can still execute after `st`, flush any loan in the
+            // current frame whose variable has no remaining uses in `rest`
+            // (or is shadowed/rebound before any read of the current loan).
+            if !rest.is_empty() && !Self::stmt_terminates(st) {
+                let mut early_flush = Vec::new();
+                if let Some(frame) = self.loan_frames.last_mut() {
+                    let mut i = 0;
+                    while i < frame.len() {
+                        if !Self::remaining_stmts_use_loan(rest, &frame[i].0) {
+                            early_flush.push(frame.remove(i));
+                        } else {
+                            i += 1;
+                        }
+                    }
+                }
+                for (name, place) in early_flush {
+                    if !name.is_empty() {
+                        self.push(&format!("{} = {}", place, name));
+                    }
+                }
+            }
+        }
+        let frame = self.loan_frames.pop().unwrap_or_default();
+        if !stmts.iter().any(Self::stmt_terminates) {
+            for (name, place) in frame {
+                if !name.is_empty() {
+                    self.push(&format!("{} = {}", place, name));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns `true` if `stmts` may still read or mutate the current slot
+    /// loan bound to `name`. A subsequent `name = &other_place` rebind (whose
+    /// RHS does not itself mention `name`) starts a new loan rather than using
+    /// the current loan.
+    fn remaining_stmts_use_loan(stmts: &[Stmt], name: &str) -> bool {
+        for st in stmts {
+            match st {
+                Stmt::Local(l) => {
+                    if l.values.iter().any(|v| Self::expr_mentions_ident(v, name)) {
+                        return true;
+                    }
+                    if l.names.iter().any(|n| n == name) {
+                        return false;
+                    }
+                }
+                Stmt::Assign {
+                    targets,
+                    op,
+                    values,
+                    ..
+                } if *op == AssignOp::Assign
+                    && targets.len() == values.len()
+                    && targets
+                        .iter()
+                        .all(|t| matches!(&t.kind, PlaceKind::Ident(_)))
+                    && values.iter().any(|v| Self::as_slot_loan_operand(v).is_some()) =>
+                {
+                    if values.iter().any(|v| Self::expr_mentions_ident(v, name)) {
+                        return true;
+                    }
+                    if targets
+                        .iter()
+                        .any(|t| matches!(&t.kind, PlaceKind::Ident(n) if n == name))
+                    {
+                        return false;
+                    }
+                }
+                _ => {
+                    if Self::stmt_mentions_ident(st, name) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn stmt_mentions_ident(st: &Stmt, target: &str) -> bool {
+        match st {
+            Stmt::Local(l) => l
+                .values
+                .iter()
+                .any(|v| Self::expr_mentions_ident(v, target)),
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                targets
+                    .iter()
+                    .any(|t| Self::place_mentions_ident(t, target))
+                    || values
+                        .iter()
+                        .any(|v| Self::expr_mentions_ident(v, target))
+            }
+            Stmt::Expr { expr, .. } => Self::expr_mentions_ident(expr, target),
+            Stmt::Send { chan, value, .. } => {
+                Self::expr_mentions_ident(chan, target)
+                    || Self::expr_mentions_ident(value, target)
+            }
+            Stmt::Return { values, .. } => values
+                .iter()
+                .any(|v| Self::expr_mentions_ident(v, target)),
+            Stmt::If {
+                init,
+                cond,
+                then,
+                otherwise,
+                ..
+            } => {
+                init.as_ref()
+                    .is_some_and(|i| Self::stmt_mentions_ident(i, target))
+                    || Self::expr_mentions_ident(cond, target)
+                    || Self::block_mentions_ident(then, target)
+                    || otherwise
+                        .as_ref()
+                        .is_some_and(|o| Self::stmt_mentions_ident(o, target))
+            }
+            Stmt::For { kind, body, .. } => {
+                let kind_mentions = match kind {
+                    ForKind::Infinite => false,
+                    ForKind::While { cond } => Self::expr_mentions_ident(cond, target),
+                    ForKind::Range { lo, hi, .. } => {
+                        Self::expr_mentions_ident(lo, target)
+                            || Self::expr_mentions_ident(hi, target)
+                    }
+                    ForKind::Iterate { expr, .. } => Self::expr_mentions_ident(expr, target),
+                };
+                kind_mentions || Self::block_mentions_ident(body, target)
+            }
+            Stmt::Match { subject, arms, .. } => {
+                Self::expr_mentions_ident(subject, target)
+                    || arms.iter().any(|a| {
+                        let shadowed = matches!(
+                            &a.pattern,
+                            MatchPattern::Path {
+                                binding: Some(b),
+                                ..
+                            } if b == target
+                        );
+                        !shadowed
+                            && (a
+                                .guard
+                                .as_ref()
+                                .is_some_and(|g| Self::expr_mentions_ident(g, target))
+                                || Self::block_mentions_ident(&a.body, target))
+                    })
+            }
+            Stmt::Select { arms, .. } => arms.iter().any(|a| {
+                let head_mentions = match &a.kind {
+                    SelectArmKind::Recv { chan, .. } => Self::expr_mentions_ident(chan, target),
+                    SelectArmKind::Send { chan, value, .. } => {
+                        Self::expr_mentions_ident(chan, target)
+                            || Self::expr_mentions_ident(value, target)
+                    }
+                    SelectArmKind::Default => false,
+                };
+                head_mentions || Self::block_mentions_ident(&a.body, target)
+            }),
+            Stmt::Defer { call, .. } => Self::expr_mentions_ident(call, target),
+            Stmt::Task { callee, args, .. } => {
+                Self::expr_mentions_ident(callee, target)
+                    || args
+                        .iter()
+                        .any(|a| Self::expr_mentions_ident(&a.value, target))
+            }
+            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+                Self::block_mentions_ident(body, target)
+            }
+            Stmt::Break { .. } | Stmt::Continue { .. } => false,
+        }
+    }
+
+    fn block_mentions_ident(b: &Block, target: &str) -> bool {
+        for st in &b.stmts {
+            if let Stmt::Local(l) = st {
+                if l.values
+                    .iter()
+                    .any(|v| Self::expr_mentions_ident(v, target))
+                {
+                    return true;
+                }
+                if l.names.iter().any(|n| n == target) {
+                    return false;
+                }
+                continue;
+            }
+            if Self::stmt_mentions_ident(st, target) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn place_mentions_ident(p: &Place, target: &str) -> bool {
+        match &p.kind {
+            PlaceKind::Ident(n) => n == target,
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                Self::place_mentions_ident(base, target)
+            }
+            PlaceKind::Index { base, index } => {
+                Self::place_mentions_ident(base, target)
+                    || Self::expr_mentions_ident(index, target)
+            }
+        }
+    }
+
+    fn expr_mentions_ident(e: &Expr, target: &str) -> bool {
+        match e {
+            Expr::Ident { name, .. } => name == target,
+            Expr::Lit { .. } => false,
+            Expr::Binary { lhs, rhs, .. } => {
+                Self::expr_mentions_ident(lhs, target)
+                    || Self::expr_mentions_ident(rhs, target)
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Receive { chan: operand, .. }
+            | Expr::Field { base: operand, .. }
+            | Expr::Paren { inner: operand, .. } => Self::expr_mentions_ident(operand, target),
+            Expr::Call { callee, args, .. } => {
+                Self::expr_mentions_ident(callee, target)
+                    || args
+                        .iter()
+                        .any(|a| Self::expr_mentions_ident(&a.value, target))
+            }
+            Expr::Index { base, index, .. } => {
+                Self::expr_mentions_ident(base, target)
+                    || Self::expr_mentions_ident(index, target)
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                Self::expr_mentions_ident(base, target)
+                    || lo
+                        .as_ref()
+                        .is_some_and(|x| Self::expr_mentions_ident(x, target))
+                    || hi
+                        .as_ref()
+                        .is_some_and(|x| Self::expr_mentions_ident(x, target))
+            }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| Self::expr_mentions_ident(&f.value, target)),
+            Expr::SliceLit { items, .. } => items
+                .iter()
+                .any(|x| Self::expr_mentions_ident(x, target)),
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
+                Self::expr_mentions_ident(k, target) || Self::expr_mentions_ident(v, target)
+            }),
+            Expr::FnLit { params, body, .. } => {
+                !params.iter().any(|p| p.name == target)
+                    && Self::block_mentions_ident(body, target)
+            }
+            Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                InterpPart::Lit(_) => false,
+                InterpPart::Expr(x) => Self::expr_mentions_ident(x, target),
+            }),
+        }
+    }
+
+    fn stmt_modifies_ident(st: &Stmt, target: &str) -> bool {
+        match st {
+            Stmt::Local(l) => l.names.iter().any(|n| n == target),
+            Stmt::Assign { targets, .. } => targets.iter().any(|t| match &t.kind {
+                PlaceKind::Ident(n) => n == target,
+                _ => false,
+            }),
+            Stmt::If {
+                init,
+                then,
+                otherwise,
+                ..
+            } => {
+                init.as_ref()
+                    .is_some_and(|i| Self::stmt_modifies_ident(i, target))
+                    || then
+                        .stmts
+                        .iter()
+                        .any(|s| Self::stmt_modifies_ident(s, target))
+                    || otherwise
+                        .as_ref()
+                        .is_some_and(|o| Self::stmt_modifies_ident(o, target))
+            }
+            Stmt::For { kind, body, .. } => {
+                let head_modifies = match kind {
+                    ForKind::Range { var, .. } => var == target,
+                    ForKind::Iterate { vars, .. } => vars.iter().any(|v| v == target),
+                    _ => false,
+                };
+                head_modifies
+                    || body
+                        .stmts
+                        .iter()
+                        .any(|s| Self::stmt_modifies_ident(s, target))
+            }
+            Stmt::Match { arms, .. } => arms.iter().any(|a| {
+                a.body
+                    .stmts
+                    .iter()
+                    .any(|s| Self::stmt_modifies_ident(s, target))
+            }),
+            Stmt::Select { arms, .. } => arms.iter().any(|a| {
+                a.body
+                    .stmts
+                    .iter()
+                    .any(|s| Self::stmt_modifies_ident(s, target))
+            }),
+            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => body
+                .stmts
+                .iter()
+                .any(|s| Self::stmt_modifies_ident(s, target)),
+            _ => false,
+        }
     }
 }

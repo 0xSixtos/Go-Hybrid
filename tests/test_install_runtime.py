@@ -20,6 +20,22 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+INSTALL_PATH_NAMES = (
+    "ordinary",
+    "with spaces",
+    "$literal",
+    "single'quote",
+    'double"quote',
+    r"back\slash",
+    r"back\$literal",
+    r"double\\$literal",
+    "trailing\\",
+    "literal`printf backtick`",
+    "literal$(printf substitution)",
+    "trailing-newline\n",
+    "combined $literal 'single' \"double\" \\ end\\",
+)
+PROBE_ARGS = ["build", "file with spaces.hy", "", "$literal", "a'b", 'a"b', r"a\b", "end\\", "line\nbreak"]
 
 
 class LauncherRuntimeTests(unittest.TestCase):
@@ -28,7 +44,14 @@ class LauncherRuntimeTests(unittest.TestCase):
         supported_arch = {"x86_64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
         if platform.system() not in supported_os or platform.machine() not in supported_arch:
             self.skipTest("install.sh supports Linux/macOS on amd64/arm64")
-        if not shutil.which("sha256sum") and not shutil.which("shasum"):
+        required_tools = ("sh", "uname", "mktemp", "mkdir", "rm", "tar", "gzip", "cp", "chmod", "cat", "sed", "head")
+        system_tools = {
+            name: shutil.which(name, path=os.defpath)
+            for name in (*required_tools, "sha256sum", "shasum")
+        }
+        if any(not system_tools[name] for name in required_tools):
+            self.skipTest("the installer requires standard POSIX tools and gzip")
+        if not system_tools["sha256sum"] and not system_tools["shasum"]:
             self.skipTest("the installer requires sha256sum or shasum")
 
         temporary = tempfile.TemporaryDirectory(prefix="hybrid-installer-test-")
@@ -42,11 +65,12 @@ class LauncherRuntimeTests(unittest.TestCase):
         (payload / "runtime").mkdir(parents=True)
         (payload / "runtime" / "fixture.txt").write_text("offline test runtime\n", encoding="utf-8")
         (payload / "hyb").write_text(
-            f"#!{sys.executable}\n"
+            f"#!{sys.executable} -IBS\n"
             "import json, os, sys\n"
             "if sys.argv[1:] == ['explain', 'E0002']:\n"
             "    sys.exit(0)\n"
-            "print(json.dumps({'runtime': os.environ.get('HYB_RUNTIME_DIR'), 'args': sys.argv[1:]}))\n",
+            "print(json.dumps({'runtime': os.environ.get('HYB_RUNTIME_DIR'), "
+            "'executable': os.path.realpath(__file__), 'args': sys.argv[1:]}))\n",
             encoding="utf-8",
         )
         (payload / "hyb").chmod(0o755)
@@ -61,37 +85,50 @@ class LauncherRuntimeTests(unittest.TestCase):
 
         shim_dir = self.root / "offline tools"
         shim_dir.mkdir()
+        # Expose only the installer's local tools, never a real network client.
+        for name, path in system_tools.items():
+            if path:
+                (shim_dir / name).symlink_to(path)
         (shim_dir / "curl").write_text(
-            f"#!{sys.executable}\n"
+            f"#!{sys.executable} -IBS\n"
             "import os, pathlib, shutil, sys\n"
             "args = sys.argv[1:]\n"
             "prefix = 'https://github.com/limitlessprojects/Go-Hybrid/releases/download/v0.0.0-test/'\n"
-            "if len(args) != 4 or args[0] != '-fsSL' or args[2] != '-o' or not args[1].startswith(prefix):\n"
+            "if pathlib.Path(sys.argv[0]).name == 'curl' and len(args) == 4 and args[0] == '-fsSL' and args[2] == '-o':\n"
+            "    url, output = args[1], args[3]\n"
+            "elif pathlib.Path(sys.argv[0]).name == 'wget' and len(args) == 3 and args[0] == '-qO':\n"
+            "    url, output = args[2], args[1]\n"
+            "else:\n"
             "    sys.exit('unexpected download request in offline test')\n"
-            "name = args[1][len(prefix):]\n"
+            "if not url.startswith(prefix):\n"
+            "    sys.exit('unexpected download request in offline test')\n"
+            "name = url[len(prefix):]\n"
             "if name != pathlib.Path(name).name:\n"
             "    sys.exit('unexpected asset path in offline test')\n"
-            "shutil.copyfile(pathlib.Path(os.environ['HYB_TEST_RELEASE_DIR']) / name, args[3])\n",
+            "shutil.copyfile(pathlib.Path(os.environ['HYB_TEST_RELEASE_DIR']) / name, output)\n",
             encoding="utf-8",
         )
         (shim_dir / "curl").chmod(0o755)
+        (shim_dir / "wget").symlink_to("curl")
+        (self.root / "home").mkdir()
+        (self.root / "tmp").mkdir()
+        # A fresh environment excludes credentials, shell hooks, and user paths.
         self.env = {
-            key: value for key, value in os.environ.items()
-            if not key.startswith("HYB_")
-        }
-        self.env.update({
             "HOME": str(self.root / "home"),
-            "PATH": str(shim_dir) + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"),
+            "TMPDIR": str(self.root / "tmp"),
+            "PATH": str(shim_dir),
+            "LC_ALL": "C",
             "HYB_VERSION": "v0.0.0-test",
             "HYB_INSTALL_DIR": str(self.install),
             "HYB_BIN_DIR": str(self.bin_dir),
             "HYB_TEST_RELEASE_DIR": str(release),
-        })
+        }
 
     def install_fixture(self, **overrides):
         result = subprocess.run(
             ["sh", str(ROOT / "install.sh")],
             env={**self.env, **overrides},
+            cwd=self.root,
             capture_output=True, text=True, timeout=15, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -104,6 +141,7 @@ class LauncherRuntimeTests(unittest.TestCase):
         env.update(overrides)
         result = subprocess.run(
             [str(self.bin_dir / "hyb"), *args], env=env,
+            cwd=self.root,
             capture_output=True, text=True, timeout=15, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -159,6 +197,43 @@ class LauncherRuntimeTests(unittest.TestCase):
         self.install_fixture()
         args = ["build", "file with spaces.hy", "", "$literal", "a'b"]
         self.assertEqual(self.probe(*args)["args"], args)
+
+    def test_install_paths_preserve_runtime_executable_and_arguments(self):
+        for name in INSTALL_PATH_NAMES:
+            with self.subTest(install=name):
+                installed = self.root / name
+                self.install_fixture(HYB_INSTALL_DIR=str(installed))
+                expected = {
+                    "runtime": str(installed / "runtime"),
+                    "executable": str((installed / "bin" / "hyb").resolve()),
+                    "args": PROBE_ARGS,
+                }
+                self.assertEqual(self.probe(*PROBE_ARGS), expected)
+                runtime = str(self.root / "runtime overrides" / name)
+                self.assertEqual(
+                    self.probe(*PROBE_ARGS, HYB_RUNTIME_DIR=runtime),
+                    {**expected, "runtime": runtime},
+                )
+
+    def test_special_install_overrides_preserve_runtime_precedence(self):
+        self.install_fixture()
+        for name in INSTALL_PATH_NAMES:
+            with self.subTest(install_override=name):
+                relocated = self.root / "relocated" / name
+                shutil.copytree(self.install, relocated)
+                expected = {
+                    "runtime": str(relocated / "runtime"),
+                    "executable": str((relocated / "bin" / "hyb").resolve()),
+                    "args": PROBE_ARGS,
+                }
+                self.assertEqual(
+                    self.probe(*PROBE_ARGS, HYB_INSTALL_DIR=str(relocated)), expected,
+                )
+                runtime = str(self.root / "runtime overrides" / name)
+                self.assertEqual(
+                    self.probe(*PROBE_ARGS, HYB_INSTALL_DIR=str(relocated), HYB_RUNTIME_DIR=runtime),
+                    {**expected, "runtime": runtime},
+                )
 
 
 if __name__ == "__main__":

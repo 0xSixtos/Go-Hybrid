@@ -127,7 +127,10 @@ SMOKE="$(mktemp -d)"
 RUSTLESS_PATH=""
 OLDIFS="$IFS"; IFS="::"
 for p in $PATH; do
-    case "$p" in *.cargo/bin*) ;; *) RUSTLESS_PATH="${RUSTLESS_PATH:+$RUSTLESS_PATH:}$p" ;; esac
+    # Toolchains need not live under ~/.cargo/bin (e.g. custom CI installs).
+    if [ ! -x "$p/cargo" ] && [ ! -x "$p/cargo.exe" ]; then
+        RUSTLESS_PATH="${RUSTLESS_PATH:+$RUSTLESS_PATH:}$p"
+    fi
 done
 IFS="$OLDIFS"
 # cross linux/arm64: run the arm64 hyb under qemu (binfmt has NO sysroot —
@@ -165,20 +168,20 @@ else
     exit 1
 fi
 
-# --- 5b. bridge smoke (linux/arm64 FULL asset — row 16) ---
+# --- 5b. bridge smoke (cross linux/arm64 and native macOS assets) ---
 # Same tarball, same rustless PATH: a rust/serde_json-importing program
-# must build (cgo links the prebuilt arm64 staticlib; call_arm64.s assembles)
-# and RUN correctly under qemu. Skipped on every other platform.
-if [ "$PKG_OS/$ARCH" = "linux/arm64" ] && [ -n "$RUST_TARGET" ]; then
-    echo "==> bridge smoke from the tarball (serde_json crossing under qemu)"
+# must build and RUN correctly. macOS must exercise Mach-O archive discovery
+# and the Darwin stack pool; a bridge-free hello cannot detect either failure.
+if { [ "$PKG_OS/$ARCH" = "linux/arm64" ] && [ -n "$RUST_TARGET" ]; } || [ "$PKG_OS" = "darwin" ]; then
+    echo "==> bridge smoke from the tarball (serde_json crossing on $PKG_OS/$ARCH)"
     if ( cd "$SMOKE" && env PATH="$RUSTLESS_PATH" $CROSS_GO_ENV $QEMU_RUNNER \
             "$SMOKE/hybrid-${VER}/$HYB_OUT_NAME" build \
             "$REPO_ROOT/examples/05-json-transform/program.hy" -o "$SMOKE/json" ) \
         && $QEMU_RUNNER "$SMOKE/json" > "$SMOKE/json.txt" 2>&1 \
         && grep -q '"ada"' "$SMOKE/json.txt"; then
-        echo "    bridge smoke PASS (arm64 trampolines exercised): $(tr '\n' ' ' < "$SMOKE/json.txt" | tr -s ' ')"
+        echo "    bridge smoke PASS ($PKG_OS/$ARCH trampolines exercised): $(tr '\n' ' ' < "$SMOKE/json.txt" | tr -s ' ')"
     else
-        echo "BRIDGE SMOKE FAILED (linux/arm64 — the asset is FULL only if this passes)" >&2
+        echo "BRIDGE SMOKE FAILED ($PKG_OS/$ARCH — the asset is FULL only if this passes)" >&2
         cat "$SMOKE/json.txt" 2>/dev/null >&2
         exit 1
     fi

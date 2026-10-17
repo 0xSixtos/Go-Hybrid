@@ -13,10 +13,77 @@ Baseline shape: {"version": 1, "blocks": {"<file>:<line>": {"reason": ...,
 count as new (deliberate: moving a hatch is a review event too).
 """
 import json
+import re
 import subprocess
 import sys
 
 VALID = {"mutex", "atomic", "actor", "finalizer", "interop", "other"}
+
+
+def _mask_comments_and_strings(src: str) -> str:
+    """Replace comments and string/char literals with spaces while preserving newlines."""
+    out = []
+    i = 0
+    n = len(src)
+    while i < n:
+        ch = src[i]
+        # Line comment // ...
+        if ch == "/" and i + 1 < n and src[i + 1] == "/":
+            while i < n and src[i] != "\n":
+                out.append(" ")
+                i += 1
+            continue
+        # Block comment /* ... */ (non-nested per LX8)
+        if ch == "/" and i + 1 < n and src[i + 1] == "*":
+            out.append("  ")
+            i += 2
+            while i < n and not (src[i] == "*" and i + 1 < n and src[i + 1] == "/"):
+                out.append("\n" if src[i] == "\n" else " ")
+                i += 1
+            if i < n:
+                out.append("  ")
+                i += 2
+            continue
+        # Raw string `...`
+        if ch == "`":
+            out.append(" ")
+            i += 1
+            while i < n and src[i] != "`":
+                out.append("\n" if src[i] == "\n" else " ")
+                i += 1
+            if i < n:
+                out.append(" ")
+                i += 1
+            continue
+        # Quoted string "..." or char literal '...'
+        if ch in ('"', "'"):
+            quote = ch
+            out.append(" ")
+            i += 1
+            while i < n and src[i] != quote:
+                if src[i] == "\\" and i + 1 < n:
+                    out.append("\n" if src[i] == "\n" else " ")
+                    out.append("\n" if src[i + 1] == "\n" else " ")
+                    i += 2
+                    continue
+                out.append("\n" if src[i] == "\n" else " ")
+                i += 1
+            if i < n:
+                out.append(" ")
+                i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def scan_managed_lines(src: str) -> list[int]:
+    """Return 1-based line numbers of lexical `managed (` occurrences outside comments/strings."""
+    masked = _mask_comments_and_strings(src)
+    return [
+        1 + masked.count("\n", 0, m.start())
+        for m in re.finditer(r"\bmanaged\s*\(", masked)
+    ]
 
 
 def audit(hyb, prog):
@@ -37,30 +104,40 @@ def audit(hyb, prog):
     except json.JSONDecodeError:
         print(f"GATE ERROR: {prog}: hyb check did not emit JSON\n{r.stdout}\n{r.stderr}")
         sys.exit(2)
-    rep = (out.get("summary") or {}).get("managed") or {}
+    # Missing audit data is not evidence of an empty inventory. In particular,
+    # do not let a stale/wrapped checker returning {} clear a reviewed baseline.
+    summary = out.get("summary") if isinstance(out, dict) else None
+    rep = summary.get("managed") if isinstance(summary, dict) else None
+    if not isinstance(rep, dict):
+        print(f"GATE ERROR: {prog}: missing or malformed summary.managed report")
+        sys.exit(2)
+    # The Rust serializer omits an empty blocks Vec, but always emits its count.
+    reported = rep.get("blocks", [])
+    count = rep.get("managed_blocks")
+    if (type(count) is not int or count < 0 or not isinstance(reported, list)
+            or count != len(reported)):
+        print(f"GATE ERROR: {prog}: malformed managed block list or inconsistent count")
+        sys.exit(2)
     blocks = []
-    for b in rep.get("blocks", []):
-        if b.get("category") not in VALID:
-            print(f"GATE ERROR: {prog}: category {b.get('category')!r} outside the closed set")
+    for b in reported:
+        category = b.get("category") if isinstance(b, dict) else None
+        if not isinstance(category, str) or category not in VALID:
+            print(f"GATE ERROR: {prog}: category {category!r} outside the closed set")
             sys.exit(2)
         blocks.append(b)
-    # line numbers: re-scan the source for the reason literals (the JSON
-    # report is source-ordered; pairing by order is stable for a single file)
-    lines = []
+    # line numbers: lexically scan the source for `managed (` tokens outside
+    # comments and string literals (issue #119; the JSON report is
+    # source-ordered, so pairing by lexical order is stable for a single file).
     with open(prog, encoding="utf-8") as f:
-        for ln, text in enumerate(f, 1):
-            if "managed(" in text and "//" not in text.split("managed(")[0][-2:]:
-                lines.append(ln)
+        lines = scan_managed_lines(f.read())
     # Never guess a location or collapse several reports into a shared `?`
-    # key. That can hide an inserted block when a later block overwrites it.
-    # The current baseline format requires one unambiguous block per line;
-    # fail closed when the lightweight source scan cannot establish that.
-    if len(lines) != len(blocks):
+    # key, and reject multiple managed blocks on the same line (file:line keys
+    # cannot distinguish them).
+    if len(lines) != len(blocks) or len(set(lines)) != len(lines):
         print(
             f"GATE ERROR: {prog}: {len(blocks)} reported managed block(s) "
-            f"but {len(lines)} source location(s); cannot pair them uniquely. "
-            "Put each managed block on its own line and check for source "
-            "mentions that confuse the scan before rebaselining."
+            f"but {len(lines)} unambiguous source location(s) ({len(set(lines))} distinct line(s)); "
+            "cannot pair them uniquely. Put each managed block on its own line."
         )
         sys.exit(2)
     keyed = {}

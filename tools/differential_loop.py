@@ -28,6 +28,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -38,8 +39,10 @@ DEFAULT_BIN = os.path.join(
     os.environ.get("CARGO_TARGET_DIR", "/home/z/go-hybrid-target"), "debug", "hyb"
 )
 
+# Detect declarations before validating their value: a typo must not turn
+# a registered test into an unregistered helper. Keep parsing on one line.
 VERDICT_RE = re.compile(
-    r"^//\s*EXPECTED-VERDICT:\s*(ACCEPT-MANAGED|ACCEPT|REJECT)\b\s*(\S*)", re.M
+    r"^//[ \t]*EXPECTED-VERDICT:[ \t]*([^\r\n]*)", re.M
 )
 HAZARD_RE = re.compile(
     r"^//\s*RUNTIME-HAZARD:\s*(.+)$", re.M
@@ -53,18 +56,24 @@ def read_expected(path):
     (e.g. corpus 02's deliberate concurrent map writes)."""
     with open(path, encoding="utf-8") as f:
         src = f.read()
-    m = VERDICT_RE.search(src)
-    if not m:
+    markers = VERDICT_RE.findall(src)
+    if not markers:
         return None
-    verdict, rule = m.group(1), m.group(2)
+    if len(markers) != 1:
+        raise SystemExit(f"corpus error: {path} has multiple EXPECTED-VERDICT markers")
+    fields = markers[0].split()
+    if not fields or fields[0] not in ("ACCEPT-MANAGED", "ACCEPT", "REJECT"):
+        raise SystemExit(f"corpus error: {path} has invalid EXPECTED-VERDICT: {markers[0]!r}")
+    verdict = fields[0]
+    rule = fields[1] if verdict == "REJECT" and len(fields) > 1 else None
     if verdict == "REJECT" and not rule:
         raise SystemExit(f"corpus error: {path} has REJECT without a rule id")
     hazards = [h.strip().lower() for h in HAZARD_RE.findall(src)]
     return verdict, (rule or None), hazards
 
 
-def checker_rejects(bin_path, hy_path):
-    """True iff the checker rejects with at least one error diagnostic."""
+def checker_rejects(bin_path, hy_path, expected_rule):
+    """Require the first error to match the pre-registered rejection rule."""
     proc = subprocess.run(
         [bin_path, "check", hy_path, "--json"],
         capture_output=True, text=True, timeout=60,
@@ -83,9 +92,12 @@ def checker_rejects(bin_path, hy_path):
         )
     diags = payload.get("diagnostics", [])
     errors = [d for d in diags if d.get("severity") == "error"]
+    first_rule = errors[0].get("tier0_rule") if errors else None
     return (
-        summary.get("verdict") == "reject" and len(errors) >= 1,
-        f"verdict={summary.get('verdict')} errors={len(errors)}",
+        summary.get("verdict") == "reject"
+        and first_rule is not None and first_rule == expected_rule,
+        f"verdict={summary.get('verdict')} errors={len(errors)} "
+        f"first_rule={first_rule} expected_rule={expected_rule}",
     )
 
 
@@ -120,7 +132,12 @@ def build_and_run(bin_path, hy_path, workdir, hazards=()):
         [binary], cwd=workdir, capture_output=True, text=True, timeout=60
     )
     if run.returncode != 0:
-        if documented_runtime_hazard(run.stderr, hazards):
+        # A Go fatal normally exits 2; GOTRACEBACK=crash aborts on Unix.
+        # Matching text must not hide a different exit or a killed process.
+        go_fatal_exit = run.returncode == 2 or (
+            os.name == "posix" and run.returncode == -signal.SIGABRT
+        )
+        if go_fatal_exit and documented_runtime_hazard(run.stderr, hazards):
             return True, "documented RUNTIME-HAZARD fatal (pre-registered)"
         return False, f"run exit {run.returncode}: {(run.stderr or run.stdout)[-200:]}"
     return True, "exit 0"
@@ -132,15 +149,16 @@ def main():
     ap.add_argument("--bin", default=DEFAULT_BIN)
     args = ap.parse_args()
     # The build leg runs with cwd = a temp workspace — a relative --bin
-    # would resolve THERE (the CI failure this guard fixed). Absolutize
-    # once, up front.
+    # or --corpus would resolve THERE (the CI failure this guard fixed).
+    # Absolutize once, up front, against the caller's cwd.
     bin_path = os.path.abspath(args.bin)
+    corpus_path = os.path.abspath(args.corpus)
     if not os.path.isfile(bin_path):
         raise SystemExit(f"differential: hyb binary not found at {bin_path}")
 
     files = sorted(
-        os.path.join(args.corpus, f)
-        for f in os.listdir(args.corpus)
+        os.path.join(corpus_path, f)
+        for f in os.listdir(corpus_path)
         if f.endswith(".hy")
     )
     if not files:
@@ -158,7 +176,7 @@ def main():
         verdict, rule, hazards = expected
         if verdict == "REJECT":
             reject_total += 1
-            ok, detail = checker_rejects(bin_path, path)
+            ok, detail = checker_rejects(bin_path, path, rule)
             if ok:
                 reject_pass += 1
                 print(f"PASS  {name} (reject {rule})")
@@ -183,7 +201,11 @@ def main():
     print("----")
     print(f"differential accept-side (build+run): {rate}")
     print(f"differential reject-side (checker):   {reject_pass}/{reject_total}")
-    if accept_total and accept_pass == accept_total and reject_pass == reject_total:
+    if accept_total + reject_total == 0:
+        print("differential: no registered EXPECTED-VERDICT cases in corpus",
+              file=sys.stderr)
+        return 2
+    if accept_pass == accept_total and reject_pass == reject_total:
         print("differential: FULL AGREEMENT")
         return 0
     print(f"differential: {len(failures)} disagreement(s)")
