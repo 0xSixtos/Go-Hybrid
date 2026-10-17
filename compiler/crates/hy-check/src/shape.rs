@@ -369,9 +369,14 @@ impl<'a> Checker<'a> {
             Expr::SliceLit { elem: Some(t), .. } => {
                 TypeShape::Slice(Box::new(self.shape_of_type(t)))
             }
-            Expr::MapLit { .. } => {
-                TypeShape::Map(Box::new(TypeShape::Unknown), Box::new(TypeShape::Unknown))
-            }
+            // `make(map[K]V{})` — shape key AND value: an erasure to
+            // Map(Unknown, Unknown) let containers holding closures (or
+            // handles) slip past the closure-container move guard (#354,
+            // regression-tested in const_write.rs).
+            Expr::MapLit { key, value, .. } => TypeShape::Map(
+                Box::new(self.shape_of_type(key)),
+                Box::new(self.shape_of_type(value)),
+            ),
             _ => TypeShape::Unknown,
         }
     }
