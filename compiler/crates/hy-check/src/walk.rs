@@ -357,6 +357,7 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
                         span: *span,
                         is_write: false,
                         via_move: true,
+                        via_addr: false,
                     });
                 } else {
                     expr_uses(operand, out);
