@@ -373,10 +373,15 @@ impl<'a> Checker<'a> {
     /// window invalidates the slot loan.
     fn check_delete_conflict(&mut self, st: &FnState, cr: &CallRef, idx: usize) {
         let Some(first) = cr.args.first() else { return };
-        let Some(path) = walk::expr_path(&first.value) else {
-            return;
-        };
-        self.emit_a3_if_live(st, &path, cr.span, idx, "delete");
+        if let Some(path) = walk::expr_path(&first.value) {
+            self.emit_a3_if_live(st, &path, cr.span, idx, "delete");
+        } else {
+            let mut roots = Vec::new();
+            collect_ref_roots(&first.value, &mut roots);
+            for r in roots {
+                self.emit_a3_if_live(st, &r, cr.span, idx, "delete");
+            }
+        }
     }
 
     /// Shared A3 emitter for index-assign inserts and `delete` calls.
@@ -440,23 +445,25 @@ impl<'a> Checker<'a> {
         }
         let mut conflict_paths: Vec<String> = Vec::new();
         for (i, a) in cr.args.iter().enumerate() {
-            let Some(arg_path) = walk::expr_path(&a.value) else {
-                continue;
-            };
-            if !live.iter().any(|p| a3_paths_conflict(st, p, &arg_path)) {
-                continue;
-            }
-            let Some(decl) = self.fns.get(name) else {
-                continue;
-            };
-            match decl.params.get(i) {
-                Some(p) => {
-                    if self.fn_mutates_param(decl, &p.name, 0) {
-                        conflict_paths.push(arg_path);
-                    }
+            let mut aroots = Vec::new();
+            collect_ref_roots(&a.value, &mut aroots);
+            let arg_path_opt = walk::expr_path(&a.value);
+            for arg_path in arg_path_opt.into_iter().chain(aroots) {
+                if !live.iter().any(|p| a3_paths_conflict(st, p, &arg_path)) {
+                    continue;
                 }
-                // argument beyond the signature — fail closed
-                None => conflict_paths.push(arg_path),
+                let Some(decl) = self.fns.get(name) else {
+                    continue;
+                };
+                match decl.params.get(i) {
+                    Some(p) => {
+                        if self.fn_mutates_param(decl, &p.name, 0) {
+                            conflict_paths.push(arg_path);
+                        }
+                    }
+                    // argument beyond the signature — fail closed
+                    None => conflict_paths.push(arg_path),
+                }
             }
         }
         let verb = format!("mutation via `{}`", cr.callee.render());
@@ -503,159 +510,112 @@ impl<'a> Checker<'a> {
     }
 
     fn block_mutates_param(&self, block: &Block, param: &str, depth: usize) -> bool {
-        self.stmts_mutate_param(&block.stmts, param, depth)
-    }
-
-    fn stmts_mutate_param(&self, stmts: &[Stmt], param: &str, depth: usize) -> bool {
-        for (i, s) in stmts.iter().enumerate() {
-            if self.stmt_mutates_param(s, param, depth) {
-                return true;
-            }
-            match s {
-                Stmt::Local(l) => {
-                    let mut shadowed = false;
-                    for (name, val) in l.names.iter().zip(l.values.iter()) {
-                        let is_alias = walk::expr_path(val)
-                            .map(|p| path_root(&p) == param)
-                            .unwrap_or(false);
-                        if is_alias {
-                            if self.stmts_mutate_param(&stmts[i + 1..], name, depth) {
-                                return true;
-                            }
-                        } else if name == param {
-                            shadowed = true;
+        let flat = walk::flatten(block);
+        let mut alias_stack: Vec<HashSet<String>> = vec![[param.to_string()].into_iter().collect()];
+        let mut locals_stack: Vec<HashSet<String>> = vec![HashSet::new()];
+        for (stmt, idx) in &flat.stmts {
+            if let Some(evs) = flat.events.get(idx) {
+                for ev in evs {
+                    match ev {
+                        walk::ScopeEvent::Push => {
+                            alias_stack.push(alias_stack.last().unwrap().clone());
+                            locals_stack.push(HashSet::new());
                         }
-                    }
-                    if shadowed {
-                        return false;
+                        walk::ScopeEvent::Pop => {
+                            if alias_stack.len() > 1 {
+                                let popped_aliases = alias_stack.pop().unwrap();
+                                let popped_locals = locals_stack.pop().unwrap();
+                                for a in popped_aliases {
+                                    if !popped_locals.contains(&a) {
+                                        alias_stack.last_mut().unwrap().insert(a);
+                                    }
+                                }
+                            }
+                        }
+                        walk::ScopeEvent::MatchBind { name, subject } => {
+                            let mut sroots = Vec::new();
+                            collect_ref_roots(subject, &mut sroots);
+                            if sroots.iter().any(|r| alias_stack.last().unwrap().contains(r)) {
+                                alias_stack.last_mut().unwrap().insert(name.to_string());
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                Stmt::Assign {
-                    targets, values, ..
-                } if targets.len() == values.len() => {
-                    let mut rebound_other = false;
-                    for (t, val) in targets.iter().zip(values.iter()) {
-                        if let PlaceKind::Ident(name) = &t.kind {
-                            let is_alias = walk::expr_path(val)
-                                .map(|p| path_root(&p) == param)
-                                .unwrap_or(false);
-                            if is_alias {
-                                if name != param
-                                    && self.stmts_mutate_param(&stmts[i + 1..], name, depth)
-                                {
-                                    return true;
-                                }
-                            } else if name == param {
-                                rebound_other = true;
-                            }
+            }
+
+            // Check if stmt mutates any active alias of param
+            match stmt {
+                Stmt::Assign { targets, values, .. } => {
+                    for t in targets {
+                        if matches!(t.kind, PlaceKind::Index { .. }) && alias_stack.last().unwrap().contains(t.root()) {
+                            return true;
                         }
                     }
-                    if rebound_other {
-                        return false;
+                    for v in values {
+                        if alias_stack.last().unwrap().iter().any(|p| self.expr_fnlit_mutates_param(v, p, depth)) {
+                            return true;
+                        }
+                    }
+                }
+                Stmt::Local(l) => {
+                    for v in &l.values {
+                        if alias_stack.last().unwrap().iter().any(|p| self.expr_fnlit_mutates_param(v, p, depth)) {
+                            return true;
+                        }
+                    }
+                }
+                Stmt::Return { values, .. } => {
+                    // a returned closure that mutates the param counts as a
+                    // mutation of the param (the helper-returns-closure form,
+                    // issue #490's make_mutator shape)
+                    for v in values {
+                        if alias_stack.last().unwrap().iter().any(|p| self.expr_fnlit_mutates_param(v, p, depth)) {
+                            return true;
+                        }
                     }
                 }
                 _ => {}
             }
-        }
-        false
-    }
 
-    fn stmt_mutates_param(&self, stmt: &Stmt, param: &str, depth: usize) -> bool {
-        match stmt {
-            Stmt::Assign {
-                targets, values, ..
-            } => {
-                for t in targets {
-                    if matches!(t.kind, PlaceKind::Index { .. }) && t.root() == param {
-                        return true;
-                    }
-                }
-                for v in values {
-                    if self.expr_fnlit_mutates_param(v, param, depth) {
-                        return true;
-                    }
-                }
-            }
-            Stmt::Local(l) => {
-                for v in &l.values {
-                    if self.expr_fnlit_mutates_param(v, param, depth) {
-                        return true;
-                    }
-                }
-            }
-            Stmt::Return { values, .. } => {
-                for v in values {
-                    if self.expr_fnlit_mutates_param(v, param, depth) {
-                        return true;
-                    }
-                }
-            }
-            _ => {}
-        }
-        // calls in this statement (covers Expr/Send/Return/Defer/Task/...)
-        let mut calls = Vec::new();
-        walk::own_calls(stmt, &mut calls);
-        for cr in &calls {
-            if self.call_mutates_param(cr, param, depth) {
-                return true;
-            }
-        }
-        // nested bodies (if/for/match/select/block/managed)
-        match stmt {
-            Stmt::If {
-                init,
-                then,
-                otherwise,
-                ..
-            } => {
-                if let Some(i) = init {
-                    if self.stmt_mutates_param(i, param, depth) {
-                        return true;
-                    }
-                }
-                if self.block_mutates_param(then, param, depth) {
-                    return true;
-                }
-                if let Some(o) = otherwise {
-                    if self.stmt_mutates_param(o, param, depth) {
-                        return true;
-                    }
-                }
-            }
-            Stmt::For { body, .. } | Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
-                if self.block_mutates_param(body, param, depth) {
+            // Check calls in this statement
+            let mut calls = Vec::new();
+            walk::own_calls(stmt, &mut calls);
+            for cr in &calls {
+                if alias_stack.last().unwrap().iter().any(|p| self.call_mutates_param(cr, p, depth)) {
                     return true;
                 }
             }
-            Stmt::Match { subject, arms, .. } => {
-                let mut sroots = Vec::new();
-                collect_ref_roots(subject, &mut sroots);
-                let subject_reaches_param = sroots.iter().any(|r| r == param);
-                for arm in arms {
-                    if self.block_mutates_param(&arm.body, param, depth) {
-                        return true;
+
+            // Update aliases
+            match stmt {
+                Stmt::Local(l) => {
+                    for (name, val) in l.names.iter().zip(l.values.iter()) {
+                        locals_stack.last_mut().unwrap().insert(name.clone());
+                        let mut roots = Vec::new();
+                        collect_ref_roots(val, &mut roots);
+                        if roots.iter().any(|r| alias_stack.last().unwrap().contains(r)) {
+                            alias_stack.last_mut().unwrap().insert(name.clone());
+                        } else {
+                            alias_stack.last_mut().unwrap().remove(name);
+                        }
                     }
-                    if subject_reaches_param {
-                        if let hy_syntax::MatchPattern::Path {
-                            binding: Some(bname),
-                            ..
-                        } = &arm.pattern
-                        {
-                            if self.block_mutates_param(&arm.body, bname, depth) {
-                                return true;
+                }
+                Stmt::Assign { targets, values, .. } if targets.len() == values.len() => {
+                    for (t, val) in targets.iter().zip(values.iter()) {
+                        if let PlaceKind::Ident(name) = &t.kind {
+                            let mut roots = Vec::new();
+                            collect_ref_roots(val, &mut roots);
+                            if roots.iter().any(|r| alias_stack.last().unwrap().contains(r)) {
+                                alias_stack.last_mut().unwrap().insert(name.clone());
+                            } else {
+                                alias_stack.last_mut().unwrap().remove(name);
                             }
                         }
                     }
                 }
+                _ => {}
             }
-            Stmt::Select { arms, .. } => {
-                for arm in arms {
-                    if self.block_mutates_param(&arm.body, param, depth) {
-                        return true;
-                    }
-                }
-            }
-            _ => {}
         }
         false
     }
@@ -709,9 +669,9 @@ impl<'a> Checker<'a> {
     /// Does this call site store through / delete `param`?
     fn call_mutates_param(&self, cr: &CallRef, param: &str, depth: usize) -> bool {
         let arg_root_is_param = |a: &hy_syntax::CallArg| {
-            walk::expr_path(&a.value)
-                .map(|p| path_root(&p) == param)
-                .unwrap_or(false)
+            let mut roots = Vec::new();
+            collect_ref_roots(&a.value, &mut roots);
+            roots.iter().any(|r| r == param)
         };
         match cr.callee {
             Expr::Ident { name, .. } => {
@@ -826,11 +786,13 @@ impl<'a> Checker<'a> {
         bound: &HashSet<String>,
     ) -> HashSet<String> {
         let mut out: HashSet<String> = HashSet::new();
-        let mut local_aliases: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        let mut local_shadows: HashSet<String> = bound.clone();
+        let mut shadow_stack: Vec<HashSet<String>> = vec![bound.clone()];
+        let mut alias_stack: Vec<std::collections::HashMap<String, String>> =
+            vec![std::collections::HashMap::new()];
+        let mut locals_stack: Vec<HashSet<String>> = vec![HashSet::new()];
         let mut match_aliases: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
+
         let resolve = |raw: &str,
                        aliases: &std::collections::HashMap<String, String>,
                        shadows: &HashSet<String>|
@@ -843,19 +805,65 @@ impl<'a> Checker<'a> {
             }
             Some(raw.to_string())
         };
+
         let flat = walk::flatten(body);
-        for (stmt, _idx) in &flat.stmts {
+        for (stmt, idx) in &flat.stmts {
+            if let Some(evs) = flat.events.get(idx) {
+                for ev in evs {
+                    match ev {
+                        walk::ScopeEvent::Push => {
+                            shadow_stack.push(shadow_stack.last().unwrap().clone());
+                            alias_stack.push(alias_stack.last().unwrap().clone());
+                            locals_stack.push(HashSet::new());
+                        }
+                        walk::ScopeEvent::Pop => {
+                            if shadow_stack.len() > 1 {
+                                shadow_stack.pop();
+                                let popped_aliases = alias_stack.pop().unwrap();
+                                let popped_locals = locals_stack.pop().unwrap();
+                                for (k, v) in popped_aliases {
+                                    if !popped_locals.contains(&k) {
+                                        alias_stack.last_mut().unwrap().insert(k, v);
+                                    }
+                                }
+                            }
+                        }
+                        walk::ScopeEvent::MatchBind { name, subject } => {
+                            let mut sroots = Vec::new();
+                            collect_ref_roots(subject, &mut sroots);
+                            sroots.retain(|r| !bound.contains(r));
+                            let current_shadows = shadow_stack.last().unwrap();
+                            let current_aliases = alias_stack.last().unwrap();
+                            for sr in sroots {
+                                if let Some(target) = resolve(&sr, current_aliases, current_shadows) {
+                                    match_aliases.entry(name.to_string()).or_default().push(target.clone());
+                                    alias_stack.last_mut().unwrap().insert(name.to_string(), target);
+                                    break;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            let current_shadows = shadow_stack.last_mut().unwrap();
+            let current_aliases = alias_stack.last_mut().unwrap();
+            let current_locals = locals_stack.last_mut().unwrap();
+
             match stmt {
                 Stmt::Local(l) => {
                     for (name, val) in l.names.iter().zip(l.values.iter()) {
-                        let resolved = walk::expr_path(val)
-                            .and_then(|p| resolve(path_root(&p), &local_aliases, &local_shadows));
+                        current_locals.insert(name.clone());
+                        let mut roots = Vec::new();
+                        collect_ref_roots(val, &mut roots);
+                        let resolved = roots.iter().find_map(|p| resolve(p, current_aliases, current_shadows));
                         if let Some(r) = resolved {
-                            local_shadows.remove(name.as_str());
-                            local_aliases.insert(name.clone(), r);
+                            current_shadows.remove(name.as_str());
+                            current_aliases.insert(name.clone(), r);
                         } else {
-                            local_aliases.remove(name.as_str());
-                            local_shadows.insert(name.clone());
+                            current_aliases.remove(name.as_str());
+                            current_shadows.insert(name.clone());
                         }
                     }
                 }
@@ -864,15 +872,15 @@ impl<'a> Checker<'a> {
                 } if targets.len() == values.len() => {
                     for (t, val) in targets.iter().zip(values.iter()) {
                         if let PlaceKind::Ident(name) = &t.kind {
-                            let resolved = walk::expr_path(val).and_then(|p| {
-                                resolve(path_root(&p), &local_aliases, &local_shadows)
-                            });
+                            let mut roots = Vec::new();
+                            collect_ref_roots(val, &mut roots);
+                            let resolved = roots.iter().find_map(|p| resolve(p, current_aliases, current_shadows));
                             if let Some(r) = resolved {
-                                local_shadows.remove(name.as_str());
-                                local_aliases.insert(name.clone(), r);
+                                current_shadows.remove(name.as_str());
+                                current_aliases.insert(name.clone(), r);
                             } else if bound.contains(name.as_str()) {
-                                local_aliases.remove(name.as_str());
-                                local_shadows.insert(name.clone());
+                                current_aliases.remove(name.as_str());
+                                current_shadows.insert(name.clone());
                             }
                         }
                     }
@@ -900,8 +908,8 @@ impl<'a> Checker<'a> {
             if let Stmt::Assign { targets, .. } = stmt {
                 for t in targets {
                     if matches!(t.kind, PlaceKind::Index { .. }) {
-                        let raw = path_root(&walk::place_path(t).unwrap_or_default()).to_string();
-                        if let Some(r) = resolve(&raw, &local_aliases, &local_shadows) {
+                        let raw = t.root().to_string();
+                        if let Some(r) = resolve(&raw, current_aliases, current_shadows) {
                             out.insert(r);
                         }
                     }
@@ -927,7 +935,7 @@ impl<'a> Checker<'a> {
                         fp.iter().map(|p| p.name.clone()).collect();
                     inner_bound.extend(fr.iter().filter_map(|r| r.name.clone()));
                     for ir in self.collect_mutation_roots(st, fb, &inner_bound) {
-                        if let Some(r) = resolve(&ir, &local_aliases, &local_shadows) {
+                        if let Some(r) = resolve(&ir, current_aliases, current_shadows) {
                             out.insert(r);
                         }
                     }
@@ -941,9 +949,11 @@ impl<'a> Checker<'a> {
                     Expr::Ident { name, .. } => {
                         if name == "delete" {
                             if let Some(first) = cr.args.first() {
-                                if let Some(p) = walk::expr_path(&first.value) {
+                                let mut roots = Vec::new();
+                                collect_ref_roots(&first.value, &mut roots);
+                                for root in roots {
                                     if let Some(r) =
-                                        resolve(path_root(&p), &local_aliases, &local_shadows)
+                                        resolve(&root, current_aliases, current_shadows)
                                     {
                                         out.insert(r);
                                     }
@@ -956,31 +966,34 @@ impl<'a> Checker<'a> {
                         }
                         if let Some(decl) = self.fns.get(name) {
                             for (i, a) in cr.args.iter().enumerate() {
-                                let Some(p) = walk::expr_path(&a.value) else {
-                                    continue;
-                                };
-                                let Some(r) =
-                                    resolve(path_root(&p), &local_aliases, &local_shadows)
-                                else {
-                                    continue;
-                                };
-                                let mutates = match decl.params.get(i) {
-                                    Some(tp) => self.fn_mutates_param(decl, &tp.name, 0),
-                                    None => true, // fail closed
-                                };
-                                if mutates {
-                                    out.insert(r);
+                                let mut roots = Vec::new();
+                                collect_ref_roots(&a.value, &mut roots);
+                                for root in roots {
+                                    let Some(r) =
+                                        resolve(&root, current_aliases, current_shadows)
+                                    else {
+                                        continue;
+                                    };
+                                    let mutates = match decl.params.get(i) {
+                                        Some(tp) => self.fn_mutates_param(decl, &tp.name, 0),
+                                        None => true, // fail closed
+                                    };
+                                    if mutates {
+                                        out.insert(r);
+                                    }
                                 }
                             }
                         } else if let Some(existing) = st.closure_mutates.get(name.as_str()) {
                             // another local closure — union its mutation roots
                             out.extend(existing.iter().cloned());
                         } else {
-                            // unknown callee — fail closed on path args
+                            // unknown callee — fail closed on ref roots
                             for a in cr.args {
-                                if let Some(p) = walk::expr_path(&a.value) {
+                                let mut roots = Vec::new();
+                                collect_ref_roots(&a.value, &mut roots);
+                                for root in roots {
                                     if let Some(r) =
-                                        resolve(path_root(&p), &local_aliases, &local_shadows)
+                                        resolve(&root, current_aliases, current_shadows)
                                     {
                                         out.insert(r);
                                     }
@@ -995,9 +1008,11 @@ impl<'a> Checker<'a> {
                             }
                         }
                         for a in cr.args {
-                            if let Some(p) = walk::expr_path(&a.value) {
+                            let mut roots = Vec::new();
+                            collect_ref_roots(&a.value, &mut roots);
+                            for root in roots {
                                 if let Some(r) =
-                                    resolve(path_root(&p), &local_aliases, &local_shadows)
+                                    resolve(&root, current_aliases, current_shadows)
                                 {
                                     out.insert(r);
                                 }
@@ -1006,9 +1021,11 @@ impl<'a> Checker<'a> {
                     }
                     _ => {
                         for a in cr.args {
-                            if let Some(p) = walk::expr_path(&a.value) {
+                            let mut roots = Vec::new();
+                            collect_ref_roots(&a.value, &mut roots);
+                            for root in roots {
                                 if let Some(r) =
-                                    resolve(path_root(&p), &local_aliases, &local_shadows)
+                                    resolve(&root, current_aliases, current_shadows)
                                 {
                                     out.insert(r);
                                 }
