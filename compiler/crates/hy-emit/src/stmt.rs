@@ -222,6 +222,11 @@ impl Emitter {
                 // Typed var decls carry receiver knowledge (Batch I):
                 // `var hits atomic.int64` → shape-known, not a pointer.
                 if let Some(t) = &l.ty {
+                    if matches!(t, TypeExpr::Pointer { .. }) {
+                        for n in &l.names {
+                            self.pointer_vars.insert(n.clone());
+                        }
+                    }
                     if let Some(kind) = self.binding_kind_of_ty(t) {
                         for n in &l.names {
                             self.bindings.insert(n.clone(), kind);
@@ -917,6 +922,9 @@ impl Emitter {
         if kind != BindingKind::Plain {
             self.bindings.insert(names[0].clone(), kind);
         }
+        if self.expr_is_pointer(&values[0]) {
+            self.pointer_vars.insert(names[0].clone());
+        }
     }
 
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
@@ -1042,6 +1050,15 @@ impl Emitter {
                         }
                         return Ok(());
                     }
+                }
+            }
+        }
+        if targets.len() == 1 && values.len() == 1 && op == AssignOp::Assign {
+            if let PlaceKind::Ident(name) = &targets[0].kind {
+                if self.expr_is_pointer(&values[0]) {
+                    self.pointer_vars.insert(name.clone());
+                } else {
+                    self.pointer_vars.remove(name);
                 }
             }
         }
