@@ -133,10 +133,17 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
             TypeShape::OwnHandle("serde_json.value".into())
         }
         ("flate2", "new_writer") => TypeShape::OwnHandle("flate2.writer".into()),
+        ("serde_json", "array" | "get") => TypeShape::BorrowHandle("serde_json.view".into()),
+        ("serde_json", "int") | ("flate2", "write") => TypeShape::Primitive,
+        ("flate2", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
         ("serde_json", "to_string_pretty") | ("serde_json", "string") | ("strings", "join") => {
             TypeShape::Str
         }
         ("strings", "split") | ("strings", "fields") => TypeShape::Slice(Box::new(TypeShape::Str)),
+        // `time.after(d)` returns a receive-only channel (the deadline
+        // pattern, example 04); the element shape is opaque here — the
+        // binding still resolves as a channel so receives on it classify.
+        ("time", "after") => TypeShape::Chan(Box::new(TypeShape::Unknown)),
         ("http", "new_serve_mux") => TypeShape::ForeignOpaque("http.serve_mux".into()),
         ("http", "handler") => TypeShape::ForeignOpaque("http.handler".into()),
         // `atomic.load_pointer` / `atomic.swap_pointer` return an
