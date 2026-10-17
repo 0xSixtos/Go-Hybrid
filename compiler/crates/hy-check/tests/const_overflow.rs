@@ -403,3 +403,180 @@ fn main() {
     );
     assert_eq!(r.verdict, Verdict::Reject);
 }
+
+#[test]
+fn struct_field_assign_overflow_is_rejected() {
+    let src = "\
+package test
+
+struct user {
+    age int8
+}
+
+fn main() {
+    var u user
+    u.age = 300
+    fmt.println(\"{u.age}\")
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for u.age = 300, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn struct_field_compound_assign_overflow_is_rejected() {
+    let src = "\
+package test
+
+struct counter {
+    val int8
+}
+
+fn main() {
+    var c counter
+    c.val += 200
+    fmt.println(\"{c.val}\")
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for c.val += 200, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn nested_struct_field_assign_overflow_is_rejected() {
+    let src = "\
+package test
+
+struct address {
+    zip int16
+}
+
+struct profile {
+    addr address
+}
+
+fn main() {
+    var p profile
+    p.addr.zip = 70000
+    fmt.println(\"{p.addr.zip}\")
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for p.addr.zip = 70000, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn slice_struct_field_assign_overflow_is_rejected() {
+    let src = "\
+package test
+
+struct item {
+    code uint8
+}
+
+fn main() {
+    var items []item
+    items[0].code = 300
+    fmt.println(\"{items}\")
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for items[0].code = 300, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn struct_slice_field_index_assign_overflow_is_rejected() {
+    let src = "\
+package test
+
+struct record {
+    scores []int8
+}
+
+fn main() {
+    var r record
+    r.scores[0] = 300
+    fmt.println(\"{r.scores}\")
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for r.scores[0] = 300, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn pointer_struct_field_assign_overflow_is_rejected() {
+    let src = "\
+package test
+
+struct user {
+    age int8
+}
+
+fn run(p *user) {
+    p.age = 300
+    fmt.println(\"{p.age}\")
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for p.age = 300, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn struct_field_assign_valid_range_is_accepted() {
+    let src = "\
+package test
+
+struct user {
+    age int8
+}
+
+fn main() {
+    var u user
+    u.age = 42
+    fmt.println(\"{u.age}\")
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        !cs.iter().any(|c| c == "HYB-E6002"),
+        "expected no HYB-E6002 for u.age = 42, got {:?}",
+        cs
+    );
+}

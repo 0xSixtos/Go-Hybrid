@@ -5258,36 +5258,62 @@ impl<'a> Checker<'a> {
 
     /// The declared type of an assignment place, when it resolves (drives
     /// HYB-E6002 constant overflow checks on assignment targets).
-    // ponytail: resolves direct ident and index targets; field type resolution requires whole-program struct definitions.
+    // ponytail: resolves direct ident, index, and struct field targets via package struct definitions.
     fn place_target_ty(&self, st: &FnState, p: &Place) -> Option<hy_syntax::TypeExpr> {
-        let b = self.place_root_binding(st, p)?;
-        let mut cur = b.ty.as_ref()?;
-        let mut path_len = 0;
+        enum Step<'a> {
+            Index,
+            Field(&'a str),
+        }
+        let mut steps = Vec::new();
         let mut walker = p;
-        while let PlaceKind::Index { base, .. } = &walker.kind {
-            path_len += 1;
-            walker = base;
-        }
-        for _ in 0..path_len {
-            match cur {
-                hy_syntax::TypeExpr::Array { elem, .. }
-                | hy_syntax::TypeExpr::Slice { elem, .. } => cur = elem.as_ref(),
-                hy_syntax::TypeExpr::Map { value, .. } => cur = value.as_ref(),
-                _ => return None,
+        loop {
+            match &walker.kind {
+                PlaceKind::Index { base, .. } => {
+                    steps.push(Step::Index);
+                    walker = base;
+                }
+                PlaceKind::Field { base, name } => {
+                    steps.push(Step::Field(name.as_str()));
+                    walker = base;
+                }
+                PlaceKind::AddrOf { base } => {
+                    walker = base;
+                }
+                PlaceKind::Ident(name) => {
+                    let b = self.lookup_binding(st, name)?;
+                    let mut cur = b.ty.as_ref()?;
+                    steps.reverse();
+                    for step in steps {
+                        while let hy_syntax::TypeExpr::Pointer { to, .. } = cur {
+                            cur = to.as_ref();
+                        }
+                        match step {
+                            Step::Index => match cur {
+                                hy_syntax::TypeExpr::Array { elem, .. }
+                                | hy_syntax::TypeExpr::Slice { elem, .. } => {
+                                    cur = elem.as_ref();
+                                }
+                                hy_syntax::TypeExpr::Map { value, .. } => {
+                                    cur = value.as_ref();
+                                }
+                                _ => return None,
+                            },
+                            Step::Field(field_name) => match cur {
+                                hy_syntax::TypeExpr::Named {
+                                    name: struct_name, ..
+                                } => {
+                                    let fields = self.structs.get(struct_name)?;
+                                    let (_, field_ty) =
+                                        fields.iter().find(|(f, _)| f == field_name)?;
+                                    cur = field_ty;
+                                }
+                                _ => return None,
+                            },
+                        }
+                    }
+                    return Some(cur.clone());
+                }
             }
-        }
-        Some(cur.clone())
-    }
-
-    fn place_root_binding<'b>(&'b self, st: &'b FnState, p: &Place) -> Option<&'b Binding> {
-        let mut cur = p;
-        while let PlaceKind::Index { base, .. } = &cur.kind {
-            cur = base;
-        }
-        if let PlaceKind::Ident(name) = &cur.kind {
-            self.lookup_binding(st, name)
-        } else {
-            None
         }
     }
 
