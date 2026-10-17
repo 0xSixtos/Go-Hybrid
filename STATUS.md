@@ -1,5 +1,4 @@
 # STATUS (for the human — 15 lines max)
-- Contributor runner diagnostics: captured timeout output retained; Mini 13/13 runner (baseline 4 failures), 53 Python tooling, 591 Rust, corpus 52/52, differential 52/52. Upstream CI/review pending; no award claimed.
 
 - Phase: **MVP DONE + v0.1.0 released + community OPEN** — session-17: **7 more PRs landed (#420 #447 #421 #290 #236 #208 #235) + 8 same-fix credit closes** — cargo 808/0, corpus 60/60, differential FULL (17+43)
 - **Operand-type family closed**: #420 (receive E2008/E3005, fixes #409) + #447 (for-in E2009/E3005 superset of #424 — fail-closed unknowns, method resolution, generic-in fold; fixes #411); credit closes #413/#414/#424/#426/#427
