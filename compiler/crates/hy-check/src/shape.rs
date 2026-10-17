@@ -15,32 +15,65 @@ use crate::model::{Checker, FnState, TypeShape};
 use hy_syntax::{BinOp, CallArg, Expr, TypeExpr};
 
 impl<'a> Checker<'a> {
+    const MAX_TYPE_RESOLUTION_DEPTH: usize = 8;
+
     // -----------------------------------------------------------------------
-    // From declared types
+    // Type shape extraction
     // -----------------------------------------------------------------------
 
     pub(crate) fn shape_of_type(&self, ty: &TypeExpr) -> TypeShape {
+        self.shape_of_type_depth(ty, 0)
+    }
+
+    fn shape_of_type_depth(&self, ty: &TypeExpr, depth: usize) -> TypeShape {
+        if depth > Self::MAX_TYPE_RESOLUTION_DEPTH {
+            return TypeShape::Unknown;
+        }
         match ty {
-            TypeExpr::Named { name, .. } => self.named_shape(name),
-            TypeExpr::Pointer { to, .. } => TypeShape::Pointer(Box::new(self.shape_of_type(to))),
-            TypeExpr::Slice { elem, .. } => TypeShape::Slice(Box::new(self.shape_of_type(elem))),
-            TypeExpr::Array { elem, .. } => TypeShape::Array(Box::new(self.shape_of_type(elem))),
+            TypeExpr::Named { name, .. } => self.named_shape_depth(name, depth),
+            TypeExpr::Pointer { to, .. } => {
+                TypeShape::Pointer(Box::new(self.shape_of_type_depth(to, depth + 1)))
+            }
+            TypeExpr::Slice { elem, .. } => {
+                TypeShape::Slice(Box::new(self.shape_of_type_depth(elem, depth + 1)))
+            }
+            TypeExpr::Array { elem, .. } => {
+                TypeShape::Array(Box::new(self.shape_of_type_depth(elem, depth + 1)))
+            }
             TypeExpr::Map { key, value, .. } => TypeShape::Map(
-                Box::new(self.shape_of_type(key)),
-                Box::new(self.shape_of_type(value)),
+                Box::new(self.shape_of_type_depth(key, depth + 1)),
+                Box::new(self.shape_of_type_depth(value, depth + 1)),
             ),
-            TypeExpr::Chan { elem, .. } => TypeShape::Chan(Box::new(self.shape_of_type(elem))),
+            TypeExpr::Chan { elem, .. } => {
+                TypeShape::Chan(Box::new(self.shape_of_type_depth(elem, depth + 1)))
+            }
             // option[T] carries T by value in a struct { v T; ok bool } — its
             // sendability IS the payload's sendability (option[int] crosses,
             // option[map] does not — the aliased map inside decides).
-            TypeExpr::Option { elem, .. } => self.shape_of_type(elem),
+            TypeExpr::Option { elem, .. } => self.shape_of_type_depth(elem, depth + 1),
             // fn-typed values are closures: captures make them unsendable at
             // boundaries (Tier 0 — the A5 perimeter).
             TypeExpr::Fn { .. } => TypeShape::Closure,
         }
     }
 
-    fn named_shape(&self, name: &str) -> TypeShape {
+    #[allow(dead_code)]
+    pub(crate) fn named_shape(&self, name: &str) -> TypeShape {
+        self.named_shape_depth(name, 0)
+    }
+
+    fn named_shape_depth(&self, name: &str, depth: usize) -> TypeShape {
+        if depth > Self::MAX_TYPE_RESOLUTION_DEPTH {
+            return TypeShape::Unknown;
+        }
+        // User structs in package scope take precedence over predeclared types.
+        if self.structs.contains_key(name) {
+            return TypeShape::Struct(Some(name.to_string()));
+        }
+        // User type aliases take precedence over predeclared types.
+        if let Some(target) = self.type_aliases.get(name) {
+            return self.shape_of_type_depth(target, depth + 1);
+        }
         match name {
             "int" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
             | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "usize"
@@ -50,8 +83,6 @@ impl<'a> Checker<'a> {
             _ => {
                 if let Some(shape) = foreign::foreign_named_type(name) {
                     shape
-                } else if self.structs.contains_key(name) {
-                    TypeShape::Struct(Some(name.to_string()))
                 } else {
                     TypeShape::Unknown
                 }
@@ -78,7 +109,7 @@ impl<'a> Checker<'a> {
         if depth > 16 {
             return true;
         }
-        if shape.is_reference_alias() {
+        if shape.is_reference_alias() || shape.is_handle() {
             return true;
         }
         match shape {
@@ -87,8 +118,47 @@ impl<'a> Checker<'a> {
                 .structs
                 .get(name)
                 .map(|fields| {
+                    fields
+                        .iter()
+                        .any(|(_, ty)| self.shape_may_share_at(&self.shape_of_type(ty), depth + 1))
+                })
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    /// Does a value of this shape carry a boundary handle (`OwnHandle` or
+    /// `BorrowHandle`) directly or inside a composite container? Used to
+    /// distinguish handle-preserving expressions (`doc2 := same_doc(doc)`,
+    /// `h := holder{doc: doc}`, `items := doc.array("items")?`) from boundary
+    /// calls that return a fresh Layer-1 Go copy (`out := enc.finish()?`
+    /// returning `[]byte`, O9).
+    pub(crate) fn shape_carries_handle(&self, shape: &TypeShape) -> bool {
+        self.shape_carries_handle_at(shape, 0)
+    }
+
+    fn shape_carries_handle_at(&self, shape: &TypeShape, depth: usize) -> bool {
+        if depth > 16 {
+            return true;
+        }
+        if shape.is_handle() {
+            return true;
+        }
+        match shape {
+            TypeShape::Slice(e)
+            | TypeShape::Array(e)
+            | TypeShape::Pointer(e)
+            | TypeShape::Chan(e) => self.shape_carries_handle_at(e, depth + 1),
+            TypeShape::Map(k, v) => {
+                self.shape_carries_handle_at(k, depth + 1)
+                    || self.shape_carries_handle_at(v, depth + 1)
+            }
+            TypeShape::Struct(Some(name)) => self
+                .structs
+                .get(name)
+                .map(|fields| {
                     fields.iter().any(|(_, ty)| {
-                        self.shape_may_share_at(&self.shape_of_type(ty), depth + 1)
+                        self.shape_carries_handle_at(&self.shape_of_type(ty), depth + 1)
                     })
                 })
                 .unwrap_or(false),
@@ -299,9 +369,14 @@ impl<'a> Checker<'a> {
             Expr::SliceLit { elem: Some(t), .. } => {
                 TypeShape::Slice(Box::new(self.shape_of_type(t)))
             }
-            Expr::MapLit { .. } => {
-                TypeShape::Map(Box::new(TypeShape::Unknown), Box::new(TypeShape::Unknown))
-            }
+            // `make(map[K]V{})` — shape key AND value: an erasure to
+            // Map(Unknown, Unknown) let containers holding closures (or
+            // handles) slip past the closure-container move guard (#354,
+            // regression-tested in const_write.rs).
+            Expr::MapLit { key, value, .. } => TypeShape::Map(
+                Box::new(self.shape_of_type(key)),
+                Box::new(self.shape_of_type(value)),
+            ),
             _ => TypeShape::Unknown,
         }
     }
@@ -498,7 +573,9 @@ impl<'a> Checker<'a> {
                         .map(|t| self.resolve_type_alias(&t))
                         .and_then(|t| Self::base_named_type(&t))
                         .or_else(|| match self.shape_of_expr(st, base) {
-                            TypeShape::Struct(Some(s)) => Some(Self::base_named_type_str(&s).to_string()),
+                            TypeShape::Struct(Some(s)) => {
+                                Some(Self::base_named_type_str(&s).to_string())
+                            }
                             TypeShape::Pointer(inner) => match *inner {
                                 TypeShape::Struct(Some(s)) => {
                                     Some(Self::base_named_type_str(&s).to_string())
@@ -553,11 +630,7 @@ impl<'a> Checker<'a> {
     }
 
     /// N3 (`HYB-E4002`): check a `var x T` declaration with no initializer.
-    pub(crate) fn check_zero_value_local(
-        &mut self,
-        l: &hy_syntax::LocalDecl,
-        ty: &TypeExpr,
-    ) {
+    pub(crate) fn check_zero_value_local(&mut self, l: &hy_syntax::LocalDecl, ty: &TypeExpr) {
         if let Some(reason) = self.no_zero_value_reason(ty, 0) {
             let names = l.names.join(", ");
             let msg = format!(
@@ -736,9 +809,9 @@ impl<'a> Checker<'a> {
                 }
             }
             MatchTarget::Enum(enum_name, variants) => {
-                let has_trailing_wildcard = arms
-                    .last()
-                    .is_some_and(|a| matches!(a.pattern, MatchPattern::Wildcard) && a.guard.is_none());
+                let has_trailing_wildcard = arms.last().is_some_and(|a| {
+                    matches!(a.pattern, MatchPattern::Wildcard) && a.guard.is_none()
+                });
                 if !has_trailing_wildcard {
                     let mut covered = std::collections::HashSet::new();
                     for arm in arms {
@@ -783,9 +856,9 @@ impl<'a> Checker<'a> {
                 }
             }
             MatchTarget::Unknown => {
-                let has_trailing_wildcard = arms
-                    .last()
-                    .is_some_and(|a| matches!(a.pattern, MatchPattern::Wildcard) && a.guard.is_none());
+                let has_trailing_wildcard = arms.last().is_some_and(|a| {
+                    matches!(a.pattern, MatchPattern::Wildcard) && a.guard.is_none()
+                });
                 if !has_trailing_wildcard {
                     self.diags.push(
                         Diagnostic::error(
@@ -1102,7 +1175,9 @@ mod tests {
         assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
         assert_eq!(r.diagnostics[0].code, "HYB-E5001");
         assert!(
-            r.diagnostics[0].message.contains("`_` must be the last match arm"),
+            r.diagnostics[0]
+                .message
+                .contains("`_` must be the last match arm"),
             "unexpected message: {}",
             r.diagnostics[0].message
         );
@@ -1154,4 +1229,3 @@ mod tests {
         assert_eq!(r.diagnostics[0].code, "HYB-E5001");
     }
 }
-

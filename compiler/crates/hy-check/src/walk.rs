@@ -240,6 +240,9 @@ pub(crate) struct Use {
     /// true when the use is the direct operand of a `move x` at its own
     /// transfer site (exempt from the use check unless already moved).
     pub via_move: bool,
+    /// true when the use is the direct operand of an address-of `&x`
+    /// (T24: `&` on a map-slot loan binding is HYB-E3104).
+    pub via_addr: bool,
 }
 
 /// Collect the uses of THIS statement only (child statements are separate
@@ -321,6 +324,7 @@ fn place_uses(place: &Place, out: &mut Vec<Use>) {
             span: place.span,
             is_write: true,
             via_move: false,
+            via_addr: false,
         }),
         PlaceKind::Index { base, index } => {
             place_uses(base, out);
@@ -338,6 +342,7 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
             span: *span,
             is_write: false,
             via_move: false,
+            via_addr: false,
         }),
         Expr::Lit { .. } => {}
         Expr::Interp { parts, .. } => {
@@ -351,15 +356,43 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
             expr_uses(lhs, out);
             expr_uses(rhs, out);
         }
+        Expr::Unary {
+            op: hy_syntax::UnOp::Addr,
+            operand,
+            span,
+        }
+        | Expr::AddrOf { operand, span } => match crate::model::unwrap_parens(operand) {
+            Expr::Ident { name, .. } => out.push(Use {
+                name: name.clone(),
+                span: *span,
+                is_write: false,
+                via_move: false,
+                via_addr: true,
+            }),
+            _ => expr_uses(operand, out),
+        },
         Expr::Unary { operand, .. } => expr_uses(operand, out),
-        Expr::AddrOf { operand, .. } => expr_uses(operand, out),
         Expr::Move { operand, span } => match crate::model::unwrap_parens(operand) {
             Expr::Ident { name, .. } => out.push(Use {
                 name: name.clone(),
                 span: *span,
                 is_write: false,
                 via_move: true,
+                via_addr: false,
             }),
+            Expr::Field { .. } => {
+                if let Some(root) = crate::model::unwrap_parens(operand).root_ident() {
+                    out.push(Use {
+                        name: root.to_string(),
+                        span: *span,
+                        is_write: false,
+                        via_move: true,
+                        via_addr: false,
+                    });
+                } else {
+                    expr_uses(operand, out);
+                }
+            }
             _ => expr_uses(operand, out),
         },
         Expr::Try { operand, .. } => expr_uses(operand, out),

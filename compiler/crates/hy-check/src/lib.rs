@@ -33,6 +33,7 @@
 //!     (issue #201: incomparable `==`, package-level redeclarations,
 //!     invalid receivers, negative shift counts, bad array lengths).
 //!   * this file    — Pass B: the per-statement driver and the verdict.
+//!   * `builtins.rs` — HYB-E2001 defer-non-call + HYB-E2005 builtin args (issue #187).
 //!
 //! Tier-0 discipline (O4.9, rule FC — human directive 2026-10-13): the
 //! checker is FAIL-CLOSED at spawn/send boundaries — a value whose type it
@@ -42,6 +43,7 @@
 //! every rejection teaches (O17 — fix-its come from the hy-diag registry);
 //! diagnostics are returned in source order.
 
+mod addr_loan;
 mod arith;
 mod buildable;
 mod const_overflow;
@@ -53,7 +55,9 @@ mod loans;
 mod model;
 mod sendability;
 mod shape;
+mod tuple;
 mod walk;
+mod builtins;
 
 use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
 
@@ -257,6 +261,8 @@ fn build_tables(ck: &mut Checker<'_>) {
                 if let Some(ty) = &c.ty {
                     ck.check_type_expr(ty);
                 }
+                let b = ck.const_binding(c);
+                ck.consts.insert(c.name.clone(), b);
             }
             Decl::Struct(s) => {
                 for f in &s.fields {
@@ -321,6 +327,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     "method receiver `{}` (the caller retains the receiver across intra-task calls)",
                     r.name
                 )),
+                slot_loan: false,
             },
         );
     }
@@ -338,6 +345,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     "parameter `{}` (the caller retains the argument across intra-task calls)",
                     p.name
                 )),
+                slot_loan: false,
             },
         );
     }
@@ -496,6 +504,8 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         let mut uses = Vec::new();
         walk::own_uses(stmt, &mut uses);
         ck.check_uses(&st, &uses);
+        // T24: no address-of on a map-slot loan (HYB-E3104).
+        ck.check_addr_of_loan(&st, &uses);
 
         // Issue #149: `/` or `%` by a literal 0 must not be accepted —
         // Go refuses to compile the emitted expression.
@@ -504,6 +514,9 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         // Issue #201: expression/type guards (incomparable `==`,
         // constant negative shifts, local array-length ascriptions).
         ck.check_stmt_emit_guard(&st, stmt);
+        // T23: a multi-value call bound to the wrong number of names
+        // (`p := minmax(3, 9)`) — Go refuses the emitted binding.
+        ck.check_stmt_multi_value(&st, stmt);
 
         // Calls (A2 loan windows, A7 consumes + arg lending). A for-loop
         // ITERATE expression's borrow calls get loop-extent loans: the
@@ -532,10 +545,17 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         }
 
         // Statement-specific processing.
+        // Issue #187: defer must be a call (HYB-E2001); literal/arity
+        // misuse of make/len/cap/delete/close/new (HYB-E2005).
+        // After the call/loan walk so it does not collide with upstream
+        // inserts around check_uses (const-zero-divisor / LX14).
+        ck.check_stmt_builtins(stmt);
+
         match stmt {
             Stmt::Local(l) => {
                 ck.process_local(&mut st, l, idx, managed);
                 ck.record_local_borrow_aliases(&mut st, l);
+                ck.mark_slot_loans_local(&mut st, l);
             }
 
             Stmt::Assign {
@@ -546,6 +566,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             } => {
                 ck.process_assign(&mut st, targets, *op, values, *span, idx);
                 ck.record_assign_borrow_aliases(&mut st, targets, *op, values);
+                ck.mark_slot_loans_assign(&mut st, targets, *op, values);
             }
 
             Stmt::Return { values, .. } => ck.process_return(&mut st, values),
@@ -2663,6 +2684,57 @@ mod tests {
     }
 
     #[test]
+    fn move_of_container_holding_closures_rejects() {
+        // A closure that captures `m` is wrapped in a slice / map / struct and
+        // the CONTAINER is moved to a task. `move v` froze only `v`, never the
+        // captured `m`, so main kept writing `m` while the task wrote it
+        // through the closure: ACCEPT with 0 diagnostics and a `go run -race`
+        // hit before this fix (#225). Moving a bare closure was already
+        // rejected.
+        let shapes = [
+            ("v []fn()", "v[0]()", "v := []fn(){fn() { m[\"k\"]++ }}", ""),
+            (
+                "v map[string]fn()",
+                "v[\"a\"]()",
+                "v := map[string]fn(){\"a\": fn() { m[\"k\"]++ }}",
+                "",
+            ),
+            (
+                "v job",
+                "v.f()",
+                "v := job{f: fn() { m[\"k\"]++ }}",
+                "struct job { f fn() }\n",
+            ),
+            (
+                "v outer",
+                "v.j.f()",
+                "v := outer{j: job{f: fn() { m[\"k\"]++ }}}",
+                "struct job { f fn() }\nstruct outer { j job }\n",
+            ),
+        ];
+        for (param, call, def, pre) in shapes {
+            let src = format!(
+                "{pre}fn worker({param}, done chan<- bool) {{\n  {call}\n  done <- true\n}}\n\
+                 fn main() {{\n  m := map[string]int{{}}\n  {def}\n  done := make(chan bool, 1)\n  \
+                 task worker(move v, done)\n  m[\"k\"] = 2\n  <-done\n}}\n"
+            );
+            let r = check(&src);
+            assert_eq!(r.verdict, Verdict::Reject, "{param}: {:?}", r.diagnostics);
+            assert!(
+                r.diagnostics.iter().any(|d| d.code == "HYB-E3001"),
+                "{param}: {:?}",
+                r.diagnostics
+            );
+        }
+        // Negative control: a moved container of plain values still crosses.
+        let ok = check(
+            "fn worker(v []int, done chan<- bool) {\n  v[0] = 1\n  done <- true\n}\n\
+             fn main() {\n  v := []int{0}\n  done := make(chan bool, 1)\n  task worker(move v, done)\n  <-done\n}\n",
+        );
+        assert_eq!(ok.verdict, Verdict::Accept, "{:?}", ok.diagnostics);
+    }
+
+    #[test]
     fn non_owned_param_capture_and_range_moves_reject_e3004() {
         // 1. Function parameter moved across a task boundary: caller retains `m`.
         let r_param = check(
@@ -3495,5 +3567,213 @@ mod tests {
         );
         assert_eq!(r_ok.verdict, Verdict::Accept, "{:?}", r_ok.diagnostics);
     }
-}
 
+#[test]
+    fn closure_ascribed_local_assign_rebind_and_self_shadow_reject() {
+        // 1. Type-ascribed local inside a closure (`var alias map[string]int = m`)
+        // preserves `non_owned_origin` and rejects `move alias` with HYB-E3004.
+        let r_ascribed_capture = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 1)\n\
+               f := fn() {\n\
+                 var alias map[string]int = m\n\
+                 task worker(move alias, done)\n\
+               }\n\
+               f()\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_ascribed_capture.verdict, Verdict::Reject);
+        assert!(r_ascribed_capture
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3004"));
+
+        // 2. Assignment rebind inside a closure (`alias = m`) inherits
+        // `non_owned_origin` and rejects `move alias` with HYB-E3004.
+        let r_assign_capture = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 1)\n\
+               f := fn() {\n\
+                 var alias map[string]int\n\
+                 alias = m\n\
+                 task worker(move alias, done)\n\
+               }\n\
+               f()\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_assign_capture.verdict, Verdict::Reject);
+        assert!(r_assign_capture
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3004"));
+
+        // 3. Closure-owned map aliased via ascribed define (`var m2 map[string]int = m1`)
+        // or assignment (`m2 = m1`) freezes when `m1` is moved (HYB-E3003).
+        let r_closure_freeze = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               done := make(chan bool, 1)\n\
+               f := fn() {\n\
+                 m1 := map[string]int{\"k\": 0}\n\
+                 var m2 map[string]int\n\
+                 m2 = m1\n\
+                 task worker(move m1, done)\n\
+                 m2[\"k\"] = 2\n\
+               }\n\
+               f()\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_closure_freeze.verdict, Verdict::Reject);
+        assert!(r_closure_freeze
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3003"));
+
+        // 4. Self-shadowing define (`m := m`) inside a closure preserves the
+        // captured binding's `non_owned_origin` and rejects `move m` (HYB-E3004).
+        let r_self_shadow = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 1)\n\
+               f := fn() {\n\
+                 m := m\n\
+                 task worker(move m, done)\n\
+               }\n\
+               f()\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_self_shadow.verdict, Verdict::Reject);
+        assert!(r_self_shadow
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3004"));
+    }
+
+#[test]
+    fn self_rebind_assign_and_param_peer_rebind_preserve_origin_and_shares() {
+        // 1. Self-rebind assignment (`s = s[:]`, `m = same(m)`) on a parameter
+        // preserves `non_owned_origin` and rejects `move` with HYB-E3004.
+        let r_param_reslice = check(
+            "fn worker(s []int, done chan<- bool) {\n\
+               s[0] = 1\n\
+               done <- true\n\
+             }\n\
+             fn spawn_it(s []int, done chan<- bool) {\n\
+               s = s[:]\n\
+               task worker(move s, done)\n\
+             }\n\
+             fn main() {\n\
+               s := []int{0, 1}\n\
+               done := make(chan bool, 1)\n\
+               spawn_it(s, done)\n\
+               s[0] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_param_reslice.verdict, Verdict::Reject);
+        assert!(r_param_reslice
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3004"));
+
+        // 2. Rebinding a struct parameter `h` after `h2 := h` transfers `h`'s
+        // non-owned origin to `h2`, so `move h2` still rejects with HYB-E3004.
+        let r_peer_rebind = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(h holder, done chan<- bool) {\n\
+               h.m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn launder(h holder, done chan<- bool) {\n\
+               h2 := h\n\
+               h = holder{m: map[string]int{\"fresh\": 0}}\n\
+               task worker(move h2, done)\n\
+             }\n\
+             fn main() {\n\
+               h := holder{m: map[string]int{\"k\": 0}}\n\
+               done := make(chan bool, 1)\n\
+               launder(h, done)\n\
+               h.m[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_peer_rebind.verdict, Verdict::Reject);
+        assert!(r_peer_rebind
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3004" && d.message.contains("may-share peer")));
+
+        // 3. Self-rebind of an owned map (`m1 = same(m1)`) preserves its
+        // existing `may_share` edge to `h := holder{m: m1}`, so `move m1`
+        // freezes `h` (HYB-E3003).
+        let r_self_rebind_share = check(
+            "struct holder { m map[string]int }\n\
+             fn same(m map[string]int) map[string]int { return m }\n\
+             fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m1 := map[string]int{\"k\": 0}\n\
+               h := holder{m: m1}\n\
+               m1 = same(m1)\n\
+               done := make(chan bool, 1)\n\
+               task worker(move m1, done)\n\
+               h.m[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_self_rebind_share.verdict, Verdict::Reject);
+        assert!(r_self_rebind_share
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3003"));
+
+        // 4. Positive control: rebinding a parameter to a genuinely fresh map
+        // (`m = map[string]int{"fresh": 0}`) re-owns `m` and stays accepted.
+        let r_fresh_rebind = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn spawn_fresh(m map[string]int, done chan<- bool) {\n\
+               m = map[string]int{\"fresh\": 0}\n\
+               task worker(move m, done)\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 1)\n\
+               spawn_fresh(m, done)\n\
+               m[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(
+            r_fresh_rebind.verdict,
+            Verdict::Accept,
+            "{:?}",
+            r_fresh_rebind.diagnostics
+        );
+    }
+}
