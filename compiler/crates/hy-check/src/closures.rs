@@ -85,6 +85,7 @@ fn check_one_closure(
                 immutable: false,
                 managed_taint: false,
                 moved: None,
+                slot_loan: false,
                 non_owned_origin: Some(format!(
                     "closure parameter `{}` (the caller retains the argument across calls)",
                     p.name
@@ -180,9 +181,7 @@ fn collect_place_direct_fnlits<'a>(place: &'a hy_syntax::Place, out: &mut Vec<&'
     }
 }
 
-fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a Stmt, managed: bool, nested: &mut Vec<NestedClosure<'a>>) {
-    // Check uses on every statement in the closure BEFORE any new defines or
-    // move transfers on this statement take effect (#29).
+fn check_stmt_own_uses(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, managed: bool) {
     let mut uses = Vec::new();
     crate::walk::own_uses(stmt, &mut uses);
     if !managed {
@@ -208,6 +207,16 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
         }
     }
     ck.check_uses(st, &uses);
+}
+
+fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a Stmt, managed: bool, nested: &mut Vec<NestedClosure<'a>>) {
+    // Check uses on every statement in the closure BEFORE any new defines or
+    // move transfers on this statement take effect (#29). For `Stmt::If`,
+    // init executes BEFORE `cond`, so `cond`'s uses are checked after `init`
+    // (#306 eval-order alignment, carried into the nested-closure walk).
+    if !matches!(stmt, Stmt::If { .. }) {
+        check_stmt_own_uses(ck, st, stmt, managed);
+    }
 
     match stmt {
         Stmt::Local(l) => {
@@ -235,7 +244,8 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 for (name, value) in l.names.iter().zip(l.values.iter()) {
                     let moved_non_owned = crate::model::move_operand_ident(value)
                         .and_then(|src| ck.lookup_binding(st, &src))
-                        .and_then(|b| b.non_owned_origin.clone());
+                        .and_then(|b| b.non_owned_origin.clone())
+                        .or_else(|| ck.moved_non_owned_origin_in_expr(st, value));
                     // ascription fills gaps (O4.9); inference keeps priority
                     // when it resolves (boundary handles stay precise)
                     let inferred = ck.shape_of_expr(st, value);
@@ -246,7 +256,9 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                             ck.ty_of_expr(st, value).or_else(|| l.ty.clone()),
                         ),
                     };
-                    if crate::model::move_operand_ident(value).is_some() {
+                    if crate::model::move_operand_ident(value).is_some()
+                        || matches!(crate::model::unwrap_parens(value), Expr::Move { .. })
+                    {
                         ck.define_binding(st, name, shape, ty, immutable, managed);
                         if let Some(origin) = moved_non_owned {
                             if let Some(b) = st.env_lookup_mut(name) {
@@ -281,6 +293,13 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         Vec::new()
                     };
                     ck.define_binding(st, name, shape, ty, immutable, managed);
+                    if let Some(origin) = &moved_non_owned {
+                        if let Some(b) = st.env_lookup_mut(name) {
+                            if b.non_owned_origin.is_none() {
+                                b.non_owned_origin = Some(origin.clone());
+                            }
+                        }
+                    }
                     if reads_self {
                         if let Some(pa) = prior_alias {
                             if pa != *name {
@@ -416,6 +435,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 check_stmt_boundaries(ck, st, i, managed, nested);
                 collect_stmt_direct_fnlits(i, st, nested);
             }
+            check_stmt_own_uses(ck, st, stmt, managed);
             st.scope_push();
             check_body_boundaries(ck, st, then, managed, nested);
             st.scope_pop();
@@ -524,9 +544,11 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
     }
 }
 
-/// Every FnLit reachable from `block`, outermost-first, including closures
-/// nested inside other closures' bodies. walk.rs's use/call collectors skip
-/// FnLit deliberately (A5); this walker exists precisely to see them.
+/// The outermost FnLits reachable from `block`. Closures nested inside other
+/// closures are NOT collected here: check_one_closure finds them while walking
+/// the enclosing closure's body (collect_stmt_direct_fnlits) and checks them
+/// recursively against the enclosing closure's environment (#229).
+/// walk.rs's use/call collectors skip FnLit deliberately (A5).
 fn collect_fnlits(block: &Block) -> Vec<(&[hy_syntax::Param], &Block)> {
     let mut out = Vec::new();
     for s in &block.stmts {
