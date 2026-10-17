@@ -259,6 +259,8 @@ fn build_tables(ck: &mut Checker<'_>) {
                 if let Some(ty) = &c.ty {
                     ck.check_type_expr(ty);
                 }
+                let b = ck.const_binding(c);
+                ck.consts.insert(c.name.clone(), b);
             }
             Decl::Struct(s) => {
                 for f in &s.fields {
