@@ -591,3 +591,22 @@ it as a Go import, so it cannot fail `go build`); unused `var` /
 composite-`const` locals, select-receive names and match bindings stay
 outside this registration (the same Go error family, tracked separately);
 unread `for ... in` bindings are handled at emission (issue #139).
+
+## Additive corpus registration — 2026-10-17: 3-argument slice `make` (#353)
+
+One case added WITH its fix: `make([]T, len, cap)` is valid Go, was
+rejected as HYB-E2005 before the fix, and is accepted now. The 3-argument
+form is slice-only — the same arity on a channel stays E2005, and
+negative/bad-literal sizes still reject, pinned by unit tests in
+`hy-check/tests/builtin_args_defer.rs`. The old diagnostic claimed "Go
+rejects this builtin shape" — false for the slice form, and true for every
+remaining rejection.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 51 | 51-make-slice-cap | ACCEPT | — | — | `make([]int, 3, 10)` is valid Go; zero check-sites, a fresh local |
+
+With this addition the corpus on disk is **51 programs: ACCEPT 13 ·
+ACCEPT-MANAGED 2 · REJECT 36** (recomputed from the files'
+`EXPECTED-VERDICT` markers; #50 carries its registration with its own fix
+PR).
