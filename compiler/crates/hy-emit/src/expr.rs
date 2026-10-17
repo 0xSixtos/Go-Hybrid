@@ -335,11 +335,9 @@ impl Emitter {
                 // Redirect statement output into a scratch buffer: the
                 // literal renders inline, its body keeps normal indents.
                 let main_body = std::mem::take(&mut self.body);
-                self.indent += 1;
-                for st in &body.stmts {
-                    self.emit_stmt(st)?;
-                }
-                self.indent -= 1;
+                let saved_loans = std::mem::take(&mut self.loan_frames);
+                self.emit_block_body(&body.stmts)?;
+                self.loan_frames = saved_loans;
                 let closure_body = std::mem::take(&mut self.body);
                 self.body = main_body;
                 self.fnlit_depth -= 1;
@@ -675,7 +673,7 @@ impl Emitter {
         for (i, a) in args.iter().enumerate() {
             let t = self.emit_call_arg(a)?;
             let wants_ptr = ptr_params.get(i).copied().unwrap_or(false);
-            let already_ptr = matches!(a.value, Expr::AddrOf { .. });
+            let already_ptr = self.expr_is_pointer(&a.value);
             let addressable = matches!(
                 a.value,
                 Expr::Ident { .. } | Expr::Field { .. } | Expr::Index { .. }
