@@ -22,10 +22,11 @@ impl<'a> Checker<'a> {
     /// constant (literal or folded constant expression) outside that
     /// type's range, or a float constant, emit HYB-E6002.
     pub(crate) fn check_const_overflow_init(&mut self, name: &str, ty: &TypeExpr, value: &Expr) {
+        let resolved = self.resolve_type_alias(ty);
         let TypeExpr::Named {
             name: ty_name,
             span: ty_span,
-        } = ty
+        } = &resolved
         else {
             return;
         };
