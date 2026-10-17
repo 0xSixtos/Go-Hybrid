@@ -1,5 +1,5 @@
 // ============================================================================
-// 46-array-slice-backing-freeze — Checker corpus #46.
+// 53-array-slice-backing-freeze — Checker corpus #53.
 //
 // PURPOSE: a slice of an addressable array shares the array's backing
 // storage, including when the element type is a primitive. `s := a[:]`
