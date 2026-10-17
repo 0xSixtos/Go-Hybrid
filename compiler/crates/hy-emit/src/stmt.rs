@@ -920,12 +920,12 @@ impl Emitter {
     }
 
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
-        let call = match e {
+        let (call, args) = match e {
             Expr::Try { operand, .. } => match operand.as_ref() {
-                Expr::Call { callee, .. } => callee.as_ref(),
+                Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
                 _ => return BindingKind::Plain,
             },
-            Expr::Call { callee, .. } => callee.as_ref(),
+            Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
             _ => return BindingKind::Plain,
         };
         if let Expr::Field { base, name, .. } = call {
@@ -963,12 +963,38 @@ impl Emitter {
             }
         }
         // make(chan …) → Chan (single-var range emits the value directly).
+        // Only classify as Chan if the first argument is a channel type.
+        // make([]T, n) (SliceLit) and make(map[K]V) (MapLit) must remain Plain
+        // so single-var range binds elements/keys rather than channel values.
         if matches!(call, Expr::Ident { name, .. } if name == "make") {
-            // args[0] is the type-as-value encoding; peek at its shape.
-            // (Verified against the parser's make encoding.)
-            return BindingKind::Chan;
+            if let Some(first) = args.first() {
+                if let Expr::StructLit {
+                    ty: Some(TypeExpr::Chan { .. }),
+                    ..
+                } = &first.value
+                {
+                    return BindingKind::Chan;
+                }
+            }
+            return BindingKind::Plain;
         }
         BindingKind::Plain
+    }
+
+    /// Whether an expression evaluates to a channel type (param, typed local,
+    /// make(chan ...), or a function returning a channel). Channel ranges in
+    /// Go permit only one iteration variable and bind the received value directly.
+    fn is_channel_expr(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Ident { name, .. } => {
+                matches!(self.bindings.get(name), Some(BindingKind::Chan))
+            }
+            Expr::Paren { inner, .. } => self.is_channel_expr(inner),
+            Expr::Call { .. } | Expr::Try { .. } => {
+                self.binding_kind_of(e) == BindingKind::Chan
+            }
+            _ => false,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1470,12 +1496,7 @@ impl Emitter {
                             // Go's single-var range binds the index (slices/
                             // maps) or the value (channels) — hence the Chan
                             // hint check.
-                            let over_chan = match expr {
-                                Expr::Ident { name, .. } => {
-                                    matches!(self.bindings.get(name), Some(BindingKind::Chan))
-                                }
-                                _ => false,
-                            };
+                            let over_chan = self.is_channel_expr(expr);
                             if over_chan {
                                 format!("for {} := range {} {{", vars[0], e)
                             } else {
@@ -1501,6 +1522,11 @@ impl Emitter {
                         }
                     }
                     2 => {
+                        if self.is_channel_expr(expr) {
+                            return Err(EmitError::unsupported(
+                                "cannot range over channel with two iteration variables: channels permit only one iteration variable (SPEC-LANGUAGE.md LX13)",
+                            ));
+                        }
                         // Go rejects a range binding the body never reads
                         // (`declared and not used`), and `for _, _ :=` is
                         // itself invalid (`no new variables on left side of
