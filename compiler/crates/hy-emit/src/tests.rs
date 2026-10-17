@@ -1678,6 +1678,29 @@ fn range_binding_mention_inside_a_closure_counts_as_read() {
     );
 }
 
+#[test]
+fn single_range_binding_never_read_drops_to_for_range() {
+    let go = emit("fn main() {\n    xs := []int{1, 2, 3}\n    for x in xs {\n        fmt.println(\"item\")\n    }\n}\n");
+    assert!(
+        go.contains("for range xs {"),
+        "unread single binding must lower to `for range xs`:\n{}",
+        go
+    );
+    assert!(!go.contains("for _, x :="), "must not declare unread variable:\n{}", go);
+}
+
+#[test]
+fn single_range_binding_over_chan_never_read_drops_to_for_range() {
+    let go = emit("fn worker(jobs <-chan int) {\n    for j in jobs {\n        fmt.println(\"item\")\n    }\n}\n");
+    assert!(
+        go.contains("for range jobs {"),
+        "unread single channel binding must lower to `for range jobs`:\n{}",
+        go
+    );
+    assert!(!go.contains("for j :="), "must not declare unread variable:\n{}", go);
+}
+
+
 // Loop-label scope (HYB-E3010 companion; issue: break/continue loop with no
 // enclosing loop / match-arm label propagation)
 // ---------------------------------------------------------------------------

@@ -1488,8 +1488,12 @@ impl Emitter {
                     1 => {
                         // `for _ in ch` drains without binding (corpus 17);
                         // `for range e` is Go's blank form for every
-                        // iterable. No variable to register.
-                        if vars[0] == "_" {
+                        // iterable. When a named loop variable is never read in
+                        // the body, Go rejects it (`declared and not used`).
+                        // Drop the binding to `for range e`, completing the
+                        // unread-binding lowering from issue #139.
+                        let read = vars[0] != "_" && crate::rangebind::body_reads(body, &vars[0]);
+                        if !read {
                             format!("for range {} {{", e)
                         } else {
                             // Hybrid's single-var iterate binds the VALUE.
