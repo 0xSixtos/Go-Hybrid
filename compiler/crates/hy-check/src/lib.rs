@@ -52,12 +52,16 @@ mod emit_guard;
 mod foreign;
 mod freeze;
 mod loans;
+mod const_init;
 mod model;
+mod resolve;
 mod sendability;
 mod shape;
 mod tuple;
 mod walk;
 mod builtins;
+mod range_iter;
+mod recv;
 
 use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
 
@@ -100,6 +104,12 @@ pub fn check_file(file: &File) -> CheckResult {
 
     build_tables(&mut ck);
     ck.check_struct_decls(); // A6: borrow-handle / pointer struct fields
+
+    // Issue #228 family A: value-position names nothing declares must be
+    // HYB-E1001 here, not `undefined: X` at go build. Const initializers and
+    // declaration-signature expressions (array lengths) at file level; each
+    // function body inside check_fn below.
+    ck.check_file_undefined_names();
 
     let fns: Vec<&FnDecl> = file.fns().collect();
     for f in fns {
@@ -172,6 +182,10 @@ fn build_tables(ck: &mut Checker<'_>) {
                 ck.declare_pkg_name(&c.name, "const", c.span);
                 let b = ck.const_binding(c);
                 ck.consts.insert(c.name.clone(), b);
+                // Issue #205: file-level `const c = get_val()` must not pass check then fail go build.
+                // Placed after insert so this hook sits below main's E6002 overflow check and
+                // 3-way-merges cleanly (same pattern as PR #191 relocated hooks).
+                ck.check_const_init_is_constant(&c.name, &c.value, None);
             }
             Decl::Struct(s) => {
                 // Issue #201-C: package-scope names are unique across
@@ -299,6 +313,11 @@ fn build_tables(ck: &mut Checker<'_>) {
 
 fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     let Some(body) = &f.body else { return };
+
+    // Issue #228 family A: `undefined_fn()`, reads/assigns of names nothing
+    // declares — HYB-E1001 before emit ever runs. Dotted package-prefix
+    // first segments stay exempt (resolve.rs Field arm).
+    ck.check_fn_undefined_names(f);
 
     // environment seed: receiver + params
     let mut st = FnState::default();
@@ -575,6 +594,16 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         // After the call/loan walk so it does not collide with upstream
         // inserts around check_uses (const-zero-divisor / LX14).
         ck.check_stmt_builtins(stmt);
+
+        // Issue #411: the iterable of `for x in e` must resolve to a
+        // slice/array/string/map/chan (LX13) — HYB-E2009; fail-closed
+        // E3005 (O4.9). Same accepted-should-emit-buildable-Go family as
+        // the send-target (#77) classification.
+        ck.check_stmt_range_iterable(&st, stmt);
+        // Issue #409: every receive operand must resolve to a channel
+        // (HYB-E2008; fail-closed E3005) — the mirror of the send-side
+        // target classification (#77, HYB-E3007).
+        ck.check_stmt_recv_operands(&st, stmt);
 
         match stmt {
             Stmt::Local(l) => {
@@ -1448,10 +1477,16 @@ mod tests {
         );
         assert_eq!(r_borrow.verdict, Verdict::Reject);
 
+        // Fixture note (issue #228 family A): the unproven value is a
+        // DEFINED binding of Unknown shape (recv from an unresolvable-elem
+        // channel — the same idiom as fc_select_recv_unknown_element above),
+        // not an undefined factory call: HYB-E1001 owns names nothing
+        // declares, so it would (correctly) become the first error here.
         let r_unknown = check(
             "fn send_val(v any) {}\n\
              fn main() {\n\
-               u := mystery_factory()\n\
+               ch := make(chan mystery, 1)\n\
+               u := <-ch\n\
                task send_val(move u)\n\
              }",
         );
@@ -2103,12 +2138,19 @@ mod tests {
     #[test]
     fn fc_unproven_name_via_managed_escapes() {
         // the SAME unproven value inside a managed block escapes through the
-        // explicit hatch: warning only, counted — never a silent pass
+        // explicit hatch: warning only, counted — never a silent pass.
+        // Fixture note (issue #228 family A): the unproven value is now a
+        // DEFINED binding of Unknown shape (`v := <-ch` with an unresolvable
+        // element type) instead of the old undefined-name placeholder —
+        // HYB-E1001 rejects a name nothing declares, which is a different
+        // (and also correct) claim than the managed-hatch claim under test.
         let r = check(
             "fn handle(x int) { fmt.println(x) }\n\
              fn main() {\n\
                managed(\"test-only handler; name shape pinned by the fixture\", \"other\") {\n\
-                 task handle(nosuch)\n\
+                 ch := make(chan mystery, 1)\n\
+                 v := <-ch\n\
+                 task handle(v)\n\
                }\n\
              }",
         );
