@@ -20,7 +20,7 @@
 //   [S2] `shared["main"]++` after the spawn — a WRITE through a frozen alias.
 //
 // ---- Expected verdict ----
-// EXPECTED-VERDICT: REJECT
+// EXPECTED-VERDICT: REJECT A1b
 //   REJECT — A1b/E3003 (write through a live alias of a moved value).
 //   Accepting this program is a P0: the emitted Go spawns `worker(h)` while
 //   `main` keeps writing `shared`, which is `fatal error: concurrent map
