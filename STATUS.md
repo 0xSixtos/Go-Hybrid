@@ -12,3 +12,4 @@
 - Last review gate: G3 PASSED 2026-10-13; community review is a standing input to the queue
 
 - 2026-10-17 workload runner: load/alloc build failures now exit nonzero and stop subsequent work. Six offline regression tests and twelve related shape tests pass; full compiler/performance validation not claimed.
+- PR366 review follow-up: register the six workload-run regressions in the existing CI step; Mini 6/6 passes, upstream CI unverified.
