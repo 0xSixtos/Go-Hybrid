@@ -1537,20 +1537,10 @@ impl<'a> Checker<'a> {
         }
     }
 
-    pub(crate) fn define_binding(
-        &self,
-        st: &mut FnState,
-        name: &str,
-        shape: TypeShape,
-        ty: Option<hy_syntax::TypeExpr>,
-        immutable: bool,
-        managed: bool,
-    ) {
-        // Issue #75: before a shadowing or same-scope define (`h2 := h;
-        // if true { h := fresh; ... }` or `h2 := h; h, ok := fresh, true`)
-        // clears `name`'s share/alias edges and replaces `name` in the lexical
-        // environment, transfer `name`'s non-owned origin to any existing
-        // may-share peers and direct alias children so they remain non-owned.
+    /// Transfer `name`'s non-owned origin (O5.1) to any existing may-share
+    /// peers and direct alias children before `name`'s share/alias edges are
+    /// cleared by a shadowing define or non-self rebind (#75).
+    fn transfer_non_owned_origin_to_peers_and_aliases(&self, st: &mut FnState, name: &str) {
         if let Some((orig, _)) = self.non_owned_origin_of(st, name) {
             let peer_origin = if orig.starts_with("a may-share peer of ") {
                 orig.clone()
@@ -1587,6 +1577,23 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+    }
+
+    pub(crate) fn define_binding(
+        &self,
+        st: &mut FnState,
+        name: &str,
+        shape: TypeShape,
+        ty: Option<hy_syntax::TypeExpr>,
+        immutable: bool,
+        managed: bool,
+    ) {
+        // Issue #75: before a shadowing or same-scope define (`h2 := h;
+        // if true { h := fresh; ... }` or `h2 := h; h, ok := fresh, true`)
+        // clears `name`'s share/alias edges and replaces `name` in the lexical
+        // environment, transfer `name`'s non-owned origin to any existing
+        // may-share peers and direct alias children so they remain non-owned.
+        self.transfer_non_owned_origin_to_peers_and_aliases(st, name);
         st.aliases.remove(name);
         st.share_clear(name);
         let non_owned_origin = if immutable && !shape.is_sendable_by_type() {
@@ -1860,42 +1867,7 @@ impl<'a> Checker<'a> {
                     // and preserve clique connectivity among `name`'s former
                     // neighbors so they remain linked to each other.
                     if !info.reads_self {
-                        if let Some((orig, _)) = self.non_owned_origin_of(st, name) {
-                            let peer_origin = if orig.starts_with("a may-share peer of ") {
-                                orig.clone()
-                            } else {
-                                format!("a may-share peer of {}", orig)
-                            };
-                            let peers: Vec<String> = st.share_group(name).into_iter().collect();
-                            for peer in peers {
-                                if &peer == name {
-                                    continue;
-                                }
-                                if let Some(pb) = st.env_lookup_mut(&peer) {
-                                    if pb.non_owned_origin.is_none() {
-                                        pb.non_owned_origin = Some(peer_origin.clone());
-                                    }
-                                }
-                            }
-                            let alias_children: Vec<String> = st
-                                .aliases
-                                .iter()
-                                .filter_map(|(k, v)| {
-                                    if v == name && k != name {
-                                        Some(k.clone())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect();
-                            for child in alias_children {
-                                if let Some(cb) = st.env_lookup_mut(&child) {
-                                    if cb.non_owned_origin.is_none() {
-                                        cb.non_owned_origin = Some(orig.clone());
-                                    }
-                                }
-                            }
-                        }
+                        self.transfer_non_owned_origin_to_peers_and_aliases(st, name);
                         let neighbors: Vec<String> = st
                             .may_share
                             .get(name)
@@ -1983,42 +1955,7 @@ impl<'a> Checker<'a> {
                         Vec::new()
                     };
                     if !reads_self {
-                        if let Some((orig, _)) = self.non_owned_origin_of(st, name) {
-                            let peer_origin = if orig.starts_with("a may-share peer of ") {
-                                orig.clone()
-                            } else {
-                                format!("a may-share peer of {}", orig)
-                            };
-                            let peers: Vec<String> = st.share_group(name).into_iter().collect();
-                            for peer in peers {
-                                if &peer == name {
-                                    continue;
-                                }
-                                if let Some(pb) = st.env_lookup_mut(&peer) {
-                                    if pb.non_owned_origin.is_none() {
-                                        pb.non_owned_origin = Some(peer_origin.clone());
-                                    }
-                                }
-                            }
-                            let alias_children: Vec<String> = st
-                                .aliases
-                                .iter()
-                                .filter_map(|(k, v)| {
-                                    if v == name && k != name {
-                                        Some(k.clone())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect();
-                            for child in alias_children {
-                                if let Some(cb) = st.env_lookup_mut(&child) {
-                                    if cb.non_owned_origin.is_none() {
-                                        cb.non_owned_origin = Some(orig.clone());
-                                    }
-                                }
-                            }
-                        }
+                        self.transfer_non_owned_origin_to_peers_and_aliases(st, name);
                     }
                     if let Some(b) = st.env_lookup_mut(name) {
                         if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
@@ -3644,4 +3581,32 @@ mod tests {
             r.diagnostics
         );
     }
+
+    #[test]
+    fn multi_return_value_only_args_accept_move_control() {
+        let r = check(
+            "struct holder { m map[string]int }\n\
+             fn pair(x int) (int, bool) {\n\
+               return x, true\n\
+             }\n\
+             fn make_holder(seed int) (holder, bool) {\n\
+               return holder{m: map[string]int{\"k\": seed}}, true\n\
+             }\n\
+             fn worker(h holder, done chan int) {\n\
+               h.m[\"worker\"] = 1\n\
+               done <- 1\n\
+             }\n\
+             fn outer(seed int, done chan int) {\n\
+               n, ok1 := pair(42)\n\
+               _ = n\n\
+               _ = ok1\n\
+               h2, ok2 := make_holder(seed)\n\
+               _ = ok2\n\
+               task worker(move h2, done)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
 }
+
