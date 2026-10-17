@@ -209,18 +209,34 @@ def actions_watch(run_id=None):
 
 
 def actions_fetch(run_id, jobdir):
-    payload = gh_api("/repos/limitlessprojects/Go-Hybrid/actions/runs/{}/artifacts".format(run_id))
-    # An error payload (rate limit, missing run, bad token) carries no
-    # "artifacts" key; treat that the same as "nothing to download".
-    if "artifacts" not in payload:
-        print(
-            "actions fetch: run {} artifact list unavailable: {}".format(
-                run_id, payload.get("message") or payload.get("status") or "no artifacts key"
-            ),
-            file=sys.stderr,
+    # This endpoint defaults to only 30 results. Fetch every page before
+    # downloading so a sharded run cannot silently lose later artifacts.
+    arts = []
+    page = 1
+    per_page = 100
+    while True:
+        payload = gh_api(
+            "/repos/limitlessprojects/Go-Hybrid/actions/runs/{}/artifacts?per_page={}&page={}".format(
+                run_id, per_page, page
+            )
         )
-        return 1
-    arts = payload["artifacts"]
+        # An error payload (rate limit, missing run, bad token) carries no
+        # "artifacts" key; fail loudly instead of reporting an empty fetch.
+        if "artifacts" not in payload:
+            print(
+                "actions fetch: run {} artifact list unavailable: {}".format(
+                    run_id, payload.get("message") or payload.get("status") or "no artifacts key"
+                ),
+                file=sys.stderr,
+            )
+            return 1
+        batch = payload["artifacts"]
+        if not batch:
+            break
+        arts.extend(batch)
+        if len(batch) < per_page:
+            break
+        page += 1
     if not arts:
         print("actions fetch: run {} has no artifacts to download".format(run_id), file=sys.stderr)
         return 1
