@@ -580,6 +580,13 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            Stmt::Return { values, .. } => {
+                for v in values {
+                    if self.expr_fnlit_mutates_param(v, param, depth) {
+                        return true;
+                    }
+                }
+            }
             _ => {}
         }
         // calls in this statement (covers Expr/Send/Return/Defer/Task/...)
@@ -682,6 +689,16 @@ impl<'a> Checker<'a> {
                 self.expr_fnlit_mutates_param(base, param, depth)
                     || self.expr_fnlit_mutates_param(index, param, depth)
             }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| self.expr_fnlit_mutates_param(&f.value, param, depth)),
+            Expr::SliceLit { items, .. } => items
+                .iter()
+                .any(|it| self.expr_fnlit_mutates_param(it, param, depth)),
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
+                self.expr_fnlit_mutates_param(k, param, depth)
+                    || self.expr_fnlit_mutates_param(v, param, depth)
+            }),
             _ => false,
         }
     }
@@ -737,23 +754,61 @@ impl<'a> Checker<'a> {
     /// body may mutate — consumed at the closure's call sites (#111 form 4).
     /// The closure's own params are excluded: they are fresh bindings.
     fn record_closure_mutations(&self, st: &mut FnState, name: &str, value: &Expr) {
-        let Expr::FnLit {
-            params,
-            results,
-            body,
-            ..
-        } = unwrap_parens(value)
-        else {
-            return;
-        };
-        let mut bound: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
-        bound.extend(results.iter().filter_map(|r| r.name.clone()));
-        let roots = self.collect_mutation_roots(st, body, &bound);
-        if !roots.is_empty() {
-            st.closure_mutates
-                .entry(name.to_string())
-                .or_default()
-                .extend(roots);
+        match unwrap_parens(value) {
+            Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } => {
+                let mut bound: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+                bound.extend(results.iter().filter_map(|r| r.name.clone()));
+                let roots = self.collect_mutation_roots(st, body, &bound);
+                if !roots.is_empty() {
+                    st.closure_mutates
+                        .entry(name.to_string())
+                        .or_default()
+                        .extend(roots);
+                }
+            }
+            Expr::Ident { name: src, .. } => {
+                if let Some(existing) = st.closure_mutates.get(src).cloned() {
+                    if !existing.is_empty() {
+                        st.closure_mutates
+                            .entry(name.to_string())
+                            .or_default()
+                            .extend(existing);
+                    }
+                }
+            }
+            Expr::Call { callee, args, .. } => {
+                if !matches!(self.shape_of_expr(st, value), TypeShape::Closure) {
+                    return;
+                }
+                let mut mutated_roots = HashSet::new();
+                if let Expr::Ident { name: fn_name, .. } = unwrap_parens(callee) {
+                    if let Some(decl) = self.fns.get(fn_name) {
+                        for (i, a) in args.iter().enumerate() {
+                            let mutates = match decl.params.get(i) {
+                                Some(p) => self.fn_mutates_param(decl, &p.name, 0),
+                                None => true,
+                            };
+                            if mutates {
+                                let mut r = Vec::new();
+                                collect_ref_roots(&a.value, &mut r);
+                                mutated_roots.extend(r);
+                            }
+                        }
+                    }
+                }
+                if !mutated_roots.is_empty() {
+                    st.closure_mutates
+                        .entry(name.to_string())
+                        .or_default()
+                        .extend(mutated_roots);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1372,6 +1427,23 @@ impl<'a> Checker<'a> {
                     _ => false,
                 };
                 via_arg || via_recv
+            }
+            Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } => {
+                let mut bound: std::collections::HashSet<String> =
+                    params.iter().map(|p| p.name.clone()).collect();
+                bound.extend(results.iter().filter_map(|r| r.name.clone()));
+                if bound.contains(name) {
+                    false
+                } else {
+                    let mut idents = Vec::new();
+                    collect_capture_idents_block(body, &mut bound, &mut idents);
+                    idents.iter().any(|id| id == name)
+                }
             }
             _ => false,
         }
@@ -3421,6 +3493,13 @@ impl<'a> Checker<'a> {
                     return true;
                 }
             }
+            Stmt::Return { values, .. } => {
+                for v in values {
+                    if self.expr_fnlit_mutates_const_param(v, aliases, depth) {
+                        return true;
+                    }
+                }
+            }
             _ => {}
         }
         let mut calls = Vec::new();
@@ -3495,10 +3574,20 @@ impl<'a> Checker<'a> {
         depth: usize,
     ) -> bool {
         match e {
-            Expr::FnLit { params, body, .. } => {
+            Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } => {
                 let mut inner_aliases = aliases.clone();
                 for p in params {
                     inner_aliases.remove(&p.name);
+                }
+                for r in results {
+                    if let Some(name) = &r.name {
+                        inner_aliases.remove(name);
+                    }
                 }
                 if inner_aliases.is_empty() {
                     false
@@ -3528,6 +3617,16 @@ impl<'a> Checker<'a> {
                 self.expr_fnlit_mutates_const_param(base, aliases, depth)
                     || self.expr_fnlit_mutates_const_param(index, aliases, depth)
             }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| self.expr_fnlit_mutates_const_param(&f.value, aliases, depth)),
+            Expr::SliceLit { items, .. } => items
+                .iter()
+                .any(|it| self.expr_fnlit_mutates_const_param(it, aliases, depth)),
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
+                self.expr_fnlit_mutates_const_param(k, aliases, depth)
+                    || self.expr_fnlit_mutates_const_param(v, aliases, depth)
+            }),
             _ => false,
         }
     }
@@ -3745,7 +3844,7 @@ fn contains_addr_of_in_literal(e: &Expr) -> bool {
 /// Locals defined inside the body are deliberately NOT excluded: a name
 /// that also exists outside resolves to the outer binding on other paths,
 /// and an extra may-share edge is conservative in the safe direction.
-fn collect_capture_idents_block(
+pub(crate) fn collect_capture_idents_block(
     block: &hy_syntax::Block,
     bound: &mut std::collections::HashSet<String>,
     out: &mut Vec<String>,
