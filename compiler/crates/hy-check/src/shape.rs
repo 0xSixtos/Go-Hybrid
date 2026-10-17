@@ -20,8 +20,18 @@ impl<'a> Checker<'a> {
     // -----------------------------------------------------------------------
 
     pub(crate) fn shape_of_type(&self, ty: &TypeExpr) -> TypeShape {
-        match ty {
-            TypeExpr::Named { name, .. } => self.named_shape(name),
+        let resolved = self.resolve_type_alias(ty);
+        match &resolved {
+            TypeExpr::Named { name, .. } => {
+                if self
+                    .type_aliases
+                    .contains_key(Self::base_named_type_str(name))
+                {
+                    TypeShape::Unknown
+                } else {
+                    self.named_shape(name)
+                }
+            }
             TypeExpr::Pointer { to, .. } => TypeShape::Pointer(Box::new(self.shape_of_type(to))),
             TypeExpr::Slice { elem, .. } => TypeShape::Slice(Box::new(self.shape_of_type(elem))),
             TypeExpr::Array { elem, .. } => TypeShape::Array(Box::new(self.shape_of_type(elem))),
@@ -212,10 +222,13 @@ impl<'a> Checker<'a> {
                 self.field_shape(&base_shape, name)
             }
             Expr::Call { callee, args, .. } => self.call_shape(st, callee, args),
-            Expr::StructLit { ty, .. } => TypeShape::Struct(match ty {
-                Some(TypeExpr::Named { name, .. }) => Some(name.clone()),
-                _ => None,
-            }),
+            Expr::StructLit { ty, .. } => match ty {
+                Some(t) => match self.resolve_type_alias(t) {
+                    TypeExpr::Named { name, .. } => TypeShape::Struct(Some(name)),
+                    other => self.shape_of_type(&other),
+                },
+                None => TypeShape::Struct(None),
+            },
             Expr::MapLit { key, value, .. } => TypeShape::Map(
                 Box::new(self.shape_of_type(key)),
                 Box::new(self.shape_of_type(value)),
@@ -338,9 +351,10 @@ impl<'a> Checker<'a> {
             Expr::SliceLit { elem: Some(t), .. } => {
                 TypeShape::Slice(Box::new(self.shape_of_type(t)))
             }
-            Expr::MapLit { .. } => {
-                TypeShape::Map(Box::new(TypeShape::Unknown), Box::new(TypeShape::Unknown))
-            }
+            Expr::MapLit { key, value, .. } => TypeShape::Map(
+                Box::new(self.shape_of_type(key)),
+                Box::new(self.shape_of_type(value)),
+            ),
             _ => TypeShape::Unknown,
         }
     }
