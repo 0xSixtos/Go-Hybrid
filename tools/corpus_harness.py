@@ -96,7 +96,13 @@ def run_checker(bin_path, hy_path, report_managed=False):
     cmd = [bin_path, "check", hy_path, "--json"]
     if report_managed:
         cmd.append("--report-managed")
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except OSError as e:
+        # The validated file may still fail to execute (not executable,
+        # wrong architecture, vanished between validation and exec).
+        # Surface it as a harness-error row, never a traceback.
+        raise RuntimeError(f"checker could not be executed for {hy_path}: {e}")
     # Exit 0 means accepted and exit 1 means rejected. Any other status
     # indicates a checker failure, even if it already emitted valid JSON.
     if proc.returncode not in (0, 1):
@@ -183,6 +189,13 @@ def main():
         print(f"error: checker binary not found: {args.bin}", file=sys.stderr)
         print("build it first: cd compiler && cargo build -p hyb", file=sys.stderr)
         return 2
+
+    # The validated local file must be the binary that actually runs. An
+    # unresolved name (a bare `hyb`, a relative `./hyb`) would let
+    # subprocess's PATH lookup silently substitute a different installed
+    # checker — a false agreement or a false disagreement — and raise
+    # FileNotFoundError when PATH carries no such binary at all.
+    args.bin = os.path.abspath(args.bin)
 
     files = sorted(
         f for f in os.listdir(args.corpus) if f.endswith(".hy")
