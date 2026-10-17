@@ -1319,7 +1319,15 @@ impl<'a> Checker<'a> {
             Stmt::Expr { expr, .. } | Stmt::Defer { call: expr, .. } => {
                 self.walk_expr_chan_dir(expr, env);
             }
-            Stmt::Send { chan, value, .. } => {
+            Stmt::Send {
+                chan, value, span, ..
+            } => {
+                if matches!(
+                    self.chan_dir_of_expr_env(chan, env),
+                    Some(hy_syntax::ChanDir::Recv)
+                ) {
+                    self.emit_send_recv_only(chan, *span);
+                }
                 self.walk_expr_chan_dir(chan, env);
                 self.walk_expr_chan_dir(value, env);
             }
@@ -1416,10 +1424,22 @@ impl<'a> Checker<'a> {
                     env.push();
                     match &arm.kind {
                         SelectArmKind::Send { chan, value } => {
+                            if matches!(
+                                self.chan_dir_of_expr_env(chan, env),
+                                Some(hy_syntax::ChanDir::Recv)
+                            ) {
+                                self.emit_send_recv_only(chan, chan.span().to(value.span()));
+                            }
                             self.walk_expr_chan_dir(chan, env);
                             self.walk_expr_chan_dir(value, env);
                         }
                         SelectArmKind::Recv { names, chan, .. } => {
+                            if matches!(
+                                self.chan_dir_of_expr_env(chan, env),
+                                Some(hy_syntax::ChanDir::Send)
+                            ) {
+                                self.emit_recv_send_only(chan, chan.span());
+                            }
                             self.walk_expr_chan_dir(chan, env);
                             let elem_ty = self
                                 .dir_ty_of_expr(chan, env)
@@ -1498,9 +1518,17 @@ impl<'a> Checker<'a> {
             | Expr::Move { operand, .. }
             | Expr::Try { operand, .. }
             | Expr::Paren { inner: operand, .. }
-            | Expr::Field { base: operand, .. }
-            | Expr::Receive { chan: operand, .. } => {
+            | Expr::Field { base: operand, .. } => {
                 self.walk_expr_chan_dir(operand, env);
+            }
+            Expr::Receive { chan, span } => {
+                if matches!(
+                    self.chan_dir_of_expr_env(chan, env),
+                    Some(hy_syntax::ChanDir::Send)
+                ) {
+                    self.emit_recv_send_only(chan, *span);
+                }
+                self.walk_expr_chan_dir(chan, env);
             }
             Expr::Index { base, index, .. } => {
                 self.walk_expr_chan_dir(base, env);
@@ -1748,6 +1776,48 @@ impl<'a> Checker<'a> {
             hy_syntax::TypeExpr::Chan { dir, .. } => Some(dir),
             _ => None,
         }
+    }
+
+    fn emit_send_recv_only(&mut self, chan: &Expr, span: Span) {
+        if self
+            .diags
+            .iter()
+            .any(|d| d.code == "HYB-E3008" && d.span == span)
+        {
+            return;
+        }
+        let msg = format!(
+            "cannot send to `{}` — it is a receive-only channel (`<-chan T`)",
+            chan.render()
+        );
+        let notes = vec![
+            "why: a `<-chan T` binding only permits receives; sending to it is invalid Go and the emitted program will not build (issue #89)".to_string(),
+            "fix: declare the channel as `chan T` (bidirectional) or `chan<- T` (send-only) where the send happens".to_string(),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E3008", self.path.clone(), span, msg).with_notes(notes),
+        );
+    }
+
+    fn emit_recv_send_only(&mut self, chan: &Expr, span: Span) {
+        if self
+            .diags
+            .iter()
+            .any(|d| d.code == "HYB-E3008" && d.span == span)
+        {
+            return;
+        }
+        let msg = format!(
+            "cannot receive from `{}` — it is a send-only channel (`chan<- T`)",
+            chan.render()
+        );
+        let notes = vec![
+            "why: a `chan<- T` binding only permits sends; receiving from it is invalid Go and the emitted program will not build (issue #89)".to_string(),
+            "fix: declare the channel as `chan T` (bidirectional) or `<-chan T` (receive-only) where the receive happens".to_string(),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E3008", self.path.clone(), span, msg).with_notes(notes),
+        );
     }
 
     fn emit_close_recv_only(&mut self, chan: &Expr) {

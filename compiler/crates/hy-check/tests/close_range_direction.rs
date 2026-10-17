@@ -175,3 +175,54 @@ fn close_unresolvable_name_no_false_positive() {
         r.diagnostics
     );
 }
+
+#[test]
+fn send_to_recv_only_param_and_closure_rejects_e3008_issue_89() {
+    let r = check(
+        "fn worker(ch <-chan int) {
+           ch <- 1
+         }
+         fn main() {
+           c := make(chan int, 1)
+           var rc <-chan int = c
+           body := fn() {
+             rc <- 1
+           }
+           body()
+           worker(c)
+         }",
+    );
+    assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+    let codes: Vec<&str> = r.diagnostics.iter().map(|d| d.code.as_str()).collect();
+    assert_eq!(codes, vec!["HYB-E3008", "HYB-E3008"]);
+}
+
+#[test]
+fn recv_from_send_only_param_and_select_arms_reject_e3008_issue_89() {
+    let r = check(
+        "import \"fmt\"
+         fn worker(ch chan<- int) {
+           <-ch
+         }
+         fn main() {
+           c := make(chan int, 1)
+           var sc chan<- int = c
+           var rc <-chan int = c
+           v := <-sc
+           fmt.println(v)
+           select {
+           x := <-sc:
+             fmt.println(x)
+           rc <- 1:
+             fmt.println(1)
+           }
+           worker(c)
+         }",
+    );
+    assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+    let codes: Vec<&str> = r.diagnostics.iter().map(|d| d.code.as_str()).collect();
+    assert_eq!(
+        codes,
+        vec!["HYB-E3008", "HYB-E3008", "HYB-E3008", "HYB-E3008"]
+    );
+}
