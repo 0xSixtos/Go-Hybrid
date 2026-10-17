@@ -249,6 +249,28 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
         check_stmt_own_uses(ck, st, stmt, managed);
     }
 
+    // #238: `copy(dst, src)` inside a closure body duplicates reference-bearing
+    // slice elements, so `dst` and `src` share mutable GC storage and a later
+    // `move` of either inside the closure must freeze the other (O5.2) and
+    // inherit non-owned capture/parameter origin (O5.1 / O5.4).
+    let mut calls = Vec::new();
+    if let Stmt::For {
+        kind: Iterate { expr, .. },
+        ..
+    } = stmt
+    {
+        crate::walk::expr_calls(expr, &mut calls);
+    } else {
+        crate::walk::own_calls(stmt, &mut calls);
+    }
+    for cr in &calls {
+        if let Expr::Ident { name, .. } = crate::model::unwrap_parens(cr.callee) {
+            if name == "copy" {
+                ck.record_copy_may_share(st, cr);
+            }
+        }
+    }
+
     match stmt {
         Stmt::Local(l) => {
             for v in &l.values {
