@@ -522,6 +522,14 @@ impl<'a> Checker<'a> {
                         span: *span,
                     });
                 }
+                let head = Self::base_named_type_str(name);
+                if let Some(decl) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
+                    return Some(TypeExpr::Fn {
+                        params: decl.params.clone(),
+                        results: decl.results.iter().map(|r| r.ty.clone()).collect(),
+                        span: *span,
+                    });
+                }
                 None
             }
             Expr::Field { base, name, span } => {
@@ -544,6 +552,14 @@ impl<'a> Checker<'a> {
                     .get(&sname)
                     .and_then(|fs| fs.iter().find(|(n, _)| n == name))
                     .map(|(_, t)| t.clone())
+            }
+            Expr::Index { base, .. } => {
+                let base_ty = self.ty_of_expr(st, base)?;
+                match self.resolve_type_alias(&base_ty) {
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => Some(*elem),
+                    TypeExpr::Map { value, .. } => Some(*value),
+                    _ => None,
+                }
             }
             Expr::StructLit { ty, .. } => ty.clone(),
             Expr::MapLit {
@@ -578,8 +594,10 @@ impl<'a> Checker<'a> {
                 Expr::FnLit { results, .. } => results.first().map(|r| r.ty.clone()),
                 Expr::Ident { name, .. } => {
                     if let Some(b) = self.lookup_binding(st, name) {
-                        if let Some(TypeExpr::Fn { results, .. }) = &b.ty {
-                            return results.first().cloned();
+                        if let Some(ty) = &b.ty {
+                            if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(ty) {
+                                return results.first().cloned();
+                            }
                         }
                         return None;
                     }
@@ -631,13 +649,32 @@ impl<'a> Checker<'a> {
                                 _ => None,
                             },
                             _ => None,
-                        })?;
-                    self.method_decls
-                        .get(&(recv_base, head.to_string()))
-                        .and_then(|f| f.results.first())
-                        .map(|r| r.ty.clone())
+                        });
+                    if let Some(rb) = recv_base {
+                        if let Some(ret) = self
+                            .method_decls
+                            .get(&(rb, head.to_string()))
+                            .and_then(|f| f.results.first())
+                            .map(|r| r.ty.clone())
+                        {
+                            return Some(ret);
+                        }
+                    }
+                    let callee_ty = self.ty_of_expr(st, callee)?;
+                    if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&callee_ty) {
+                        results.first().cloned()
+                    } else {
+                        None
+                    }
                 }
-                _ => None,
+                other => {
+                    let callee_ty = self.ty_of_expr(st, other)?;
+                    if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&callee_ty) {
+                        results.first().cloned()
+                    } else {
+                        None
+                    }
+                }
             },
             _ => None,
         }

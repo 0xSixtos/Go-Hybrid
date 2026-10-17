@@ -260,7 +260,12 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
     // receive-operand rule (HYB-E2008/E3005) must fire here too — the same
     // perimeter discipline as the send-side checks below. Pure type
     // classification: no use/define ordering concerns.
-    ck.check_stmt_recv_operands(st, stmt);    // #238: `copy(dst, src)` inside a closure body duplicates reference-bearing
+    ck.check_stmt_recv_operands(st, stmt);
+
+    // Issue #380: closure bodies sit outside the Tier-0 flat walk, so T23
+    // multi-value binding arity checks (HYB-E2002) must fire here too.
+    ck.check_stmt_multi_value(st, stmt);
+    // #238: `copy(dst, src)` inside a closure body duplicates reference-bearing
     // slice elements, so `dst` and `src` share mutable GC storage and a later
     // `move` of either inside the closure must freeze the other (O5.2) and
     // inherit non-owned capture/parameter origin (O5.1 / O5.4).
