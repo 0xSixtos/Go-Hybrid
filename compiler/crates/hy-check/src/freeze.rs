@@ -38,6 +38,44 @@ pub(crate) fn resolve_alias(st: &FnState, name: &str) -> String {
     cur
 }
 
+/// Transitive connected component of `seed` across both `aliases` (parent and
+/// child directions) and `may_share`, including `seed` itself.
+fn storage_component(st: &FnState, seed: &str) -> HashSet<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut stack = vec![seed.to_string()];
+    while let Some(cur) = stack.pop() {
+        if !seen.insert(cur.clone()) {
+            continue;
+        }
+        if let Some(parent) = st.aliases.get(&cur) {
+            if !seen.contains(parent) {
+                stack.push(parent.clone());
+            }
+        }
+        for (child, parent) in &st.aliases {
+            if parent == &cur && !seen.contains(child) {
+                stack.push(child.clone());
+            }
+        }
+        if let Some(peers) = st.may_share.get(&cur) {
+            for p in peers {
+                if !seen.contains(p) {
+                    stack.push(p.clone());
+                }
+            }
+        }
+    }
+    seen
+}
+
+fn same_or_shared(st: &FnState, a: &str, root_a: &str, b: &str, root_b: &str) -> bool {
+    if root_a == root_b {
+        return true;
+    }
+    let comp = storage_component(st, a);
+    comp.contains(b) || comp.contains(root_b)
+}
+
 impl<'a> Checker<'a> {
     // -----------------------------------------------------------------------
     // Use-after-move / use-after-consume detection
@@ -61,7 +99,10 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let root = resolve_alias(st, &u.name);
-            if let Some((_, _, prior_mv)) = stmt_moves.iter().find(|(_, r, _)| r == &root) {
+            if let Some((_, _, prior_mv)) = stmt_moves
+                .iter()
+                .find(|(mv_name, r, _)| same_or_shared(st, &u.name, &root, mv_name, r))
+            {
                 if reported.insert(format!("{}@{}", u.name, u.span.start.line)) {
                     self.emit_use_after_move(st, u, prior_mv);
                 }
@@ -80,14 +121,13 @@ impl<'a> Checker<'a> {
             }
         }
         // Also check if an earlier `non_via_move` read in the same statement
-        // preceded a `via_move` transfer of the same binding/alias group.
+        // preceded a `via_move` transfer of the same binding/alias/share group.
         for u in uses {
             if !u.via_move {
                 let root = resolve_alias(st, &u.name);
-                if let Some((mv_name, _, mv_info)) = stmt_moves
-                    .iter()
-                    .find(|(_, r, mv)| r == &root && mv.span != u.span)
-                {
+                if let Some((mv_name, _, mv_info)) = stmt_moves.iter().find(|(mv_name, r, mv)| {
+                    same_or_shared(st, &u.name, &root, mv_name, r) && mv.span != u.span
+                }) {
                     if self
                         .lookup_binding(st, mv_name)
                         .map(|b| !b.shape.is_sendable_by_type())
@@ -97,6 +137,39 @@ impl<'a> Checker<'a> {
                         self.emit_use_after_move(st, u, mv_info);
                     }
                 }
+            }
+        }
+    }
+
+    /// Check for additional uses in the same statement when a `CallMode::Consume`
+    /// call (`enc.finish()`, `flate2.finish(enc)`) consumed a handle during this
+    /// statement (`a, b := enc.finish()?, enc.write(...)`, `a, b := enc.finish()?, enc.finish()?`,
+    /// `enc.write(enc.finish()?)`).
+    pub(crate) fn check_same_stmt_consumes(
+        &mut self,
+        st: &FnState,
+        uses: &[Use],
+        stmt_consumes: &[(hy_diag::Span, hy_diag::Span)],
+    ) {
+        let mut reported: HashSet<(String, u32, u32)> = HashSet::new();
+        for u in uses {
+            let Some(mv) = self.lookup_binding(st, &u.name).and_then(|b| b.moved.clone()) else {
+                continue;
+            };
+            if mv.kind != MoveKind::Consumed {
+                continue;
+            }
+            let Some(&(consumed_ident_span, _)) = stmt_consumes
+                .iter()
+                .find(|&&(_, call_span)| call_span == mv.span)
+            else {
+                continue;
+            };
+            if u.span == consumed_ident_span {
+                continue;
+            }
+            if reported.insert((u.name.clone(), u.span.start.line, u.span.start.col)) {
+                self.emit_use_after_move(st, u, &mv);
             }
         }
     }
@@ -199,26 +272,34 @@ impl<'a> Checker<'a> {
         desc: String,
         kind: MoveKind,
     ) {
-        let root = resolve_alias(st, name);
-        let mut members: Vec<String> = vec![name.to_string(), root.clone()];
-        for a in st.aliases.keys() {
-            if resolve_alias(st, a) == root {
-                members.push(a.clone());
+        // #27 / #131: a move freezes every binding in the transitive connected
+        // component of `name` across both `aliases` (parent and child
+        // directions) and `may_share` — including multi-hop chains such as a
+        // pointer borrow embedded in a composite literal (`p := &h; xs := []*holder{p}`).
+        let mut members: Vec<String> = storage_component(st, name).into_iter().collect();
+        members.sort();
+        let mut origins = Vec::new();
+        for m in &members {
+            let o = self.non_owned_origin_of(st, m).map(|(orig, via_share)| {
+                if via_share && !orig.starts_with("a may-share peer of ") {
+                    format!("a may-share peer of {}", orig)
+                } else {
+                    orig
+                }
+            });
+            origins.push(o);
+        }
+        let mut shadow_targets: Vec<(String, usize)> = Vec::new();
+        for m in &members {
+            if let Some(links) = st.shadow_links.get(m) {
+                shadow_targets.extend(links.iter().cloned());
             }
         }
-        // #27: a move also freezes everything that may share the same mutable
-        // GC storage — shallow struct/array copies, re-slices, field/index
-        // projections, and composite literals that embedded a live binding.
-        // The single-parent `aliases` chain above cannot express that graph,
-        // so union in the may-share connected component of every member.
-        let seeded = members.clone();
-        for m in seeded {
-            members.extend(st.share_group(&m));
-        }
-        members.sort();
-        members.dedup();
-        for m in &members {
+        for (m, orig) in members.iter().zip(origins) {
             if let Some(b) = st.env_lookup_mut(m) {
+                if b.non_owned_origin.is_none() {
+                    b.non_owned_origin = orig;
+                }
                 b.moved = Some(MoveInfo {
                     span,
                     kind,
@@ -236,6 +317,42 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        for (outer_name, depth) in shadow_targets {
+            if let Some(b) = st.binding_at_depth_mut(&outer_name, depth) {
+                if b.moved.is_none() {
+                    b.moved = Some(MoveInfo {
+                        span,
+                        kind,
+                        desc: desc.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Process a place expression (assignment target) that may carry a move
+    /// transfer inside its base or index expression (`(move m)["k"] = 1`,
+    /// `m[idx(move x)] = 1`).
+    pub(crate) fn mark_move_in_place(
+        &mut self,
+        st: &mut FnState,
+        place: &hy_syntax::Place,
+    ) {
+        match &place.kind {
+            hy_syntax::PlaceKind::Ident(_) => {}
+            hy_syntax::PlaceKind::Field { base, .. }
+            | hy_syntax::PlaceKind::AddrOf { base } => {
+                self.mark_move_in_place(st, base);
+            }
+            hy_syntax::PlaceKind::Index { base, index } => {
+                self.mark_move_in_place(st, base);
+                self.mark_move_in_value(
+                    st,
+                    index,
+                    format!("the index expression `{}`", index.render()),
+                );
+            }
+        }
     }
 
     /// Process an expression that may carry a move transfer at a
@@ -248,10 +365,47 @@ impl<'a> Checker<'a> {
         for (op, mspan) in ops {
             if let Expr::Ident { name, .. } = op {
                 self.mark_move(st, name, mspan, desc.clone(), MoveKind::Moved);
+            } else if matches!(op, Expr::Field { .. })
+                && matches!(
+                    self.shape_of_expr(st, op),
+                    crate::model::TypeShape::OwnHandle(_)
+                )
+            {
+                if let Some(root) = op.root_ident() {
+                    self.mark_move(st, root, mspan, desc.clone(), MoveKind::Moved);
+                }
             } else {
                 self.check_o54_non_ident_move(st, op, mspan);
             }
         }
+    }
+
+    /// Resolve any non-owned origin (direct or via may-share peers) among the
+    /// `move` operands embedded in `value`.
+    pub(crate) fn moved_non_owned_origin_in_expr(
+        &self,
+        st: &FnState,
+        value: &Expr,
+    ) -> Option<String> {
+        let mut ops = Vec::new();
+        crate::model::collect_move_operands(value, &mut ops);
+        for (op, _) in ops {
+            let root = match op {
+                Expr::Ident { name, .. } => Some(name.as_str()),
+                Expr::Field { .. } => op.root_ident(),
+                _ => None,
+            };
+            if let Some(src) = root {
+                if let Some((o, via_share)) = self.non_owned_origin_of(st, src) {
+                    return Some(if via_share {
+                        format!("a may-share peer of {}", o)
+                    } else {
+                        o
+                    });
+                }
+            }
+        }
+        None
     }
 
     /// O5.4 move-form check (HYB-E3004): `move` applies to whole bindings and
@@ -375,15 +529,20 @@ impl<'a> Checker<'a> {
         //     the situation moving the parameter itself is rejected for.
         //     Peers are scanned in sorted order for deterministic
         //     diagnostics.
-        let mut origin: Option<(String, bool)> = own.map(|o| (o, false));
-        if origin.is_none() {
-            let mut all_peers = st.share_group(name);
-            if root != name {
-                all_peers.extend(st.share_group(&root));
+        let mut origin: Option<(String, bool)> = own.map(|o| {
+            if let Some(rest) = o.strip_prefix("a may-share peer of ") {
+                (rest.to_string(), true)
+            } else {
+                (o, false)
             }
-            let mut peers: Vec<String> = all_peers.into_iter().collect();
+        });
+        if origin.is_none() {
+            let mut peers: Vec<String> = storage_component(st, name).into_iter().collect();
             peers.sort();
             for peer in peers {
+                if peer == name {
+                    continue;
+                }
                 let proot = resolve_alias(st, &peer);
                 let po = self
                     .lookup_binding(st, &peer)
@@ -393,7 +552,11 @@ impl<'a> Checker<'a> {
                             .and_then(|rb| rb.non_owned_origin.clone())
                     });
                 if let Some(po) = po {
-                    origin = Some((po, true));
+                    let clean = po
+                        .strip_prefix("a may-share peer of ")
+                        .unwrap_or(&po)
+                        .to_string();
+                    origin = Some((clean, true));
                     break;
                 }
             }
@@ -413,6 +576,7 @@ impl<'a> Checker<'a> {
         st: &FnState,
         outer_depth: usize,
         loop_stmts: &[(&hy_syntax::Stmt, usize)],
+        events: &std::collections::HashMap<usize, Vec<crate::walk::ScopeEvent>>,
         loop_body: &hy_syntax::Block,
         pre_moved: &HashSet<String>,
         reported_backedge: &mut HashSet<String>,
@@ -432,7 +596,7 @@ impl<'a> Checker<'a> {
                         .iter()
                         .any(|s| s.contains_key(lhs.as_str()));
                     if is_inner
-                        && matches!(crate::model::unwrap_parens(rhs), Expr::Call { .. })
+                        && self.call_returns_fresh_copy(rhs)
                         && st.aliases.contains_key(lhs.as_str())
                     {
                         call_local_roots.insert(resolve_alias(st, lhs));
@@ -465,21 +629,61 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        for (i, (stmt, _)) in loop_stmts.iter().enumerate() {
+        let mut shadow_scopes: Vec<HashSet<String>> = vec![HashSet::new()];
+
+        for (i, (stmt, stmt_idx)) in loop_stmts.iter().enumerate() {
+            if i > 0 {
+                if let Some(evs) = events.get(stmt_idx) {
+                    for ev in evs {
+                        match ev {
+                            crate::walk::ScopeEvent::Push => shadow_scopes.push(HashSet::new()),
+                            crate::walk::ScopeEvent::Pop => {
+                                if shadow_scopes.len() > 1 {
+                                    shadow_scopes.pop();
+                                }
+                            }
+                            crate::walk::ScopeEvent::SelectRecv { names, .. } => {
+                                if let Some(top) = shadow_scopes.last_mut() {
+                                    for n in names.iter() {
+                                        top.insert(n.clone());
+                                    }
+                                }
+                            }
+                            crate::walk::ScopeEvent::MatchBind { name, .. } => {
+                                if let Some(top) = shadow_scopes.last_mut() {
+                                    top.insert(name.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             let mut uses = Vec::new();
             if i == 0 {
-                if let hy_syntax::Stmt::For {
-                    kind: hy_syntax::ForKind::While { cond },
-                    ..
-                } = stmt
-                {
-                    crate::walk::expr_uses(cond, &mut uses);
+                match stmt {
+                    hy_syntax::Stmt::For {
+                        kind: hy_syntax::ForKind::While { cond },
+                        ..
+                    } => {
+                        crate::walk::expr_uses(cond, &mut uses);
+                    }
+                    hy_syntax::Stmt::For {
+                        kind: hy_syntax::ForKind::Range { hi, .. },
+                        ..
+                    } => {
+                        crate::walk::expr_uses(hi, &mut uses);
+                    }
+                    _ => {}
                 }
             } else {
                 crate::walk::own_uses(stmt, &mut uses);
             }
 
             for u in &uses {
+                if shadow_scopes.iter().any(|s| s.contains(&u.name)) {
+                    continue;
+                }
                 let moved = match self.lookup_binding(&iter_st, &u.name) {
                     Some(b) => b.moved.clone(),
                     None => continue,
@@ -494,6 +698,10 @@ impl<'a> Checker<'a> {
                         clear_names.push(a.clone());
                     }
                 }
+                let seeded = clear_names.clone();
+                for m in seeded {
+                    clear_names.extend(iter_st.share_group(&m));
+                }
                 for k in &clear_names {
                     if let Some(b) = iter_st.env_lookup_mut(k) {
                         b.moved = None;
@@ -501,17 +709,137 @@ impl<'a> Checker<'a> {
                 }
             }
 
-            if i > 0 {
-                if let hy_syntax::Stmt::Local(l) = stmt {
-                    for name in &l.names {
-                        iter_st.aliases.remove(name);
-                        if let Some(b) = iter_st.env_lookup_mut(name) {
-                            b.moved = None;
+            match stmt {
+                hy_syntax::Stmt::Local(l) if i > 0 => {
+                    if let Some(top) = shadow_scopes.last_mut() {
+                        for name in &l.names {
+                            top.insert(name.clone());
                         }
                     }
                 }
+                hy_syntax::Stmt::For { kind, .. } => {
+                    if let Some(top) = shadow_scopes.last_mut() {
+                        match kind {
+                            hy_syntax::ForKind::Range { var, .. } => {
+                                top.insert(var.clone());
+                            }
+                            hy_syntax::ForKind::Iterate { vars, .. } => {
+                                for v in vars {
+                                    top.insert(v.clone());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
             }
         }
+    }
+
+    /// True only when `expr` calls a file-local function whose return statements
+    /// all construct a fresh value-element slice via `append([]T{}, ...)` (such
+    /// as corpus 15's `chunk_of`), so the returned slice cannot share mutable
+    /// backing storage with the caller's argument across loop iterations (#194).
+    fn call_returns_fresh_copy(&self, expr: &Expr) -> bool {
+        let Expr::Call { callee, .. } = crate::model::unwrap_parens(expr) else {
+            return false;
+        };
+        let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) else {
+            return false;
+        };
+        let Some(fdecl) = self.fns.get(name.as_str()) else {
+            return false;
+        };
+        if fdecl.results.len() != 1 {
+            return false;
+        }
+        let ret_shape = self.shape_of_type(&fdecl.results[0].ty);
+        let crate::model::TypeShape::Slice(elem) = ret_shape else {
+            return false;
+        };
+        if self.shape_may_share(&elem) || matches!(*elem, crate::model::TypeShape::Unknown) {
+            return false;
+        }
+        let Some(body) = &fdecl.body else {
+            return false;
+        };
+        let mut saw_return = false;
+        if !Self::block_returns_only_fresh_append(body, &mut saw_return) {
+            return false;
+        }
+        saw_return
+    }
+
+    fn block_returns_only_fresh_append(block: &hy_syntax::Block, saw_return: &mut bool) -> bool {
+        for stmt in &block.stmts {
+            match stmt {
+                hy_syntax::Stmt::Return { values, .. } => {
+                    *saw_return = true;
+                    if values.len() != 1 || !Self::is_fresh_empty_slice_append(&values[0]) {
+                        return false;
+                    }
+                }
+                hy_syntax::Stmt::If {
+                    then, otherwise, ..
+                } => {
+                    if !Self::block_returns_only_fresh_append(then, saw_return) {
+                        return false;
+                    }
+                    if let Some(o) = otherwise {
+                        let dummy_block = hy_syntax::Block {
+                            stmts: vec![(**o).clone()],
+                            span: o.span(),
+                        };
+                        if !Self::block_returns_only_fresh_append(&dummy_block, saw_return) {
+                            return false;
+                        }
+                    }
+                }
+                hy_syntax::Stmt::For { body, .. } | hy_syntax::Stmt::Managed { body, .. } => {
+                    if !Self::block_returns_only_fresh_append(body, saw_return) {
+                        return false;
+                    }
+                }
+                hy_syntax::Stmt::Block { block, .. } => {
+                    if !Self::block_returns_only_fresh_append(block, saw_return) {
+                        return false;
+                    }
+                }
+                hy_syntax::Stmt::Match { arms, .. } => {
+                    for arm in arms {
+                        if !Self::block_returns_only_fresh_append(&arm.body, saw_return) {
+                            return false;
+                        }
+                    }
+                }
+                hy_syntax::Stmt::Select { arms, .. } => {
+                    for arm in arms {
+                        if !Self::block_returns_only_fresh_append(&arm.body, saw_return) {
+                            return false;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+
+    fn is_fresh_empty_slice_append(expr: &Expr) -> bool {
+        let Expr::Call { callee, args, .. } = crate::model::unwrap_parens(expr) else {
+            return false;
+        };
+        let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) else {
+            return false;
+        };
+        if name != "append" || args.is_empty() {
+            return false;
+        }
+        matches!(
+            crate::model::unwrap_parens(&args[0].value),
+            Expr::SliceLit { items, .. } if items.is_empty()
+        )
     }
 }
 
