@@ -1,13 +1,10 @@
 # STATUS (for the human — 15 lines max)
 
-- Phase: **MVP DONE + v0.1.0 released + community OPEN** — session-13: **both P0 queue leaders landed (#306, #374) + the first wildcard spike is race-verified (PR #379, W-015)**
-- **#306 landed** (duongynhi000005-oss, fixes #305): if-init eval order aligned with go/spec + same-stmt/package-handle consume & loans (E3003 A1b/A7, E3101 A2, E3102 A3) — 7/7 issue repros reject with exact family codes, 5/5 legal twins accept; loans.rs merge conflict resolved preserving both root_span and main's check_call_const_writes
-- **#374 landed** (Anekenonso, fixes **#361 P0**): wrapped-move expressions (`box{m: move m}.m`, `[]map[string]int{move m}[0]`, `(move s)[0:2]`), GC-field moves through wrappers (E3004 O5.4), may-share rebind origin materialization, and const-composite `move` now report precise E3006 — 4/4 previously-accepting shapes now reject; 5/5 positive controls clean
-- **W-015 SPIKE (PR #379, branch spike/w015-split-fork-join)**: `split s at mid into left, right { ... }` blocks — 3-index full slice expressions parse; E3105 exclusivity + E3106 split-out; forks are fresh roots (no alias/may_share edges); disjointness = Go's own capacity-clip guarantee, zero runtime
-- **Race verification (the M1 evidence)**: emitted Go under `go run -race` x3 — ZERO reports, output `1 14`; corpus 53 + 5 unit pins; VERDICTS.md conflict markers from cbe3f4f resolved (both registration rows kept)
-- Suites at close: cargo workspace **596/0** · corpus **53/53** · differential **FULL (16+37)** · main CI green on the #374 merge (8a114b67)
-- Wildcard M1 verdicts still due **2026-11-01** in discussion #365 — W-015 now has a running artifact to weigh; W-005 (message isolation) is the recommended next spike
-- Wave-2 landing queue continues: #230 (nested closures), #251 (named results), #244, #240/#245, #247, #296, #311/#302, #234, then the const family and emit-lowering batch; new arrivals #366–#377 (sarkermy1125-ship-it tools/fuzz batch), #373 (loop fresh-copy), #364 (docs)
-- Standing work: old-queue rebase assists (#67/#88/#93/#106/#197/#198/#99/#223), tools/kaggle batch, CI registration checks (#325/#330/#333)
-- Last review gate: G3 PASSED 2026-10-13; community review is a standing input to the queue
-- Pending contribution: validate fetched summary job/revision before promotion; 15 local job tests pass; upstream review/CI pending.
+- Phase: **MVP DONE + v0.1.0 released + community OPEN** — session-18: **8 live-soundness PRs landed + the 10-PR tools batch + W-004 spike (#507)** — cargo 867/0, corpus 60/60, differential FULL (17+43)
+- **Soundness wave landed (each: merge-test, isolated target, own suite, corpus, credit merge):** #493 (helper out-param stores, fixes #455), #496 (closure-typed results, fixes #490), #487 (`return m, m` siblings), #484 (pointer-borrow chains, fixes #131), #485 (E2002 fn-values, fixes #380), #473 (blank-ident discard, fixes #460), #483 (lexical capture scoping + scope-aware loans, fixes #449 — 9-piece maintainer graft incl. flat-walk loans rewrite + lexical saved_env), #457 (backedge shadow + method shapes, fixes #456)
+- **9 same-fix credit closes:** #491 #459 #470 #466 #467 #450 #132 #382 (+#132's #132→#484) — every closure carries verification data
+- **Tools batch 10/10 landed** (agents 18-a/18-a2): #364 #333 #387 #383 #316 #388 #403 #325 #299 #423 — registration guard at zero orphans (21 files/18 patterns)
+- **Triage:** 119 open PRs re-triaged by agent 18-b2 (verdict table in worklog): 32 LAND-READY (8 verified), 57 NEEDS-INTEGRATION, 25 SAME-FIX, 3 DUPLICATE, 2 NOT-READY — next queue = the 24 unverified LAND-READY rows
+- **Wildcard:** W-004 spike **PR #507** (phantom witnesses: 0 allocs = baseline; P4 falsifier fired — captures share storage; converges with #370) · W-019 (#462)/W-020 (#417) intake-acked in-window · W-021 born (#375, spike #488's 3 descriptors.md hazards = P0-adjacent) · W-018 triaged-accepted (2 artifacts) · 9 gated spike CI runs approved · M1 verdicts 2026-11-01 in #365 (21 rows, 10 artifacts)
+- CI quota healthy (zero zero-job failures); zero-job recurrence stays closed
+- Standing work: M1 verdict drafts for #365 (none written yet — the real next task); 24 unverified LAND-READY PRs; W-002/3/6/8/10/11/13/16 outreach; #379 W-015 spike needs rebase repair (walk.rs/parse_all.rs/VERDICTS.md)
