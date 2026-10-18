@@ -778,7 +778,7 @@ impl<'a> Checker<'a> {
     ) {
         if let Some(elem_ty) = self.chan_elem_ty(st, chan) {
             let desc = format!("channel `{}`", chan.render());
-            self.check_const_overflow_init(&desc, &elem_ty, value);
+            self.check_const_overflow_init(&desc, &elem_ty, value, Some(st));
         }
     }
 
