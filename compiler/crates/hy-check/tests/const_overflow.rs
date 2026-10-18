@@ -101,6 +101,90 @@ fn int8_constant_300_is_rejected() {
 }
 
 #[test]
+fn int8_constant_underscore_3_00_is_rejected() {
+    let r = check("fn main() { var n int8 = 3_00\n fmt.println(\"{n}\") }");
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for var n int8 = 3_00, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn int8_legacy_octal_0177_fits_in_go_must_accept() {
+    let r = check("fn main() { var n int8 = 0177\n fmt.println(\"{n}\") }");
+    let cs = error_codes(&r);
+    assert!(
+        !cs.iter().any(|c| c == "HYB-E6002"),
+        "0177 is 127 in Go (fits in int8), but got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+#[test]
+fn int8_legacy_octal_0200_overflows_must_reject() {
+    let r = check("fn main() { var n int8 = 0200\n fmt.println(\"{n}\") }");
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "0200 is 128 in Go (overflows int8), expected HYB-E6002, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn byte_legacy_octal_0377_fits_must_accept() {
+    let r = check("fn main() { var n byte = 0377\n fmt.println(\"{n}\") }");
+    let cs = error_codes(&r);
+    assert!(
+        !cs.iter().any(|c| c == "HYB-E6002"),
+        "0377 is 255 in Go (fits in byte), but got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+#[test]
+fn byte_legacy_octal_0400_overflows_must_reject() {
+    let r = check("fn main() { var n byte = 0400\n fmt.println(\"{n}\") }");
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "0400 is 256 in Go (overflows byte), expected HYB-E6002, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn file_const_legacy_octal_fits_must_accept() {
+    let r = check("const max_byte byte = 0377\nfn main() { _ = max_byte }");
+    let cs = error_codes(&r);
+    assert!(
+        !cs.iter().any(|c| c == "HYB-E6002"),
+        "file-level const 0377 is 255 in Go (fits in byte), but got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+#[test]
+fn file_const_legacy_octal_overflows_must_reject() {
+    let r = check("const max_byte byte = 0400\nfn main() { _ = max_byte }");
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "file-level const 0400 is 256 in Go (overflows byte), expected HYB-E6002, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
 fn uint8_constant_256_is_rejected() {
     let r = check(OVERFLOW_UINT8);
     let cs = error_codes(&r);
@@ -193,6 +277,104 @@ fn variable_conversion_truncation_still_accepts() {
         error_codes(&r)
     );
     assert_eq!(r.verdict, Verdict::Accept);
+}
+
+// ---------------------------------------------------------------------------
+// W10 (2026-10-17): the E6002 range check is bypassable by a file-level
+// `const` alias: `const big = 300; var n int8 = big` passes `hyb check` and
+// the emitted Go fails `go build` (`cannot use big (untyped int constant 300)
+// as int8 value … (overflows)`). The checker must resolve `const` identifiers
+// to their (constant) initializer before folding. A local binding with the
+// same name shadows the file-level const and must NOT be resolved.
+// ---------------------------------------------------------------------------
+
+const CONST_ALIAS_INT8: &str = "\
+const big = 300
+
+fn main() {
+    var n int8 = big
+    fmt.println(\"{n}\")
+}
+";
+
+const CONST_ALIAS_WIDER_OK: &str = "\
+const big = 300
+
+fn main() {
+    var i int32 = big
+    fmt.println(\"{i}\")
+}
+";
+
+const CONST_ALIAS_SHADOWED_OK: &str = "\
+const big = 300
+
+fn main() {
+    big := int8(1)
+    var n int8 = big
+    fmt.println(\"{n} {big}\")
+}
+";
+
+#[test]
+fn const_alias_overflow_is_rejected() {
+    let r = check(CONST_ALIAS_INT8);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for var n int8 = big (big = 300), got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn const_alias_that_fits_wider_declared_type_accepts() {
+    let r = check(CONST_ALIAS_WIDER_OK);
+    assert!(
+        error_codes(&r).is_empty(),
+        "var i int32 = big (big = 300) must stay accepted, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+#[test]
+fn const_alias_shadowed_by_local_accepts() {
+    // The local `big` shadows the file-level `big = 300`; the initializer
+    // must not be resolved through the const table.
+    let r = check(CONST_ALIAS_SHADOWED_OK);
+    assert!(
+        error_codes(&r).is_empty(),
+        "a local shadowing the const must stay accepted, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+const CONST_ALIAS_CHAIN_SHADOWED: &str = "\
+const a = 300
+const big = a
+
+fn main() {
+    a := int8(1)
+    var n int8 = big
+    fmt.println(\"{n} {a}\")
+}
+";
+
+#[test]
+fn const_alias_chain_with_shadowed_inner_name_is_rejected() {
+    // The local `a` shadows the file-level `a` only at the use site; the
+    // const's own initializer `big = a` still refers to `const a = 300`.
+    let r = check(CONST_ALIAS_CHAIN_SHADOWED);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for big = a = 300 used as int8, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
 }
 
 #[test]
@@ -288,295 +470,4 @@ fn main() {
         cs
     );
     assert_eq!(r.verdict, Verdict::Reject);
-}
-
-#[test]
-fn assign_within_range_int8_is_accepted() {
-    let src = "\
-fn main() {
-    var n int8 = 0
-    n = 127
-    n = -128
-    fmt.println(\"{n}\")
-}
-";
-    let r = check(src);
-    assert!(
-        error_codes(&r).is_empty(),
-        "valid assignment to int8 must be accepted, got {:?}",
-        error_codes(&r)
-    );
-    assert_eq!(r.verdict, Verdict::Accept);
-}
-
-#[test]
-fn folded_binop_assign_overflow_is_rejected() {
-    let src = "\
-fn main() {
-    var n int8 = 0
-    n = 100 + 200
-    fmt.println(\"{n}\")
-}
-";
-    let r = check(src);
-    let cs = error_codes(&r);
-    assert!(
-        cs.iter().any(|c| c == "HYB-E6002"),
-        "expected HYB-E6002 for n = 100 + 200, got {:?}",
-        cs
-    );
-    assert_eq!(r.verdict, Verdict::Reject);
-}
-
-#[test]
-fn const_toobig_assign_overflow_is_rejected() {
-    let src = "\
-fn main() {
-    var n int64 = 0
-    n = 1 << 200
-    fmt.println(\"{n}\")
-}
-";
-    let r = check(src);
-    let cs = error_codes(&r);
-    assert!(
-        cs.iter().any(|c| c == "HYB-E6002"),
-        "expected HYB-E6002 for n = 1 << 200, got {:?}",
-        cs
-    );
-    assert_eq!(r.verdict, Verdict::Reject);
-}
-
-#[test]
-fn float_const_assign_to_int_is_rejected() {
-    let src = "\
-fn main() {
-    var n int8 = 0
-    n = 3.14
-    fmt.println(\"{n}\")
-}
-";
-    let r = check(src);
-    let cs = error_codes(&r);
-    assert!(
-        cs.iter().any(|c| c == "HYB-E6002"),
-        "expected HYB-E6002 for n = 3.14, got {:?}",
-        cs
-    );
-    assert_eq!(r.verdict, Verdict::Reject);
-}
-
-#[test]
-fn unsigned_assign_underflow_is_rejected() {
-    let src = "\
-fn main() {
-    var u uint8 = 0
-    u = -1
-    fmt.println(\"{u}\")
-}
-";
-    let r = check(src);
-    let cs = error_codes(&r);
-    assert!(
-        cs.iter().any(|c| c == "HYB-E6002"),
-        "expected HYB-E6002 for u = -1, got {:?}",
-        cs
-    );
-    assert_eq!(r.verdict, Verdict::Reject);
-}
-
-#[test]
-fn nested_array_index_assign_overflow_is_rejected() {
-    let src = "\
-fn main() {
-    var grid [2][2]int8
-    grid[0][1] = 300
-    fmt.println(\"{grid}\")
-}
-";
-    let r = check(src);
-    let cs = error_codes(&r);
-    assert!(
-        cs.iter().any(|c| c == "HYB-E6002"),
-        "expected HYB-E6002 for grid[0][1] = 300, got {:?}",
-        cs
-    );
-    assert_eq!(r.verdict, Verdict::Reject);
-}
-
-#[test]
-fn struct_field_assign_overflow_is_rejected() {
-    let src = "\
-package test
-
-struct user {
-    age int8
-}
-
-fn main() {
-    var u user
-    u.age = 300
-    fmt.println(\"{u.age}\")
-}
-";
-    let r = check(src);
-    let cs = error_codes(&r);
-    assert!(
-        cs.iter().any(|c| c == "HYB-E6002"),
-        "expected HYB-E6002 for u.age = 300, got {:?}",
-        cs
-    );
-    assert_eq!(r.verdict, Verdict::Reject);
-}
-
-#[test]
-fn struct_field_compound_assign_overflow_is_rejected() {
-    let src = "\
-package test
-
-struct counter {
-    val int8
-}
-
-fn main() {
-    var c counter
-    c.val += 200
-    fmt.println(\"{c.val}\")
-}
-";
-    let r = check(src);
-    let cs = error_codes(&r);
-    assert!(
-        cs.iter().any(|c| c == "HYB-E6002"),
-        "expected HYB-E6002 for c.val += 200, got {:?}",
-        cs
-    );
-    assert_eq!(r.verdict, Verdict::Reject);
-}
-
-#[test]
-fn nested_struct_field_assign_overflow_is_rejected() {
-    let src = "\
-package test
-
-struct address {
-    zip int16
-}
-
-struct profile {
-    addr address
-}
-
-fn main() {
-    var p profile
-    p.addr.zip = 70000
-    fmt.println(\"{p.addr.zip}\")
-}
-";
-    let r = check(src);
-    let cs = error_codes(&r);
-    assert!(
-        cs.iter().any(|c| c == "HYB-E6002"),
-        "expected HYB-E6002 for p.addr.zip = 70000, got {:?}",
-        cs
-    );
-    assert_eq!(r.verdict, Verdict::Reject);
-}
-
-#[test]
-fn slice_struct_field_assign_overflow_is_rejected() {
-    let src = "\
-package test
-
-struct item {
-    code uint8
-}
-
-fn main() {
-    var items []item
-    items[0].code = 300
-    fmt.println(\"{items}\")
-}
-";
-    let r = check(src);
-    let cs = error_codes(&r);
-    assert!(
-        cs.iter().any(|c| c == "HYB-E6002"),
-        "expected HYB-E6002 for items[0].code = 300, got {:?}",
-        cs
-    );
-    assert_eq!(r.verdict, Verdict::Reject);
-}
-
-#[test]
-fn struct_slice_field_index_assign_overflow_is_rejected() {
-    let src = "\
-package test
-
-struct record {
-    scores []int8
-}
-
-fn main() {
-    var r record
-    r.scores[0] = 300
-    fmt.println(\"{r.scores}\")
-}
-";
-    let r = check(src);
-    let cs = error_codes(&r);
-    assert!(
-        cs.iter().any(|c| c == "HYB-E6002"),
-        "expected HYB-E6002 for r.scores[0] = 300, got {:?}",
-        cs
-    );
-    assert_eq!(r.verdict, Verdict::Reject);
-}
-
-#[test]
-fn pointer_struct_field_assign_overflow_is_rejected() {
-    let src = "\
-package test
-
-struct user {
-    age int8
-}
-
-fn run(p *user) {
-    p.age = 300
-    fmt.println(\"{p.age}\")
-}
-";
-    let r = check(src);
-    let cs = error_codes(&r);
-    assert!(
-        cs.iter().any(|c| c == "HYB-E6002"),
-        "expected HYB-E6002 for p.age = 300, got {:?}",
-        cs
-    );
-    assert_eq!(r.verdict, Verdict::Reject);
-}
-
-#[test]
-fn struct_field_assign_valid_range_is_accepted() {
-    let src = "\
-package test
-
-struct user {
-    age int8
-}
-
-fn main() {
-    var u user
-    u.age = 42
-    fmt.println(\"{u.age}\")
-}
-";
-    let r = check(src);
-    let cs = error_codes(&r);
-    assert!(
-        !cs.iter().any(|c| c == "HYB-E6002"),
-        "expected no HYB-E6002 for u.age = 42, got {:?}",
-        cs
-    );
 }

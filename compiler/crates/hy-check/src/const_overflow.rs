@@ -13,15 +13,22 @@
 //! conversion (SPEC-LANGUAGE X4), and the conversion form `int8(x)` is
 //! unaffected.
 
-use crate::model::{unwrap_parens, Checker};
+use crate::model::{unwrap_parens, Checker, FnState};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{BinOp, Expr, LitKind, TypeExpr, UnOp};
+use std::collections::HashMap;
 
 impl<'a> Checker<'a> {
     /// When `ty` is a fixed-width integer and `value` is an integer
     /// constant (literal or folded constant expression) outside that
     /// type's range, or a float constant, emit HYB-E6002.
-    pub(crate) fn check_const_overflow_init(&mut self, name: &str, ty: &TypeExpr, value: &Expr) {
+    pub(crate) fn check_const_overflow_init(
+        &mut self,
+        name: &str,
+        ty: &TypeExpr,
+        value: &Expr,
+        st: Option<&FnState>,
+    ) {
         let TypeExpr::Named {
             name: ty_name,
             span: ty_span,
@@ -32,7 +39,7 @@ impl<'a> Checker<'a> {
         let Some((lo, hi)) = fixed_width_int_range(ty_name) else {
             return;
         };
-        match const_int_fold(value) {
+        match const_int_fold_with(value, &self.const_values, 0, st) {
             ConstFold::NotConst => {}
             ConstFold::TooBig => {
                 let span = value.span();
@@ -272,6 +279,19 @@ pub(crate) enum ConstFold {
 /// and `1 << 10` before the range check, so they overflow identically).
 /// Anything else (idents, calls) is `NotConst`.
 pub(crate) fn const_int_fold(e: &Expr) -> ConstFold {
+    const_int_fold_with(e, &HashMap::new(), 0, None)
+}
+
+/// Like [`const_int_fold`], but resolves file-level `const` identifiers to
+/// their (constant) initializers: `const big = 300; var n int8 = big` must
+/// be rejected like the literal. A local binding with the same name shadows
+/// the file-level const, so `st` is consulted before resolving.
+pub(crate) fn const_int_fold_with(
+    e: &Expr,
+    consts: &HashMap<String, &Expr>,
+    depth: u32,
+    st: Option<&FnState>,
+) -> ConstFold {
     match unwrap_parens(e) {
         Expr::Lit {
             kind: LitKind::Int(s),
@@ -280,18 +300,34 @@ pub(crate) fn const_int_fold(e: &Expr) -> ConstFold {
             Some(v) => ConstFold::Val(v),
             None => ConstFold::NotConst,
         },
+        Expr::Ident { name, .. } => {
+            if let Some(st) = st {
+                if st.env_lookup(name).is_some() {
+                    return ConstFold::NotConst;
+                }
+            }
+            if depth < 16 {
+                if let Some(v) = consts.get(name) {
+                    // The function state guards the identifier at the *use
+                    // site* only: a const's own initializer refers to the
+                    // file-level scope, so expand it without `st`.
+                    return const_int_fold_with(v, consts, depth + 1, None);
+                }
+            }
+            ConstFold::NotConst
+        }
         Expr::Unary {
             op: UnOp::Neg,
             operand,
             ..
-        } => match const_int_fold(operand) {
+        } => match const_int_fold_with(operand, consts, depth + 1, st) {
             ConstFold::Val(v) => v.checked_neg().map(ConstFold::Val).unwrap_or(ConstFold::TooBig),
             ConstFold::NotConst => ConstFold::NotConst,
             ConstFold::TooBig => ConstFold::TooBig,
         },
         Expr::Binary { op, lhs, rhs, .. } => {
-            let l = const_int_fold(lhs);
-            let r = const_int_fold(rhs);
+            let l = const_int_fold_with(lhs, consts, depth + 1, st);
+            let r = const_int_fold_with(rhs, consts, depth + 1, st);
             fold_bin(*op, l, r)
         }
         _ => ConstFold::NotConst,
@@ -433,19 +469,29 @@ fn integer_of_float(f: f64) -> String {
 }
 
 fn parse_int_lit(s: &str) -> Option<i128> {
-    let s = s.as_bytes();
-    if s.is_empty() {
+    let clean: String = s.chars().filter(|c| *c != '_').collect();
+    if clean.is_empty() {
         return None;
     }
-    if s.len() >= 2 && s[0] == b'0' {
-        match s[1].to_ascii_lowercase() {
-            b'x' => return i128::from_str_radix(std::str::from_utf8(&s[2..]).ok()?, 16).ok(),
-            b'b' => return i128::from_str_radix(std::str::from_utf8(&s[2..]).ok()?, 2).ok(),
-            b'o' => return i128::from_str_radix(std::str::from_utf8(&s[2..]).ok()?, 8).ok(),
-            _ => {}
+    let s = clean.as_str();
+    let (radix, digits) = if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        (16, rest)
+    } else if let Some(rest) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
+        (2, rest)
+    } else if let Some(rest) = s.strip_prefix("0o").or_else(|| s.strip_prefix("0O")) {
+        (8, rest)
+    } else if s.len() > 1 && s.starts_with('0') {
+        if s.chars().any(|c| c == '8' || c == '9') {
+            return None;
         }
+        (8, s)
+    } else {
+        (10, s)
+    };
+    if digits.is_empty() {
+        return None;
     }
-    i128::from_str_radix(std::str::from_utf8(s).ok()?, 10).ok()
+    i128::from_str_radix(digits, radix).ok()
 }
 
 #[cfg(test)]
