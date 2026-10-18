@@ -7,6 +7,70 @@ from pathlib import Path
 ENTRY = Path(__file__).with_name("job.py")
 
 
+class ReadTargetArgumentTests(unittest.TestCase):
+    """The CLI must pass the requested run/kernel, without contacting services."""
+
+    def invoke(self, *arguments):
+        import contextlib
+        import importlib.util
+        import io
+        from unittest.mock import patch
+
+        spec = importlib.util.spec_from_file_location("job_target_fixture", ENTRY)
+        job = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(job)
+        output = io.StringIO()
+        with patch.object(sys, "argv", [str(ENTRY), *arguments]), \
+                patch.object(job, "kaggle_status") as status, \
+                patch.object(job, "actions_watch") as watch, \
+                contextlib.redirect_stdout(output), \
+                contextlib.redirect_stderr(output):
+            try:
+                job.main()
+                code = 0
+            except SystemExit as exc:
+                code = exc.code
+        return code, status, watch, output.getvalue()
+
+    def test_explicit_kaggle_slug_reaches_status(self):
+        code, status, watch, _ = self.invoke("kaggle", "status", "owner/kernel")
+        self.assertEqual(code, 0)
+        status.assert_called_once_with("owner/kernel")
+        watch.assert_not_called()
+
+    def test_explicit_actions_run_reaches_watch(self):
+        code, status, watch, _ = self.invoke("actions", "watch", "123456789")
+        self.assertEqual(code, 0)
+        watch.assert_called_once_with(123456789)
+        status.assert_not_called()
+
+    def test_omitted_targets_preserve_default_selection(self):
+        for tier, action in (("kaggle", "status"), ("actions", "watch")):
+            with self.subTest(tier=tier):
+                code, status, watch, _ = self.invoke(tier, action)
+                self.assertEqual(code, 0)
+                selected = status if tier == "kaggle" else watch
+                selected.assert_called_once_with(None)
+
+    def test_surplus_arguments_fail_before_any_service_call(self):
+        for tier, action, target in (("kaggle", "status", "owner/kernel"),
+                                     ("actions", "watch", "123456789")):
+            with self.subTest(tier=tier):
+                code, status, watch, _ = self.invoke(tier, action, target, "unexpected")
+                self.assertEqual(code, 2)
+                status.assert_not_called()
+                watch.assert_not_called()
+
+    def test_invalid_actions_run_reports_usage_before_service_call(self):
+        for target in ("invalid", "0", "-1"):
+            with self.subTest(target=target):
+                code, status, watch, output = self.invoke("actions", "watch", target)
+                self.assertEqual(code, 2)
+                self.assertIn("positive integer", output)
+                status.assert_not_called()
+                watch.assert_not_called()
+
+
 class ActionsDispatchArgumentTests(unittest.TestCase):
     def call_dispatch(self, *args):
         return subprocess.run(
