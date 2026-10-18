@@ -118,6 +118,7 @@ direction: a primitive-element slice copies by value and shares nothing.
 | 43 | 43-copy-ref-element-alias-freeze | REJECT | A1b | `copy(dst, src)` on a `[]map[...]` makes `dst[i]` and `src[i]` the same map; `task worker(move dst, done)` did not freeze `src`, so the later write through `src` was use-after-move (issue #178; the root cause is a missing `copy` arm in `process_call`, plus `make([]T, n)` dropping its element shape) |
 | 44 | 44-copy-primitive-element-control | ACCEPT | — | the FALSE-POSITIVE GUARD for 43: `copy(dst, src)` on `[]int` copies by value and shares no GC storage, so no may-share edge may be recorded |
 | 45 | 45-composite-literal-embeds-shared-map | REJECT | A1c | O4.6 deep sendability: a fresh `[]T{shared}` composite literal embedding a live shared map at a spawn is not laundered by the wrap (PR #176, maintainer-integrated as #45) |
+| 53 | 53-array-slice-backing-freeze | REJECT | A1b | slicing an addressable array (`s := a[:]` on `[4]int`, also `b.data[:]`, `append(a[0:1], x)`, overlapping windows) shares the array's backing storage even when the element is a primitive; `shape_may_share` only recurses into reference elements, so `move s` froze `s` and not `a`, `hyb check` reported 0 diagnostics, and `go run -race` reported `WARNING: DATA RACE` on `s[0]` vs `a[0]`. A value copy (`b := a`) and `clone(a)[:]` stay unlinked |
 
 **Distribution: ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 34 — 49 programs.**
 
@@ -592,26 +593,6 @@ composite-`const` locals, select-receive names and match bindings stay
 outside this registration (the same Go error family, tracked separately);
 unread `for ... in` bindings are handled at emission (issue #139).
 
-<<<<<<< HEAD
-## Additive corpus registration — 2026-10-17: shadowed predeclared types (#326)
-
-One case derived from issue #326 before running this fixture. It pins the
-soundness rule that user-defined structs or type aliases shadowing predeclared
-primitive names (e.g. `struct rune { m map[string]string }`) must resolve to the
-user struct rather than falling through to primitive type shape. When passed
-across tasks, non-sendable contents (such as maps or slices) must be rejected
-with `HYB-E3001` (A1c sendability).
-
-| # | program | verdict | rule | diagnostic | rationale |
-|---|---------|---------|------|------------|-----------|
-| 52 | 52-shadow-predeclared-struct-reject | REJECT | A1c | `HYB-E3001` | `struct rune { m map[string]string }` passed across tasks must reject because the shadowed struct contains a mutable map |
-
-With this addition the registered corpus is **51 programs:
-ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 36** (harness recompute: 51/51
-verdict agreement; tripwire 2/51 = 3.9% verdict-level, 3/51 = 5.9%
-as-written — not fired).
-
-=======
 ## Additive corpus registration — 2026-10-17: 3-argument slice `make` (#353)
 
 One case added WITH its fix: `make([]T, len, cap)` is valid Go, was
@@ -626,8 +607,67 @@ remaining rejection.
 |---|---------|---------|------|------------|-----------|
 | 51 | 51-make-slice-cap | ACCEPT | — | — | `make([]int, 3, 10)` is valid Go; zero check-sites, a fresh local |
 
-With this addition the corpus on disk is **51 programs: ACCEPT 13 ·
-ACCEPT-MANAGED 2 · REJECT 36** (recomputed from the files'
+With this addition the corpus on disk stood at **51 programs:
+ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 36** (recomputed from the files'
 `EXPECTED-VERDICT` markers; #50 carries its registration with its own fix
-PR).
->>>>>>> main
+PR; the registration below raises the total to 52).
+
+## Additive corpus registration — 2026-10-17: shadowed predeclared types (#326)
+
+One case derived from issue #326 before running this fixture. It pins the
+soundness rule that user-defined structs or type aliases shadowing predeclared
+primitive names (e.g. `struct rune { m map[string]string }`) must resolve to the
+user struct rather than falling through to primitive type shape. When passed
+across tasks, non-sendable contents (such as maps or slices) must be rejected
+with `HYB-E3001` (A1c sendability).
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 52 | 52-shadow-predeclared-struct-reject | REJECT | A1c | `HYB-E3001` | `struct rune { m map[string]string }` passed across tasks must reject because the shadowed struct contains a mutable map |
+
+With this addition the registered corpus is **52 programs:
+ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 37** (harness recompute: 52/52
+verdict agreement; tripwire 2/52 = 3.8% verdict-level, 3/52 = 5.8%
+as-written — not fired).
+
+## Additive corpus registration — 2026-10-17: field store materializes may_share (#392)
+
+`h.m = shared` never created the edge from the composite to the live RHS root,
+so `move h` froze `h` but not `shared` and the emitted Go raced.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 54 | 54-field-store-alias-at-spawn | REJECT | A1b | `HYB-E3003` | `var h holder; h.m = shared` then `task worker(move h)` then a write to `shared` |
+| 55 | 55-field-store-fresh-at-spawn | ACCEPT | — | — | the over-rejection guard: a FRESH map literal stored into the field shares nothing |
+| 56 | 56-defer-live-reference-at-spawn | REJECT | A1b | `HYB-E3003` | `defer report(shared)` then `task worker(move shared)` |
+| 57 | 57-defer-live-reference-at-send | REJECT | A1b | `HYB-E3003` | the send twin: `ch <- move shared` |
+| 58 | 58-defer-live-reference-via-alias | REJECT | A1b | `HYB-E3003` | the deferred call names the ALIAS, the move transfers the ORIGIN |
+| 59 | 59-rebind-forgets-defer-capture | REJECT | A1b | `HYB-E3003` | rebinding the name must not forget the captured storage |
+| 60 | 60-rebind-without-defer-control | ACCEPT | — | — | the over-rejection guard: a rebind with no defer and no boundary |
+
+## Additive corpus registration — 2026-10-17: malformed string escapes fail closed
+
+One case registered WITH its fix. It pins the lexer's fail-closed contract:
+a malformed `\x`/`\u`/`\U` escape in an interpreted string (LX7's Go escape
+set) must reject with `HYB-E0002`, never pass silently with a corrupted
+value. Before the fix `"\u{41}"` was ACCEPTED with 0 diagnostics and lexed
+to the value `"41}"` (the `\u{` was dropped, the rest leaked as literal
+text); `"\xG1"` became `"1"`; `"\u12G4"` became `"4"`. Root cause:
+`escape_char`'s hex-digit error paths returned `None` without recording
+the diagnostic both callers assume, so the string lexer silently kept one
+bumped char verbatim. The brace form after `\u` is LX6 rune-literal
+syntax; in a string it is a malformed escape, and the diagnostic says so.
+Surrogates (`\ud800`) and values above U+10FFFF (`\U0011FFFF`) are the
+same family and reject likewise (unit tests in `hy-syntax/src/lexer.rs`:
+six malformed cases plus the valid-escape over-rejection guard). The new
+diagnostics carry `tier0_rule` `LX6`/`LX7` so this harness can join on
+them; no registry entry changes (HYB-E0002 keeps its parse-error slot).
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 61 | 61-string-escape-fail-closed | REJECT | LX7 | `HYB-E0002` | `s := "\u{41}"` — the LX6 rune form in a string is a malformed LX7 escape; it must be named, not silently dropped |
+
+With this addition the registered corpus is **61 programs:
+ACCEPT 15 · ACCEPT-MANAGED 2 · REJECT 44**. The file contains no `managed`
+block; the harness's historical as-written set {01, 03, 04} is unchanged,
+so the tripwire ratios only move with the larger total.

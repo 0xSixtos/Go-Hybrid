@@ -66,12 +66,24 @@ impl<'a> Checker<'a> {
         if depth > Self::MAX_TYPE_RESOLUTION_DEPTH {
             return TypeShape::Unknown;
         }
+        // Generic instantiation `lru_cache[k, v]` folds its type arguments
+        // into the name string (TypeExpr has no type-argument node — the
+        // parser contract gap noted in parse_type). The struct and alias
+        // tables carry the BASE name, so resolve through the head
+        // (`base_named_type_str`, the same fold `base_named_type` applies
+        // for method receivers). Everything below keeps matching the full
+        // name: for a non-generic name the base IS the name, so this is a
+        // pure widening — a generic receiver like `fn (c *box[t]) m()`
+        // used to classify as `Unknown` and now reaches the declared
+        // struct's field shapes (issue #411: `for i, e in c.order` must
+        // see `c.order` as the declared `[]k`, not an opaque Unknown).
+        let base = Self::base_named_type_str(name);
         // User structs in package scope take precedence over predeclared types.
-        if self.structs.contains_key(name) {
-            return TypeShape::Struct(Some(name.to_string()));
+        if self.structs.contains_key(base) {
+            return TypeShape::Struct(Some(base.to_string()));
         }
         // User type aliases take precedence over predeclared types.
-        if let Some(target) = self.type_aliases.get(name) {
+        if let Some(target) = self.type_aliases.get(base) {
             return self.shape_of_type_depth(target, depth + 1);
         }
         match name {
@@ -109,7 +121,10 @@ impl<'a> Checker<'a> {
         if depth > 16 {
             return true;
         }
-        if shape.is_reference_alias() || shape.is_handle() {
+        if shape.is_reference_alias()
+            || shape.is_handle()
+            || matches!(shape, TypeShape::Closure)
+        {
             return true;
         }
         match shape {
@@ -301,11 +316,14 @@ impl<'a> Checker<'a> {
                     // the type argument; defaults Unknown (fail-closed at
                     // boundaries, O4.9). See the TECH DEBT note in foreign.rs.
                     "make" => self.make_shape(args),
-                    "append" => args
+                    "append" | "some" => args
                         .first()
                         .map(|a| self.shape_of_expr(st, &a.value))
                         .unwrap_or(TypeShape::Unknown),
-                    "len" | "cap" | "min" | "max" => TypeShape::Primitive,
+                    "len" | "cap" | "min" | "max" | "int" | "int8" | "int16" | "int32"
+                    | "int64" | "uint" | "uint8" | "uint16" | "uint32" | "uint64" | "uintptr"
+                    | "float32" | "float64" | "bool" | "byte" | "rune" => TypeShape::Primitive,
+                    "string" => TypeShape::Str,
                     // `new(T)` is Go's `new`: it returns `*T` — a POINTER to
                     // zeroed, mutable storage — never a primitive copy. Typing
                     // it Primitive made it sendable-by-type (class 1), so
@@ -328,12 +346,15 @@ impl<'a> Checker<'a> {
                         };
                         TypeShape::Pointer(Box::new(pointee))
                     }
-                    _ => self
-                        .fns
-                        .get(name.as_str())
-                        .and_then(|f| f.results.first())
-                        .map(|r| self.shape_of_type(&r.ty))
-                        .unwrap_or(TypeShape::Unknown),
+                    _ => {
+                        let head = Self::base_named_type_str(name);
+                        self.fns
+                            .get(name.as_str())
+                            .or_else(|| self.fns.get(head))
+                            .and_then(|f| f.results.first())
+                            .map(|r| self.shape_of_type(&r.ty))
+                            .unwrap_or(TypeShape::Unknown)
+                    }
                 }
             }
             Expr::Field { base, name, .. } => {
@@ -343,11 +364,70 @@ impl<'a> Checker<'a> {
                         return foreign::package_result(b, name);
                     }
                 }
-                let recv = self.shape_of_expr(st, base);
-                match receiver_type_name(&recv) {
-                    Some(t) => foreign::method_result(&t, name),
-                    None => TypeShape::Unknown,
+                let head = Self::base_named_type_str(name);
+                if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
+                    if self.lookup_binding(st, root).is_none() {
+                        let full = format!("{}.{}", root, head);
+                        if let Some(f) = self.fns.get(full.as_str()) {
+                            return f
+                                .results
+                                .first()
+                                .map(|r| self.shape_of_type(&r.ty))
+                                .unwrap_or(TypeShape::Unknown);
+                        }
+                    }
                 }
+                // Issue #411/H2: user-defined methods (`c.keys()`).
+                let recv = self.shape_of_expr(st, base);
+                if let Some(recv_base) = self
+                    .ty_of_expr(st, base)
+                    .map(|t| self.resolve_type_alias(&t))
+                    .and_then(|t| Self::base_named_type(&t))
+                    .or_else(|| match &recv {
+                        TypeShape::Struct(Some(s)) => {
+                            Some(Self::base_named_type_str(s).to_string())
+                        }
+                        TypeShape::Pointer(inner) => match &**inner {
+                            TypeShape::Struct(Some(s)) => {
+                                Some(Self::base_named_type_str(s).to_string())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    })
+                {
+                    if let Some(f) = self.method_decls.get(&(recv_base, head.to_string())) {
+                        if let Some(r) = f.results.first() {
+                            return self.shape_of_type(&r.ty);
+                        }
+                    }
+                }
+                let recv = self.shape_of_expr(st, base);
+                if let Some(t) = receiver_type_name(&recv) {
+                    return foreign::method_result(&t, name);
+                }
+                let head = Self::base_named_type_str(name);
+                let recv_base = self
+                    .ty_of_expr(st, base)
+                    .map(|t| self.resolve_type_alias(&t))
+                    .and_then(|t| Self::base_named_type(&t))
+                    .or_else(|| match &recv {
+                        TypeShape::Struct(Some(s)) => {
+                            Some(Self::base_named_type_str(s).to_string())
+                        }
+                        TypeShape::Pointer(inner) => match &**inner {
+                            TypeShape::Struct(Some(s)) => {
+                                Some(Self::base_named_type_str(s).to_string())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    });
+                recv_base
+                    .and_then(|rb| self.method_decls.get(&(rb, head.to_string())))
+                    .and_then(|f| f.results.first())
+                    .map(|r| self.shape_of_type(&r.ty))
+                    .unwrap_or(TypeShape::Unknown)
             }
             _ => TypeShape::Unknown,
         }
@@ -477,6 +557,14 @@ impl<'a> Checker<'a> {
                         span: *span,
                     });
                 }
+                let head = Self::base_named_type_str(name);
+                if let Some(decl) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
+                    return Some(TypeExpr::Fn {
+                        params: decl.params.clone(),
+                        results: decl.results.iter().map(|r| r.ty.clone()).collect(),
+                        span: *span,
+                    });
+                }
                 None
             }
             Expr::Field { base, name, span } => {
@@ -499,6 +587,14 @@ impl<'a> Checker<'a> {
                     .get(&sname)
                     .and_then(|fs| fs.iter().find(|(n, _)| n == name))
                     .map(|(_, t)| t.clone())
+            }
+            Expr::Index { base, .. } => {
+                let base_ty = self.ty_of_expr(st, base)?;
+                match self.resolve_type_alias(&base_ty) {
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => Some(*elem),
+                    TypeExpr::Map { value, .. } => Some(*value),
+                    _ => None,
+                }
             }
             Expr::StructLit { ty, .. } => ty.clone(),
             Expr::MapLit {
@@ -533,8 +629,10 @@ impl<'a> Checker<'a> {
                 Expr::FnLit { results, .. } => results.first().map(|r| r.ty.clone()),
                 Expr::Ident { name, .. } => {
                     if let Some(b) = self.lookup_binding(st, name) {
-                        if let Some(TypeExpr::Fn { results, .. }) = &b.ty {
-                            return results.first().cloned();
+                        if let Some(ty) = &b.ty {
+                            if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(ty) {
+                                return results.first().cloned();
+                            }
                         }
                         return None;
                     }
@@ -550,6 +648,9 @@ impl<'a> Checker<'a> {
                             elem: Box::new(elem),
                             span: *span,
                         });
+                    }
+                    if name == "make" {
+                        return args.first().and_then(|a| self.ty_of_expr(st, &a.value));
                     }
                     let head = Self::base_named_type_str(name);
                     self.fns
@@ -583,13 +684,32 @@ impl<'a> Checker<'a> {
                                 _ => None,
                             },
                             _ => None,
-                        })?;
-                    self.method_decls
-                        .get(&(recv_base, head.to_string()))
-                        .and_then(|f| f.results.first())
-                        .map(|r| r.ty.clone())
+                        });
+                    if let Some(rb) = recv_base {
+                        if let Some(ret) = self
+                            .method_decls
+                            .get(&(rb, head.to_string()))
+                            .and_then(|f| f.results.first())
+                            .map(|r| r.ty.clone())
+                        {
+                            return Some(ret);
+                        }
+                    }
+                    let callee_ty = self.ty_of_expr(st, callee)?;
+                    if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&callee_ty) {
+                        results.first().cloned()
+                    } else {
+                        None
+                    }
                 }
-                _ => None,
+                other => {
+                    let callee_ty = self.ty_of_expr(st, other)?;
+                    if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&callee_ty) {
+                        results.first().cloned()
+                    } else {
+                        None
+                    }
+                }
             },
             _ => None,
         }
@@ -877,6 +997,59 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn call_result_tys(&self, st: &FnState, callee: &Expr) -> Option<Vec<TypeExpr>> {
+        match crate::model::unwrap_parens(callee) {
+            Expr::FnLit { results, .. } => Some(results.iter().map(|r| r.ty.clone()).collect()),
+            Expr::Ident { name, .. } => {
+                if let Some(b) = self.lookup_binding(st, name) {
+                    if let Some(ty) = &b.ty {
+                        if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(ty) {
+                            return Some(results);
+                        }
+                    }
+                    return None;
+                }
+                let head = Self::base_named_type_str(name);
+                self.fns
+                    .get(name.as_str())
+                    .or_else(|| self.fns.get(head))
+                    .map(|f| f.results.iter().map(|r| r.ty.clone()).collect())
+            }
+            Expr::Field { base, name, .. } => {
+                let head = Self::base_named_type_str(name);
+                if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
+                    if self.lookup_binding(st, root).is_none() {
+                        let full = format!("{}.{}", root, head);
+                        if let Some(f) = self.fns.get(full.as_str()) {
+                            return Some(f.results.iter().map(|r| r.ty.clone()).collect());
+                        }
+                    }
+                }
+                let recv = self.shape_of_expr(st, base);
+                let recv_base = self
+                    .ty_of_expr(st, base)
+                    .map(|t| self.resolve_type_alias(&t))
+                    .and_then(|t| Self::base_named_type(&t))
+                    .or_else(|| match &recv {
+                        TypeShape::Struct(Some(s)) => {
+                            Some(Self::base_named_type_str(s).to_string())
+                        }
+                        TypeShape::Pointer(inner) => match &**inner {
+                            TypeShape::Struct(Some(s)) => {
+                                Some(Self::base_named_type_str(s).to_string())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    })?;
+                self.method_decls
+                    .get(&(recv_base, head.to_string()))
+                    .map(|f| f.results.iter().map(|r| r.ty.clone()).collect())
+            }
+            _ => None,
+        }
+    }
+
     /// Shapes for a multi-name define/assign from one value (`v, ok := m[k]`,
     /// `v, ok := <-ch`, `a, b := f()`, `a, b = f()?`).
     pub(crate) fn multi_value_shapes(
@@ -907,23 +1080,18 @@ impl<'a> Checker<'a> {
             other => (other, false),
         };
         if let Expr::Call { callee, .. } = call_expr {
-            if let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) {
-                if self.lookup_binding(st, name).is_none() {
-                    if let Some(f) = self.fns.get(name.as_str()) {
-                        let avail = if is_try {
-                            f.results.len().saturating_sub(1)
-                        } else {
-                            f.results.len()
-                        };
-                        if avail == n_names {
-                            return f
-                                .results
-                                .iter()
-                                .take(n_names)
-                                .map(|r| self.shape_of_type(&r.ty))
-                                .collect();
-                        }
-                    }
+            if let Some(results) = self.call_result_tys(st, callee) {
+                let avail = if is_try {
+                    results.len().saturating_sub(1)
+                } else {
+                    results.len()
+                };
+                if avail == n_names {
+                    return results
+                        .iter()
+                        .take(n_names)
+                        .map(|ty| self.shape_of_type(ty))
+                        .collect();
                 }
             }
         }
@@ -951,23 +1119,18 @@ impl<'a> Checker<'a> {
             other => (other, false),
         };
         if let Expr::Call { callee, .. } = call_expr {
-            if let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) {
-                if self.lookup_binding(st, name).is_none() {
-                    if let Some(f) = self.fns.get(name.as_str()) {
-                        let avail = if is_try {
-                            f.results.len().saturating_sub(1)
-                        } else {
-                            f.results.len()
-                        };
-                        if avail == n_names {
-                            return f
-                                .results
-                                .iter()
-                                .take(n_names)
-                                .map(|r| Some(r.ty.clone()))
-                                .collect();
-                        }
-                    }
+            if let Some(results) = self.call_result_tys(st, callee) {
+                let avail = if is_try {
+                    results.len().saturating_sub(1)
+                } else {
+                    results.len()
+                };
+                if avail == n_names {
+                    return results
+                        .into_iter()
+                        .take(n_names)
+                        .map(Some)
+                        .collect();
                 }
             }
         }
@@ -1227,5 +1390,83 @@ mod tests {
         );
         assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
         assert_eq!(r.diagnostics[0].code, "HYB-E5001");
+    }
+    #[test]
+    fn make_map_preserves_value_shape_across_index_hop() {
+        let r = check(
+            "fn worker(m map[string]int, done chan<- bool) { m[\"w\"] = 1\n done <- true }\n\
+             fn main() {\n\
+               done := make(chan bool, 1)\n\
+               mm := make(map[string]map[string]int{})\n\
+               mm[\"a\"] = map[string]int{\"k\": 1}\n\
+               x := mm[\"a\"]\n\
+               var m2 map[string]int = x\n\
+               task worker(move m2, done)\n\
+               x[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn make_map_preserves_non_owned_origin_across_index_store_and_hop() {
+        let r = check(
+            "fn worker(m map[string]int, done chan<- bool) { m[\"w\"] = 1\n done <- true }\n\
+             fn spawn_it(p map[string]int, done chan<- bool) {\n\
+               mm := make(map[string]map[string]int{})\n\
+               mm[\"a\"] = p\n\
+               x := mm[\"a\"]\n\
+               var m2 map[string]int = x\n\
+               task worker(move m2, done)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E3004");
+    }
+
+    #[test]
+    fn scope_pop_propagates_move_across_restored_may_share_peers() {
+        let r = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(m map[string]int, done chan<- bool) { m[\"w\"] = 1\n done <- true }\n\
+             fn main() {\n\
+               done := make(chan bool, 1)\n\
+               m := map[string]int{\"k\": 0}\n\
+               h := holder{m: m}\n\
+               if true {\n\
+                 h := 1\n\
+                 fmt.println(h)\n\
+                 task worker(move m, done)\n\
+               }\n\
+               h.m[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn self_shadowed_composite_define_preserves_may_share_and_outer_move() {
+        let r = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(h holder, done chan<- bool) { h.m[\"w\"] = 1\n done <- true }\n\
+             fn main() {\n\
+               done := make(chan bool, 1)\n\
+               m := map[string]int{\"k\": 0}\n\
+               h := holder{m: m}\n\
+               if true {\n\
+                 h := h\n\
+                 task worker(move h, done)\n\
+                 m[\"k\"] = 1\n\
+               }\n\
+               m[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E3003");
     }
 }
