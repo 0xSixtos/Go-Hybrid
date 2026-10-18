@@ -229,6 +229,7 @@ impl<'a> Checker<'a> {
                                     &format!("{}.{}", sname, f.name),
                                     f_ty,
                                     &f.value,
+                                    None,
                                 );
                             }
                         }
@@ -242,7 +243,7 @@ impl<'a> Checker<'a> {
                 if let Some(elem_ty) = elem {
                     let elem_ty = *elem_ty.clone();
                     for i in items {
-                        self.check_const_overflow_init("slice literal element", &elem_ty, i);
+                        self.check_const_overflow_init("slice literal element", &elem_ty, i, None);
                     }
                 }
                 for i in items {
@@ -258,8 +259,8 @@ impl<'a> Checker<'a> {
                 let key_ty = *key.clone();
                 let val_ty = *value.clone();
                 for (k, v) in entries {
-                    self.check_const_overflow_init("map literal key", &key_ty, k);
-                    self.check_const_overflow_init("map literal value", &val_ty, v);
+                    self.check_const_overflow_init("map literal key", &key_ty, k, None);
+                    self.check_const_overflow_init("map literal value", &val_ty, v, None);
                     self.check_expr_emit_guard(st, k);
                     self.check_expr_emit_guard(st, v);
                 }
