@@ -376,3 +376,98 @@ fn const_alias_chain_with_shadowed_inner_name_is_rejected() {
     );
     assert_eq!(r.verdict, Verdict::Reject);
 }
+
+#[test]
+fn assign_overflow_int8_is_rejected() {
+    let src = "\
+fn main() {
+    var n int8 = 0
+    n = 300
+    fmt.println(\"{n}\")
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for n = 300, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn compound_assign_overflow_int8_is_rejected() {
+    let src = "\
+fn main() {
+    var n int8 = 0
+    n += 300
+    fmt.println(\"{n}\")
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for n += 300, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn array_index_assign_overflow_is_rejected() {
+    let src = "\
+fn main() {
+    var a [2]int8
+    a[0] = 300
+    fmt.println(\"{a}\")
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for a[0] = 300, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn slice_index_assign_overflow_is_rejected() {
+    let src = "\
+fn main() {
+    var s []int8
+    s[0] = 300
+    fmt.println(\"{s}\")
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for s[0] = 300, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn map_value_assign_overflow_is_rejected() {
+    let src = "\
+fn main() {
+    var m map[string]int8
+    m[\"k\"] = 300
+    fmt.println(\"{m}\")
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for m[\"k\"] = 300, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}

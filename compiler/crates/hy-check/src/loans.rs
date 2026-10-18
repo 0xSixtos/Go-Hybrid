@@ -1288,7 +1288,10 @@ impl<'a> Checker<'a> {
                 let inferred = self.shape_of_expr(st, value);
                 let (shape, ty) = match (&l.ty, inferred) {
                     (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
-                    (_, inferred) => (inferred, self.ty_of_expr(st, value)),
+                    (_, inferred) => (
+                        inferred,
+                        l.ty.clone().or_else(|| self.ty_of_expr(st, value)),
+                    ),
                 };
                 let shadowed_const = self.shape_may_share(&shape)
                     && self.value_reads_storage_of(st, value, name)
@@ -3826,6 +3829,12 @@ impl<'a> Checker<'a> {
             // with nested nils (`j = jobT{m: nil}`) carries its own type
             // context (HYB-E4001).
             self.check_composite_nils(st, v);
+            // Constant overflow on assignment: `n = 300`, `arr[0] = 300`, `n += 300`
+            if !matches!(op, AssignOp::ShlAssign | AssignOp::ShrAssign) {
+                if let Some(target_ty) = self.place_target_ty(st, t) {
+                    self.check_const_overflow_assign(&t.render(), &target_ty, v);
+                }
+            }
             // Issue #146: `n = <-ch` where `n` has a known type and `ch` is
             // `chan T` with incompatible T.
             if let Some(want) = self.place_shape(st, t) {
@@ -4624,7 +4633,10 @@ impl<'a> Checker<'a> {
             let inferred = self.shape_of_expr(st, value);
             let (shape, ty) = match (&l.ty, inferred) {
                 (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
-                (_, inferred) => (inferred, self.ty_of_expr(st, value).or_else(|| l.ty.clone())),
+                (_, inferred) => (
+                    inferred,
+                    l.ty.clone().or_else(|| self.ty_of_expr(st, value)),
+                ),
             };
             let shadowed_const = self.shape_may_share(&shape)
                 && self.value_reads_storage_of(st, value, name)
@@ -5241,6 +5253,67 @@ impl<'a> Checker<'a> {
                 _ => None,
             },
             _ => None,
+        }
+    }
+
+    /// The declared type of an assignment place, when it resolves (drives
+    /// HYB-E6002 constant overflow checks on assignment targets).
+    // ponytail: resolves direct ident, index, and struct field targets via package struct definitions.
+    fn place_target_ty(&self, st: &FnState, p: &Place) -> Option<hy_syntax::TypeExpr> {
+        enum Step<'a> {
+            Index,
+            Field(&'a str),
+        }
+        let mut steps = Vec::new();
+        let mut walker = p;
+        loop {
+            match &walker.kind {
+                PlaceKind::Index { base, .. } => {
+                    steps.push(Step::Index);
+                    walker = base;
+                }
+                PlaceKind::Field { base, name } => {
+                    steps.push(Step::Field(name.as_str()));
+                    walker = base;
+                }
+                PlaceKind::AddrOf { base } => {
+                    walker = base;
+                }
+                PlaceKind::Ident(name) => {
+                    let b = self.lookup_binding(st, name)?;
+                    let mut cur = b.ty.as_ref()?;
+                    steps.reverse();
+                    for step in steps {
+                        while let hy_syntax::TypeExpr::Pointer { to, .. } = cur {
+                            cur = to.as_ref();
+                        }
+                        match step {
+                            Step::Index => match cur {
+                                hy_syntax::TypeExpr::Array { elem, .. }
+                                | hy_syntax::TypeExpr::Slice { elem, .. } => {
+                                    cur = elem.as_ref();
+                                }
+                                hy_syntax::TypeExpr::Map { value, .. } => {
+                                    cur = value.as_ref();
+                                }
+                                _ => return None,
+                            },
+                            Step::Field(field_name) => match cur {
+                                hy_syntax::TypeExpr::Named {
+                                    name: struct_name, ..
+                                } => {
+                                    let fields = self.structs.get(struct_name)?;
+                                    let (_, field_ty) =
+                                        fields.iter().find(|(f, _)| f == field_name)?;
+                                    cur = field_ty;
+                                }
+                                _ => return None,
+                            },
+                        }
+                    }
+                    return Some(cur.clone());
+                }
+            }
         }
     }
 
