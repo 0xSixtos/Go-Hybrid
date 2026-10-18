@@ -471,3 +471,160 @@ fn main() {
     );
     assert_eq!(r.verdict, Verdict::Reject);
 }
+
+const OVERFLOW_STRUCT_LITERAL: &str = "\
+struct user {
+    age int8
+}
+
+fn main() {
+    u := user{age: 300}
+    fmt.println(\"{u.age}\")
+}
+";
+
+const OVERFLOW_SLICE_LITERAL: &str = "\
+fn main() {
+    xs := []int8{300}
+    fmt.println(\"{xs[0]}\")
+}
+";
+
+const OVERFLOW_MAP_VALUE: &str = "\
+fn main() {
+    m := map[string]int8{\"a\": 300}
+    v := m[\"a\"]
+    fmt.println(\"{v}\")
+}
+";
+
+const OVERFLOW_MAP_KEY: &str = "\
+fn main() {
+    m := map[int8]string{300: \"a\"}
+    v := m[300]
+    fmt.println(\"{v}\")
+}
+";
+
+const OVERFLOW_TYPE_ALIAS_STRUCT_LITERAL: &str = "\
+struct config {
+    limit uint8
+}
+
+type cfg = config
+
+fn main() {
+    c := cfg{limit: 300}
+    fmt.println(\"{c.limit}\")
+}
+";
+
+const OVERFLOW_NESTED_COMPOSITE: &str = "\
+struct item {
+    code int8
+}
+
+fn main() {
+    items := []item{
+        item{code: 300},
+    }
+    fmt.println(\"{items[0].code}\")
+}
+";
+
+const FITS_COMPOSITE_LITERALS: &str = "\
+struct user {
+    age int8
+}
+
+fn main() {
+    u := user{age: 127}
+    xs := []int8{127, -128}
+    m := map[string]int8{\"a\": 127}
+    v := m[\"a\"]
+    fmt.println(\"{u.age} {xs[0]} {v}\")
+}
+";
+
+#[test]
+fn struct_literal_field_overflow_is_rejected() {
+    let r = check(OVERFLOW_STRUCT_LITERAL);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for user{{age: 300}}, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn slice_literal_element_overflow_is_rejected() {
+    let r = check(OVERFLOW_SLICE_LITERAL);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for []int8{{300}}, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn map_literal_value_overflow_is_rejected() {
+    let r = check(OVERFLOW_MAP_VALUE);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for map[string]int8{{\"a\": 300}}, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn map_literal_key_overflow_is_rejected() {
+    let r = check(OVERFLOW_MAP_KEY);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for map[int8]string{{300: \"a\"}}, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn type_alias_struct_literal_overflow_is_rejected() {
+    let r = check(OVERFLOW_TYPE_ALIAS_STRUCT_LITERAL);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for aliased struct literal limit: 300, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn nested_composite_literal_overflow_is_rejected() {
+    let r = check(OVERFLOW_NESTED_COMPOSITE);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for nested composite literal code: 300, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn composite_literals_valid_range_is_accepted() {
+    let r = check(FITS_COMPOSITE_LITERALS);
+    assert!(
+        error_codes(&r).is_empty(),
+        "valid composite literals must accept, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
