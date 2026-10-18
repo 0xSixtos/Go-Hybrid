@@ -628,3 +628,190 @@ fn composite_literals_valid_range_is_accepted() {
     );
     assert_eq!(r.verdict, Verdict::Accept);
 }
+
+const OVERFLOW_CALL_ARG: &str = "\
+fn take_b(b uint8) {
+    fmt.println(\"{b}\")
+}
+fn main() {
+    take_b(300)
+}
+";
+
+const OVERFLOW_CALL_ARG_NEG: &str = "\
+fn take_b(b uint8) {
+    fmt.println(\"{b}\")
+}
+fn main() {
+    take_b(-1)
+}
+";
+
+const FITS_CALL_ARG: &str = "\
+fn take_b(b uint8) {
+    fmt.println(\"{b}\")
+}
+fn main() {
+    take_b(255)
+}
+";
+
+const OVERFLOW_METHOD_ARG: &str = "\
+struct user {
+    age int8
+}
+fn (u *user) set_age(age int8) {
+    u.age = age
+}
+fn main() {
+    var u user
+    u.set_age(300)
+}
+";
+
+const OVERFLOW_IIFE_ARG: &str = "\
+fn main() {
+    fn(b uint8) {
+        fmt.println(\"{b}\")
+    }(300)
+}
+";
+
+const OVERFLOW_APPEND_ARG: &str = "\
+fn main() {
+    var xs []int8
+    xs = append(xs, 300)
+}
+";
+
+const FITS_APPEND_ARG: &str = "\
+fn main() {
+    var xs []int8
+    xs = append(xs, 127)
+}
+";
+
+const OVERFLOW_TASK_ARG: &str = "\
+fn worker(b uint8) {
+    fmt.println(\"{b}\")
+}
+fn main() {
+    task worker(300)
+}
+";
+
+const OVERFLOW_ALIASED_PARAM_ARG: &str = "\
+type my_byte = uint8
+fn take_b(b my_byte) {
+    fmt.println(\"{b}\")
+}
+fn main() {
+    take_b(300)
+}
+";
+
+#[test]
+fn call_argument_overflow_is_rejected() {
+    let r = check(OVERFLOW_CALL_ARG);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "take_b(300) must emit HYB-E6002, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn call_argument_negative_overflow_is_rejected() {
+    let r = check(OVERFLOW_CALL_ARG_NEG);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "take_b(-1) for uint8 must emit HYB-E6002, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn call_argument_fitting_accepts() {
+    let r = check(FITS_CALL_ARG);
+    assert!(
+        error_codes(&r).is_empty(),
+        "take_b(255) must fit uint8, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+#[test]
+fn method_argument_overflow_is_rejected() {
+    let r = check(OVERFLOW_METHOD_ARG);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "u.set_age(300) must emit HYB-E6002, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn iife_argument_overflow_is_rejected() {
+    let r = check(OVERFLOW_IIFE_ARG);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "iife must emit HYB-E6002, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn append_argument_overflow_is_rejected() {
+    let r = check(OVERFLOW_APPEND_ARG);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "append(xs, 300) for []int8 must emit HYB-E6002, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn append_argument_fitting_accepts() {
+    let r = check(FITS_APPEND_ARG);
+    assert!(
+        error_codes(&r).is_empty(),
+        "append(xs, 127) must fit int8, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+#[test]
+fn task_argument_overflow_is_rejected() {
+    let r = check(OVERFLOW_TASK_ARG);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "task worker(300) must emit HYB-E6002, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn aliased_parameter_argument_overflow_is_rejected() {
+    let r = check(OVERFLOW_ALIASED_PARAM_ARG);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "take_b(300) for my_byte must emit HYB-E6002, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
