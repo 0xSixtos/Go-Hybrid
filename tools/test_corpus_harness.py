@@ -377,7 +377,9 @@ class CheckerPathCliTests(unittest.TestCase):
             corpus = root / "corpus"
             corpus.mkdir()
             (corpus / "01-example.hy").write_text(
-                f"// EXPECTED-VERDICT: {expected} A1c\nfn main() {{}}\n",
+                # REJECT carries its rule; a rule after ACCEPT is a corpus
+                # error by design since #349's ambiguous-header validation.
+                f"// EXPECTED-VERDICT: {expected}" + (" A1c" if expected == "REJECT" else "") + f"\nfn main() {{}}\n",
                 encoding="utf-8",
             )
             local = root / "local"
