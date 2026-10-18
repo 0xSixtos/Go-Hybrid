@@ -47,6 +47,7 @@ jobs:
           # nothing invokes cannot fail the build. Registered here and pinned
           # by the guard below so the drift cannot come back silently.
           python3 -m unittest discover -s tools -p test_job_payload.py -v
+          python3 -m unittest discover -s tools -p test_job_summary_identity.py -v
           python3 -m unittest discover -s tools -p test_job_download.py -v
           python3 -m unittest discover -s tools -p test_job_revision.py -v
           python3 -m unittest discover -s tools -p test_corpus_error_diagnostics.py -v
