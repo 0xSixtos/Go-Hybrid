@@ -1335,7 +1335,19 @@ impl Emitter {
         self.push_raw("\n");
         self.emit_block_body(&then.stmts)?;
         match otherwise {
-            None => self.push("}"),
+            None => {
+                // #546: with no `else`, the no-branch-taken path still owes
+                // the store-back of any loan handed down into this `if`.
+                if let Some(inherited) = self.branch_inherit.clone() {
+                    self.push("} else {");
+                    self.indent += 1;
+                    for (name, place) in inherited {
+                        self.push(&format!("{} = {}", place, name));
+                    }
+                    self.indent -= 1;
+                }
+                self.push("}")
+            }
             Some(Stmt::If {
                 init,
                 cond,
@@ -1408,11 +1420,16 @@ impl Emitter {
     /// the O8 slot-loan desugar sound: mutations through the loaned copy
     /// persist exactly for the loan's non-lexical live window.
     pub fn emit_block_body(&mut self, stmts: &[Stmt]) -> Result<(), EmitError> {
-        self.loan_frames.push(Vec::new());
+        // #546: a branch of a hand-off `if` starts with the inherited loans;
+        // `take` keeps nested blocks inside the branch from inheriting them
+        // again, and the restore hands the same set to the sibling branch.
+        let inherited = self.branch_inherit.take();
+        self.loan_frames.push(inherited.clone().unwrap_or_default());
         self.indent += 1;
-        self.emit_stmts_with_loans(stmts)?;
+        let r = self.emit_stmts_with_loans(stmts);
         self.indent -= 1;
-        Ok(())
+        self.branch_inherit = inherited;
+        r
     }
 
     fn block_terminates(b: &Block) -> bool {
@@ -2133,8 +2150,54 @@ impl Emitter {
     /// no longer reference the loan variable (matching `hy-check`'s non-lexical
     /// `last_use` window), and flushing any still-active loans at block exit.
     fn emit_stmts_with_loans(&mut self, stmts: &[Stmt]) -> Result<(), EmitError> {
+        // #546: a loan inherited from an enclosing hand-off `if` that this
+        // branch never uses is stored back before the branch's first
+        // statement, i.e. before any spawn/send that moves its base.
+        let mut unused = Vec::new();
+        if let Some(frame) = self.loan_frames.last_mut() {
+            let mut i = 0;
+            while i < frame.len() {
+                if !frame[i].0.is_empty() && !Self::remaining_stmts_use_loan(stmts, &frame[i].0) {
+                    unused.push(frame.remove(i));
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        for (name, place) in unused {
+            self.push(&format!("{} = {}", place, name));
+        }
         for (idx, st) in stmts.iter().enumerate() {
             let rest = &stmts[idx + 1..];
+            // #546: an `if` that is the loan's last user AND spawns/sends
+            // using the loan's base map must not get a single store-back
+            // after it: on a path that moved the map, that write races the
+            // new task. Hand the loan down into every branch instead.
+            let handoff = if matches!(st, Stmt::If { .. }) {
+                let mut h = Vec::new();
+                if let Some(frame) = self.loan_frames.last_mut() {
+                    let mut i = 0;
+                    while i < frame.len() {
+                        let (name, place) = &frame[i];
+                        if !name.is_empty()
+                            && !Self::remaining_stmts_use_loan(rest, name)
+                            && Self::stmt_has_boundary_using(st, Self::place_root(place))
+                        {
+                            h.push(frame.remove(i));
+                        } else {
+                            i += 1;
+                        }
+                    }
+                }
+                h
+            } else {
+                Vec::new()
+            };
+            let saved_inherit = if handoff.is_empty() {
+                None
+            } else {
+                Some(self.branch_inherit.replace(handoff))
+            };
             match st {
                 Stmt::Local(l) => self.emit_local_in_seq(l, rest)?,
                 Stmt::Assign {
@@ -2144,6 +2207,9 @@ impl Emitter {
                     ..
                 } => self.emit_assign_in_seq(targets, *op, values, rest)?,
                 _ => self.emit_stmt(st)?,
+            }
+            if let Some(prev) = saved_inherit {
+                self.branch_inherit = prev;
             }
             // If `rest` can still execute after `st`, flush any loan in the
             // current frame whose variable has no remaining uses in `rest`
@@ -2182,6 +2248,71 @@ impl Emitter {
     /// loan bound to `name`. A subsequent `name = &other_place` rebind (whose
     /// RHS does not itself mention `name`) starts a new loan rather than using
     /// the current loan.
+    /// Leading identifier of a rendered loan place (`m["a"]` -> `m`, `h.m[k]` -> `h`).
+    fn place_root(place: &str) -> &str {
+        let end = place
+            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(place.len());
+        &place[..end]
+    }
+
+    /// #546: does `st` (recursively) contain a task spawn, channel send, or
+    /// select send whose operands mention `root` (a boundary that can move
+    /// the loan's base map to another task), or a `delete(root, ...)`?
+    fn stmt_has_boundary_using(st: &Stmt, root: &str) -> bool {
+        if root.is_empty() {
+            return false;
+        }
+        let in_block = |b: &Block| {
+            b.stmts
+                .iter()
+                .any(|s| Self::stmt_has_boundary_using(s, root))
+        };
+        match st {
+            Stmt::Task { callee, args, .. } => {
+                Self::expr_mentions_ident(callee, root)
+                    || args.iter().any(|a| Self::expr_mentions_ident(&a.value, root))
+            }
+            Stmt::Send { value, .. } => Self::expr_mentions_ident(value, root),
+            // `delete(root, k)` in one branch: a single store-back after the
+            // `if` would resurrect the deleted key on that path.
+            Stmt::Expr {
+                expr: Expr::Call { callee, args, .. },
+                ..
+            } => {
+                matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "delete")
+                    && args
+                        .first()
+                        .map(|a| Self::expr_mentions_ident(&a.value, root))
+                        .unwrap_or(false)
+            }
+            Stmt::If {
+                init,
+                then,
+                otherwise,
+                ..
+            } => {
+                init.as_deref()
+                    .map(|i| Self::stmt_has_boundary_using(i, root))
+                    .unwrap_or(false)
+                    || in_block(then)
+                    || otherwise
+                        .as_deref()
+                        .map(|o| Self::stmt_has_boundary_using(o, root))
+                        .unwrap_or(false)
+            }
+            Stmt::For { body, .. } => in_block(body),
+            Stmt::Block { block, .. } => in_block(block),
+            Stmt::Managed { body, .. } => in_block(body),
+            Stmt::Match { arms, .. } => arms.iter().any(|a| in_block(&a.body)),
+            Stmt::Select { arms, .. } => arms.iter().any(|a| {
+                matches!(&a.kind, SelectArmKind::Send { value, .. } if Self::expr_mentions_ident(value, root))
+                    || in_block(&a.body)
+            }),
+            _ => false,
+        }
+    }
+
     fn remaining_stmts_use_loan(stmts: &[Stmt], name: &str) -> bool {
         for st in stmts {
             match st {
