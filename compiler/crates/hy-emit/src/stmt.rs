@@ -2281,13 +2281,22 @@ impl Emitter {
                 otherwise,
                 ..
             } => {
-                init.as_ref()
-                    .is_some_and(|i| Self::stmt_mentions_ident(i, target))
-                    || Self::expr_mentions_ident(cond, target)
-                    || Self::block_mentions_ident(then, target)
-                    || otherwise
-                        .as_ref()
-                        .is_some_and(|o| Self::stmt_mentions_ident(o, target))
+                // #547: an `if` init that DECLARES the target shadows it for
+                // `cond`, both arms and `else` (Go's if-statement scope), so
+                // those mentions are not uses of an outer binding of the same
+                // name. The init's own value expressions still count — they
+                // run before the binding exists.
+                let init_mentions = init
+                    .as_ref()
+                    .is_some_and(|i| Self::stmt_mentions_ident(i, target));
+                let shadows = init.as_ref().is_some_and(|i| Self::local_declares(i, target));
+                init_mentions
+                    || (!shadows
+                        && (Self::expr_mentions_ident(cond, target)
+                            || Self::block_mentions_ident(then, target)
+                            || otherwise
+                                .as_ref()
+                                .is_some_and(|o| Self::stmt_mentions_ident(o, target))))
             }
             Stmt::For { kind, body, .. } => {
                 let kind_mentions = match kind {
@@ -2299,7 +2308,19 @@ impl Emitter {
                     }
                     ForKind::Iterate { expr, .. } => Self::expr_mentions_ident(expr, target),
                 };
-                kind_mentions || Self::block_mentions_ident(body, target)
+                // #547: the head expressions run BEFORE the binder exists, so
+                // they are uses of `target`; the BODY is not when the binder
+                // re-declares `target`. `for n in 0..k { total += n }` under a
+                // live slot loan `n` reads the LOOP variable, never the loan —
+                // counting those reads stretched the loan's live range past a
+                // following `move m`, which deferred the store-back `m[k] = n`
+                // past the spawn (silent data race). A genuine re-use of the
+                // outer `target` AFTER the loop is still reported by the
+                // caller's remaining-statement scan, and the caller's `false`
+                // only ever flushes the loan EARLY — it never drops a live one.
+                kind_mentions
+                    || (!Self::for_binder_shadows(kind, target)
+                        && Self::block_mentions_ident(body, target))
             }
             Stmt::Match { subject, arms, .. } => {
                 Self::expr_mentions_ident(subject, target)
@@ -2328,8 +2349,19 @@ impl Emitter {
                     }
                     SelectArmKind::Default => false,
                 };
-                head_mentions || Self::block_mentions_ident(&a.body, target)
+                // #547 (same class as the `for` binder): `n, ok := <-ch:` binds
+                // a fresh `n` for the arm body; the channel expression is
+                // evaluated before that binding exists.
+                head_mentions
+                    || (!Self::select_arm_binds(&a.kind, target)
+                        && Self::block_mentions_ident(&a.body, target))
             }),
+            // Counted conservatively: the deferred call's arguments are
+            // evaluated at registration, and hy-check treats a deferred call's
+            // captures as live, rejecting `defer` + `move` on the same arena
+            // with HYB-E3003 (defer_move_soundness). Over-counting here keeps
+            // the loan alive (fail-closed); it is not a binder, so #547 does
+            // not touch this arm.
             Stmt::Defer { call, .. } => Self::expr_mentions_ident(call, target),
             Stmt::Task { callee, args, .. } => {
                 Self::expr_mentions_ident(callee, target)
@@ -2341,6 +2373,33 @@ impl Emitter {
                 Self::block_mentions_ident(body, target)
             }
             Stmt::Break { .. } | Stmt::Continue { .. } => false,
+        }
+    }
+
+    /// Does this `Stmt` DECLARE `name` as a local? Only `Stmt::Local`
+    /// introduces bindings; the other binder shapes (`for` heads, `select`
+    /// recv names, `match` patterns) are not `Stmt`s and have their own
+    /// predicates. Called for `if` inits only (#547).
+    fn local_declares(st: &Stmt, name: &str) -> bool {
+        matches!(st, Stmt::Local(l) if l.names.iter().any(|n| n == name))
+    }
+
+    /// Does this loop head bind `name`? A re-declaration shadows any outer
+    /// binding of the same name inside the loop body only (#547).
+    fn for_binder_shadows(kind: &ForKind, name: &str) -> bool {
+        match kind {
+            ForKind::Range { var, .. } => var == name,
+            ForKind::Iterate { vars, .. } => vars.iter().any(|v| v == name),
+            ForKind::Infinite | ForKind::While { .. } => false,
+        }
+    }
+
+    /// Does this select arm's receive head bind `name`? (#547 — the arm body
+    /// then reads the fresh binding, not an outer binding of the same name.)
+    fn select_arm_binds(kind: &SelectArmKind, name: &str) -> bool {
+        match kind {
+            SelectArmKind::Recv { names, .. } => names.iter().any(|n| n == name),
+            SelectArmKind::Send { .. } | SelectArmKind::Default => false,
         }
     }
 
@@ -2421,9 +2480,21 @@ impl Emitter {
             Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
                 Self::expr_mentions_ident(k, target) || Self::expr_mentions_ident(v, target)
             }),
-            Expr::FnLit { params, body, .. } => {
-                !params.iter().any(|p| p.name == target)
-                    && Self::block_mentions_ident(body, target)
+            Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } => {
+                // #547: a closure binds its params AND its named results;
+                // either one shadows an outer binding of the same name for the
+                // body (`fn() (n int) { n = 5 }` under a live slot loan `n`
+                // assigns the RESULT, never the loan).
+                let binds = params.iter().any(|p| p.name == target)
+                    || results
+                        .iter()
+                        .any(|r| r.name.as_deref() == Some(target));
+                !binds && Self::block_mentions_ident(body, target)
             }
             Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
                 InterpPart::Lit(_) => false,
