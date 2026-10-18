@@ -2,6 +2,7 @@ import contextlib
 import hashlib
 import io
 import json
+import random
 import subprocess
 import sys
 import tempfile
@@ -170,6 +171,22 @@ class FuzzArtifactTests(unittest.TestCase):
         self.assertEqual(code, 1, stdout + stderr)
         self.assertIn("UNEXPECTED exit=23", stdout)
         self.assertFalse(self.destination.exists())
+class NestGenerationTests(unittest.TestCase):
+    def test_branch_heavy_seed_keeps_one_deep_path(self):
+        source = hyfuzz.gen_nest(random.Random(9498))
+        self.assertEqual(source.count('fmt.println("deep")'), 1)
+        self.assertLess(len(source), 4096)
+        self.assertIn('else {', source)
+
+    def test_all_branch_nesting_remains_linear(self):
+        rng = random.Random(0)
+        with patch.object(rng, 'randint', return_value=12), \
+             patch.object(rng, 'choice', return_value=hyfuzz.NEST_SHAPES[3]):
+            source = hyfuzz.gen_nest(rng)
+        self.assertEqual(source.count('if x {'), 12)
+        self.assertEqual(source.count('else {'), 12)
+        self.assertEqual(source.count('fmt.println("deep")'), 1)
+        self.assertLess(len(source), 4096)
 
 
 if __name__ == "__main__":
