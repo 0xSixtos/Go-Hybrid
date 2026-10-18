@@ -232,8 +232,8 @@ def main():
     tier, action = sys.argv[1], sys.argv[2]
     if tier == "kaggle" and action == "submit" and len(sys.argv) == 4:
         kaggle_submit(os.path.abspath(sys.argv[3]))
-    elif tier == "kaggle" and action == "status":
-        kaggle_status(sys.argv[4] if len(sys.argv) > 4 else None)
+    elif tier == "kaggle" and action == "status" and len(sys.argv) in (3, 4):
+        kaggle_status(sys.argv[3] if len(sys.argv) == 4 else None)
     elif tier == "kaggle" and action == "wait" and len(sys.argv) >= 4:
         minutes = float(sys.argv[3])
         sys.exit(kaggle_wait(minutes, sys.argv[4] if len(sys.argv) > 4 else None))
@@ -249,8 +249,17 @@ def main():
             print("actions dispatch requires positive integers for shards and maxparallel", file=sys.stderr)
             sys.exit(2)
         actions_dispatch(sys.argv[3], sys.argv[4], sys.argv[5], shards, maxparallel)
-    elif tier == "actions" and action == "watch":
-        actions_watch(int(sys.argv[4]) if len(sys.argv) > 4 else None)
+    elif tier == "actions" and action == "watch" and len(sys.argv) in (3, 4):
+        run_id = None
+        if len(sys.argv) == 4:
+            try:
+                run_id = int(sys.argv[3])
+            except ValueError:
+                run_id = 0
+            if run_id <= 0:
+                print("actions watch run_id must be a positive integer", file=sys.stderr)
+                sys.exit(2)
+        actions_watch(run_id)
     elif tier == "actions" and action == "fetch" and len(sys.argv) == 5:
         actions_fetch(int(sys.argv[3]), os.path.abspath(sys.argv[4]))
     else:
