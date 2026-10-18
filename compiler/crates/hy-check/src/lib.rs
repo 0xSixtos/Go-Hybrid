@@ -394,6 +394,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             }
         }
         st.result_shapes.push(shape);
+        st.result_types.push(r.ty.clone());
     }
 
     // Pass A: indices, structural extents, last-use map.

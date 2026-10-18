@@ -247,6 +247,8 @@ pub(crate) struct FnState {
     /// return-site nil checks). Empty for closure bodies (fn literals
     /// carry no result types on the AST surface yet).
     pub result_shapes: Vec<TypeShape>,
+    /// Declared result types of the function being checked (for constant overflow checks).
+    pub result_types: Vec<hy_syntax::TypeExpr>,
     /// Declared named result bindings (`fn f() (out map[string]int)`), in
     /// signature order. A bare `return` reads and returns each named result.
     pub named_results: Vec<String>,
