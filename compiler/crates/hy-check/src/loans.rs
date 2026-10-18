@@ -163,6 +163,10 @@ impl<'a> Checker<'a> {
     ) {
         match self.resolve_call(st, cr) {
             Resolved::Package { pkg, method } => {
+                // T22: a package call that mutates an argument in place
+                // (`sort.ints(cells)`, `sort.slice(...)`, etc.) is a write to
+                // that argument's `const` root (`HYB-E3006`).
+                self.check_call_const_writes(st, cr, &HashSet::new());
                 match foreign::package_mode(&pkg, &method) {
                     CallMode::Borrow => {
                         // a borrow-mode package call lends its handle-typed args
@@ -276,12 +280,12 @@ impl<'a> Checker<'a> {
                 if name == "copy" {
                     self.record_copy_may_share(st, cr);
                 }
-                if name == "delete" {
-                    // A3: map delete is a map mutation
+                if name == "delete" || name == "clear" {
+                    // A3: map delete / clear is a map mutation
                     self.check_delete_conflict(st, cr, idx);
                 }
-                if name == "delete" || name == "copy" {
-                    // T22 (#123/#188): a delete or copy mutates its first
+                if name == "delete" || name == "copy" || name == "clear" {
+                    // T22 (#123/#188): a delete, copy, or clear mutates its first
                     // argument — a `const` root is frozen like an index write.
                     self.check_delete_const(st, cr, &HashSet::new());
                 }
@@ -375,17 +379,21 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// A3 via `delete(m, k)`: a delete on a loaned base path inside the
-    /// window invalidates the slot loan.
+    /// A3 via `delete(m, k)` or `clear(m)`: a delete/clear on a loaned base
+    /// path inside the window invalidates the slot loan.
     fn check_delete_conflict(&mut self, st: &FnState, cr: &CallRef, idx: usize) {
         let Some(first) = cr.args.first() else { return };
+        let verb = match crate::model::unwrap_parens(cr.callee) {
+            Expr::Ident { name, .. } if name == "clear" => "clear",
+            _ => "delete",
+        };
         if let Some(path) = walk::expr_path(&first.value) {
-            self.emit_a3_if_live(st, &path, cr.span, idx, "delete");
+            self.emit_a3_if_live(st, &path, cr.span, idx, verb);
         } else {
             let mut roots = Vec::new();
             collect_ref_roots(&first.value, &mut roots);
             for r in roots {
-                self.emit_a3_if_live(st, &r, cr.span, idx, "delete");
+                self.emit_a3_if_live(st, &r, cr.span, idx, verb);
             }
         }
     }
@@ -681,7 +689,7 @@ impl<'a> Checker<'a> {
         };
         match cr.callee {
             Expr::Ident { name, .. } => {
-                if name == "delete" {
+                if name == "delete" || name == "clear" {
                     return cr.args.first().map(&arg_root_is_param).unwrap_or(false);
                 }
                 if A3_PURE_FNS.contains(&name.as_str()) {
@@ -960,7 +968,7 @@ impl<'a> Checker<'a> {
             for cr in &calls {
                 match cr.callee {
                     Expr::Ident { name, .. } => {
-                        if name == "delete" {
+                        if name == "delete" || name == "clear" {
                             if let Some(first) = cr.args.first() {
                                 let mut roots = Vec::new();
                                 collect_ref_roots(&first.value, &mut roots);
@@ -2279,6 +2287,7 @@ impl<'a> Checker<'a> {
             Expr::Ident { name, .. } => {
                 if name == "copy"
                     || name == "delete"
+                    || name == "clear"
                     || name == "make"
                     || name == "append"
                     || name == "some"
@@ -4857,7 +4866,7 @@ impl<'a> Checker<'a> {
         let Expr::Ident { name, .. } = crate::model::unwrap_parens(cr.callee) else {
             return;
         };
-        if name.as_str() != "delete" && name.as_str() != "copy" {
+        if name.as_str() != "delete" && name.as_str() != "copy" && name.as_str() != "clear" {
             return;
         }
         let Some(first) = cr.args.first() else {
@@ -4937,7 +4946,11 @@ impl<'a> Checker<'a> {
     fn check_call_const_writes(&mut self, st: &FnState, cr: &CallRef, declared: &HashSet<String>) {
         let callee = crate::model::unwrap_parens(cr.callee);
         if let Expr::Ident { name, .. } = callee {
-            if name == "delete" || name == "copy" || A3_PURE_FNS.contains(&name.as_str()) {
+            if name == "delete"
+                || name == "copy"
+                || name == "clear"
+                || A3_PURE_FNS.contains(&name.as_str())
+            {
                 return;
             }
         }
@@ -5023,7 +5036,12 @@ impl<'a> Checker<'a> {
                         _ => false,
                     };
                     if is_pkg {
-                        false
+                        match crate::model::unwrap_parens(base) {
+                            Expr::Ident { name: pkg, .. } => {
+                                foreign::package_mutated_arg(pkg, method_name) == Some(i)
+                            }
+                            _ => false,
+                        }
                     } else if matches!(self.shape_of_expr(st, callee), TypeShape::Closure) {
                         true
                     } else {
@@ -5565,7 +5583,7 @@ impl<'a> Checker<'a> {
             |a: &hy_syntax::CallArg| Self::expr_reaches_const_aliases(&a.value, aliases);
         match crate::model::unwrap_parens(cr.callee) {
             Expr::Ident { name, .. } => {
-                if name == "delete" || name == "copy" {
+                if name == "delete" || name == "copy" || name == "clear" {
                     return cr.args.first().map(&arg_reaches_alias).unwrap_or(false);
                 }
                 if A3_PURE_FNS.contains(&name.as_str()) {
