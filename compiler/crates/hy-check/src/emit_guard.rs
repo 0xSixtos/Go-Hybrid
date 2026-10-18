@@ -214,18 +214,55 @@ impl<'a> Checker<'a> {
                     self.check_expr_emit_guard(st, &a.value);
                 }
             }
-            Expr::StructLit { fields, .. } => {
+            Expr::StructLit { ty, fields, .. } => {
+                if let Some(TypeExpr::Named { name, .. }) = ty {
+                    let mut sname = name.clone();
+                    while let Some(TypeExpr::Named { name: target, .. }) =
+                        self.type_aliases.get(&sname)
+                    {
+                        sname = target.clone();
+                    }
+                    if let Some(struct_fields) = self.structs.get(&sname).cloned() {
+                        for f in fields {
+                            if let Some((_, f_ty)) =
+                                struct_fields.iter().find(|(fname, _)| fname == &f.name)
+                            {
+                                self.check_const_overflow_init(
+                                    &format!("{}.{}", sname, f.name),
+                                    f_ty,
+                                    &f.value,
+                                    None,
+                                );
+                            }
+                        }
+                    }
+                }
                 for f in fields {
                     self.check_expr_emit_guard(st, &f.value);
                 }
             }
-            Expr::SliceLit { items, .. } => {
+            Expr::SliceLit { elem, items, .. } => {
+                if let Some(elem_ty) = elem {
+                    let elem_ty = *elem_ty.clone();
+                    for i in items {
+                        self.check_const_overflow_init("slice literal element", &elem_ty, i, None);
+                    }
+                }
                 for i in items {
                     self.check_expr_emit_guard(st, i);
                 }
             }
-            Expr::MapLit { entries, .. } => {
+            Expr::MapLit {
+                key,
+                value,
+                entries,
+                ..
+            } => {
+                let key_ty = *key.clone();
+                let val_ty = *value.clone();
                 for (k, v) in entries {
+                    self.check_const_overflow_init("map literal key", &key_ty, k, None);
+                    self.check_const_overflow_init("map literal value", &val_ty, v, None);
                     self.check_expr_emit_guard(st, k);
                     self.check_expr_emit_guard(st, v);
                 }
@@ -277,7 +314,7 @@ impl<'a> Checker<'a> {
                     if let Some(elem_ty) = elem_ty {
                         for a in &args[1..] {
                             if !a.spread {
-                                self.check_const_overflow_init("argument of append", &elem_ty, &a.value);
+                                self.check_const_overflow_init("argument of append", &elem_ty, &a.value, None);
                             }
                         }
                     }
@@ -365,6 +402,7 @@ impl<'a> Checker<'a> {
                         &format!("parameter `{}`", p_name),
                         &resolved_ty,
                         &a.value,
+                        None,
                     );
                 }
             }
