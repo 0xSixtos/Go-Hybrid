@@ -1,7 +1,6 @@
 """CLI regressions for optional exact diagnostic metadata (stdlib only)."""
 
 from pathlib import Path
-import os
 import subprocess
 import sys
 import tempfile
@@ -77,6 +76,33 @@ class ExactDiagnosticCliTests(unittest.TestCase):
         self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
         self.assertIn("without REJECT", run.stderr)
 
+    def test_duplicate_verdict_headers_do_not_silently_pass(self):
+        # The checker agrees with the first header. The second makes the
+        # fixture ambiguous and must not be silently ignored by the harness.
+        run = self.run_harness("// EXPECTED-VERDICT: ACCEPT")
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("multiple EXPECTED-VERDICT", run.stderr)
+
+    def test_malformed_second_verdict_header_does_not_silently_pass(self):
+        run = self.run_harness("// EXPECTED-VERDICT: ACCEPT-MANGLED")
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("multiple EXPECTED-VERDICT", run.stderr)
+
+    def test_malformed_only_verdict_header_is_not_treated_as_accept(self):
+        run = self.run_harness("", verdict="ACCEPT-MANGLED")
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("malformed EXPECTED-VERDICT", run.stderr)
+
+    def test_accept_header_with_unexpected_rule_fails_closed(self):
+        run = self.run_harness("", verdict="ACCEPT A1c")
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("unexpected rule after ACCEPT", run.stderr)
+
+    def test_reject_header_requires_rule_id(self):
+        run = self.run_harness("", verdict="REJECT")
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("REJECT without a rule id", run.stderr)
+
 
 class CheckerEnvelopeCliTests(unittest.TestCase):
     def run_payload(self, payload, expected="ACCEPT", status=0):
@@ -85,7 +111,7 @@ class CheckerEnvelopeCliTests(unittest.TestCase):
             corpus = root / "corpus"
             corpus.mkdir()
             (corpus / "01-example.hy").write_text(
-                f"// EXPECTED-VERDICT: {expected} A1c\nfn main() {{}}\n", encoding="utf-8"
+                f"// EXPECTED-VERDICT: {expected}\nfn main() {{}}\n", encoding="utf-8"
             )
             checker = root / "hyb"
             checker.write_text(
@@ -158,8 +184,164 @@ class CheckerEnvelopeCliTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
 
 
-@unittest.skipUnless(os.name == "posix",
-                     "PATH-lookup substitution is POSIX exec semantics")
+class ManagedReportCliTests(unittest.TestCase):
+    """Exercise managed aggregation through the actual harness subprocess."""
+
+    def accept_payload(self, managed):
+        return {
+            "summary": {"verdict": "accept", "errors": 0, "warnings": 0,
+                        "managed": managed},
+            "diagnostics": [],
+        }
+
+    def run_cases(self, cases, report_managed=True):
+        # Each (expected verdict, JSON payload, checker exit) is a separate
+        # corpus file. A deterministic checker keeps this independent of the
+        # Go/Rust toolchains while exercising real CLI parsing and reporting.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = root / "corpus"
+            corpus.mkdir()
+            responses = {}
+            for index, (expected, payload, status) in enumerate(cases, 1):
+                filename = f"{index:02}-example.hy"
+                (corpus / filename).write_text(
+                    f"// EXPECTED-VERDICT: {expected}\nfn main() {{}}\n",
+                    encoding="utf-8",
+                )
+                responses[filename] = (payload, status)
+            checker = root / "hyb"
+            checker.write_text(
+                f"#!{sys.executable}\nimport json\nimport sys\nfrom pathlib import Path\n"
+                f"responses = {responses!r}\n"
+                "payload, status = responses[Path(sys.argv[2]).name]\n"
+                "print(json.dumps(payload))\nraise SystemExit(status)\n",
+                encoding="utf-8",
+            )
+            checker.chmod(0o700)
+            command = [sys.executable, str(HARNESS), "--bin", str(checker),
+                       "--corpus", str(corpus)]
+            if report_managed:
+                command.append("--report-managed")
+            return subprocess.run(command, capture_output=True, text=True, timeout=10)
+
+    def assert_invalid_report(self, managed):
+        run = self.run_cases([("ACCEPT", self.accept_payload(managed), 0)])
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("harness-error", run.stdout)
+        self.assertIn("verdict agreement: 0/1", run.stdout)
+        self.assertNotIn("Traceback", run.stderr)
+
+    def test_each_counter_requires_nonnegative_integer(self):
+        for field in ("managed_blocks", "sites_via_managed", "total_sites"):
+            for value in (False, True, -1, 0.5, "0", None):
+                with self.subTest(field=field, value=value):
+                    managed = {"managed_blocks": 0, "sites_via_managed": 0,
+                               "total_sites": 0}
+                    managed[field] = value
+                    self.assert_invalid_report(managed)
+
+    def test_present_report_requires_all_counters(self):
+        for field in ("managed_blocks", "sites_via_managed", "total_sites"):
+            with self.subTest(missing=field):
+                managed = {"managed_blocks": 0, "sites_via_managed": 0,
+                           "total_sites": 0}
+                del managed[field]
+                self.assert_invalid_report(managed)
+
+    def test_present_report_requires_object_even_when_falsey(self):
+        for managed in (False, 0, "", [], [1], "x"):
+            with self.subTest(managed=managed):
+                self.assert_invalid_report(managed)
+
+    def test_managed_sites_cannot_exceed_total_sites(self):
+        self.assert_invalid_report(
+            {"managed_blocks": 1, "sites_via_managed": 3, "total_sites": 2}
+        )
+
+    def test_valid_zero_report(self):
+        run = self.run_cases([("ACCEPT", self.accept_payload(
+            {"managed_blocks": 0, "sites_via_managed": 0, "total_sites": 0}
+        ), 0)])
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("managed aggregate: 0 block(s), 0/0 sites via managed = 0.0%",
+                      run.stdout)
+
+    def test_valid_nonzero_report(self):
+        run = self.run_cases([("ACCEPT", self.accept_payload(
+            {"managed_blocks": 1, "sites_via_managed": 2, "total_sites": 4}
+        ), 0)])
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("managed aggregate: 1 block(s), 2/4 sites via managed = 50.0%",
+                      run.stdout)
+
+    def test_unknown_report_field_keeps_forward_compatibility(self):
+        run = self.run_cases([("ACCEPT", self.accept_payload(
+            {"managed_blocks": 0, "sites_via_managed": 0, "total_sites": 0,
+             "future": {"extra": True}}
+        ), 0)])
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("verdict agreement: 1/1", run.stdout)
+
+    def test_absent_or_null_report_keeps_parser_reject_contract(self):
+        for present in (False, True):
+            with self.subTest(report_present=present):
+                payload = {
+                    "summary": {"verdict": "reject", "errors": 1, "warnings": 0},
+                    "diagnostics": [{"severity": "error", "tier0_rule": "A1c",
+                                     "code": "HYB-E3002"}],
+                }
+                if present:
+                    payload["summary"]["managed"] = None
+                run = self.run_cases([("REJECT A1c", payload, 1)])
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn("verdict agreement: 1/1", run.stdout)
+                self.assertNotIn("Traceback", run.stderr)
+
+    def test_report_validation_only_applies_with_report_flag(self):
+        for managed in (False, 0, "", [], [1], "x",
+                        {"managed_blocks": -1, "sites_via_managed": 5,
+                         "total_sites": 2}):
+            with self.subTest(managed=managed):
+                run = self.run_cases(
+                    [("ACCEPT", self.accept_payload(managed), 0)],
+                    report_managed=False,
+                )
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn("verdict agreement: 1/1", run.stdout)
+                self.assertNotIn("managed aggregate:", run.stdout)
+
+    def test_bad_case_does_not_contaminate_later_valid_aggregate(self):
+        run = self.run_cases([
+            ("ACCEPT", self.accept_payload(
+                {"managed_blocks": -1, "sites_via_managed": 5, "total_sites": 2}
+            ), 0),
+            ("ACCEPT", self.accept_payload(
+                {"managed_blocks": 2, "sites_via_managed": 1, "total_sites": 4}
+            ), 0),
+        ])
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("harness-error", run.stdout)
+        self.assertIn("verdict agreement: 1/2", run.stdout)
+        self.assertIn("managed aggregate: 2 block(s), 1/4 sites via managed = 25.0%",
+                      run.stdout)
+        self.assertNotIn("Traceback", run.stderr)
+
+    def test_valid_reports_aggregate_across_cases(self):
+        run = self.run_cases([
+            ("ACCEPT", self.accept_payload(
+                {"managed_blocks": 1, "sites_via_managed": 2, "total_sites": 4}
+            ), 0),
+            ("ACCEPT", self.accept_payload(
+                {"managed_blocks": 2, "sites_via_managed": 1, "total_sites": 2}
+            ), 0),
+        ])
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("verdict agreement: 2/2", run.stdout)
+        self.assertIn("managed aggregate: 3 block(s), 3/6 sites via managed = 50.0%",
+                      run.stdout)
+
+
 class CheckerPathCliTests(unittest.TestCase):
     """The validated --bin file must be the checker that runs (#477).
 
@@ -320,7 +502,6 @@ class CheckerPathCliTests(unittest.TestCase):
                 capture_output=True, text=True, timeout=10)
             self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
             self.assertIn("checker binary not found", run.stderr)
-
 
 if __name__ == "__main__":
     unittest.main()
