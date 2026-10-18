@@ -635,6 +635,10 @@ pub(crate) struct Checker<'a> {
     pub method_decls: HashMap<(String, String), &'a FnDecl>,
     /// file-level consts (immutable, visible in every fn).
     pub consts: HashMap<String, Binding>,
+    /// File-level const literal values, for constant-folding identifier
+    /// references (`const big = 300; var n int8 = big` must be rejected
+    /// like the literal).
+    pub const_values: HashMap<String, &'a Expr>,
     /// Known foreign package prefixes (imports ∪ the builtin table).
     pub packages: HashSet<String>,
     /// Package-scope names (issue #201-C): top-level fns / consts / structs
@@ -679,6 +683,7 @@ impl<'a> Checker<'a> {
             fns: HashMap::new(),
             method_decls: HashMap::new(),
             consts: HashMap::new(),
+            const_values: HashMap::new(),
             packages: HashSet::new(),
             pkg_names: HashMap::new(),
             methods: HashSet::new(),
@@ -809,17 +814,6 @@ pub(crate) fn collect_ref_roots(e: &Expr, out: &mut Vec<String>) {
             operand,
             ..
         } => collect_ref_roots(operand, out),
-        Expr::FnLit {
-            params,
-            results,
-            body,
-            ..
-        } => {
-            let mut bound: std::collections::HashSet<String> =
-                params.iter().map(|p| p.name.clone()).collect();
-            bound.extend(results.iter().filter_map(|r| r.name.clone()));
-            crate::loans::collect_capture_idents_block(body, &mut bound, out);
-        }
         _ => {}
     }
 }
