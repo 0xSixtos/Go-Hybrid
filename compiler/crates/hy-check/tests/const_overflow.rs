@@ -101,6 +101,90 @@ fn int8_constant_300_is_rejected() {
 }
 
 #[test]
+fn int8_constant_underscore_3_00_is_rejected() {
+    let r = check("fn main() { var n int8 = 3_00\n fmt.println(\"{n}\") }");
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for var n int8 = 3_00, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn int8_legacy_octal_0177_fits_in_go_must_accept() {
+    let r = check("fn main() { var n int8 = 0177\n fmt.println(\"{n}\") }");
+    let cs = error_codes(&r);
+    assert!(
+        !cs.iter().any(|c| c == "HYB-E6002"),
+        "0177 is 127 in Go (fits in int8), but got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+#[test]
+fn int8_legacy_octal_0200_overflows_must_reject() {
+    let r = check("fn main() { var n int8 = 0200\n fmt.println(\"{n}\") }");
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "0200 is 128 in Go (overflows int8), expected HYB-E6002, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn byte_legacy_octal_0377_fits_must_accept() {
+    let r = check("fn main() { var n byte = 0377\n fmt.println(\"{n}\") }");
+    let cs = error_codes(&r);
+    assert!(
+        !cs.iter().any(|c| c == "HYB-E6002"),
+        "0377 is 255 in Go (fits in byte), but got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+#[test]
+fn byte_legacy_octal_0400_overflows_must_reject() {
+    let r = check("fn main() { var n byte = 0400\n fmt.println(\"{n}\") }");
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "0400 is 256 in Go (overflows byte), expected HYB-E6002, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn file_const_legacy_octal_fits_must_accept() {
+    let r = check("const max_byte byte = 0377\nfn main() { _ = max_byte }");
+    let cs = error_codes(&r);
+    assert!(
+        !cs.iter().any(|c| c == "HYB-E6002"),
+        "file-level const 0377 is 255 in Go (fits in byte), but got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+#[test]
+fn file_const_legacy_octal_overflows_must_reject() {
+    let r = check("const max_byte byte = 0400\nfn main() { _ = max_byte }");
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "file-level const 0400 is 256 in Go (overflows byte), expected HYB-E6002, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
 fn uint8_constant_256_is_rejected() {
     let r = check(OVERFLOW_UINT8);
     let cs = error_codes(&r);
