@@ -931,3 +931,130 @@ fn aliased_return_overflow_is_rejected() {
     );
     assert_eq!(r.verdict, Verdict::Reject);
 }
+
+fn chan_send_int8_overflow_is_rejected() {
+    let src = "
+fn worker(ch chan int8) {
+    ch <- 300
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for ch <- 300 under chan int8, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn chan_send_uint8_negative_is_rejected() {
+    let src = "
+fn worker(ch chan uint8) {
+    ch <- -1
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for ch <- -1 under chan uint8, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn chan_send_float_truncation_is_rejected() {
+    let src = "
+fn worker(ch chan int) {
+    ch <- 2.5
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for ch <- 2.5 under chan int, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn chan_send_select_overflow_is_rejected() {
+    let src = "
+fn worker(ch chan int8) {
+    select {
+    ch <- 300:
+        _ = 1
+    default:
+    }
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for select arm ch <- 300, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn chan_send_closure_overflow_is_rejected() {
+    let src = "
+fn main() {
+    ch := make(chan int8, 1)
+    f := fn() {
+        ch <- 300
+    }
+    f()
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 in closure body, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn chan_send_aliased_type_overflow_is_rejected() {
+    let src = "
+type my_byte = uint8
+
+fn worker(ch chan my_byte) {
+    ch <- 300
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for aliased type send, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn chan_send_fitting_value_accepts() {
+    let src = "
+fn worker(ch chan int8) {
+    ch <- 100
+}
+";
+    let r = check(src);
+    assert!(
+        error_codes(&r).is_empty(),
+        "expected 100 to fit chan int8 cleanly, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
