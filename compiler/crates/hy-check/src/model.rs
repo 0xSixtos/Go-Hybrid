@@ -631,6 +631,10 @@ pub(crate) struct Checker<'a> {
     pub method_decls: HashMap<(String, String), &'a FnDecl>,
     /// file-level consts (immutable, visible in every fn).
     pub consts: HashMap<String, Binding>,
+    /// File-level const literal values, for constant-folding identifier
+    /// references (`const big = 300; var n int8 = big` must be rejected
+    /// like the literal).
+    pub const_values: HashMap<String, &'a Expr>,
     /// Known foreign package prefixes (imports ∪ the builtin table).
     pub packages: HashSet<String>,
     /// Package-scope names (issue #201-C): top-level fns / consts / structs
@@ -675,6 +679,7 @@ impl<'a> Checker<'a> {
             fns: HashMap::new(),
             method_decls: HashMap::new(),
             consts: HashMap::new(),
+            const_values: HashMap::new(),
             packages: HashSet::new(),
             pkg_names: HashMap::new(),
             methods: HashSet::new(),
