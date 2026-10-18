@@ -107,18 +107,26 @@ def run_checker(bin_path, hy_path, report_managed=False):
     cmd = [bin_path, "check", hy_path, "--json"]
     if report_managed:
         cmd.append("--report-managed")
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    # The checker emits UTF-8 JSON, not text in the caller's locale. Decode
+    # after communicate(): on Windows, a TextIOWrapper decoding error in a
+    # reader thread can otherwise leave stdout/stderr as None.
+    proc = subprocess.run(cmd, capture_output=True, timeout=60)
+    try:
+        stdout = proc.stdout.decode("utf-8")
+        stderr = proc.stderr.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError(f"checker output is not valid UTF-8 for {hy_path}: {exc}") from exc
     # Exit 0 means accepted and exit 1 means rejected. Any other status
     # indicates a checker failure, even if it already emitted valid JSON.
     if proc.returncode not in (0, 1):
         raise RuntimeError(
             f"checker exited unexpectedly for {hy_path} "
-            f"(exit {proc.returncode}): {proc.stderr[:400]}"
+            f"(exit {proc.returncode}): {stderr[:400]}"
         )
-    out = proc.stdout.strip()
+    out = stdout.strip()
     if not out:
         raise RuntimeError(
-            f"checker produced no JSON for {hy_path} (exit {proc.returncode}): {proc.stderr[:400]}"
+            f"checker produced no JSON for {hy_path} (exit {proc.returncode}): {stderr[:400]}"
         )
     try:
         payload = json.loads(out)
