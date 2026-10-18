@@ -311,6 +311,16 @@ index/element for slices/arrays/strings, key/value for maps; `for v in ch`
 yields received values. Two-variable channel receive is the comma-ok
 clause inside `select` (`v, ok := <-sq:`).
 
+**LX13a — the iterable is TYPE-checked (HYB-E2009/E3005).** LX13's iterable
+set is a closed contract: since issue #411, the checker rejects `for x in e`
+when `e` resolves to a concrete non-iterable shape (an int, bool, struct, a
+pointer to a struct/slice/string — anything outside the set above; a pointer
+to an ARRAY stays rangeable, mirroring Go's range rule) with `HYB-E2009`; an
+unresolvable operand fails closed under `HYB-E3005` (O4.9), exactly as the
+send (#77) and receive (#409) sides treat an unknown operand. The
+integer-range form `for i in 0..n` is a separate statement kind and carries
+no iterable check.
+
 **LX14 — `break`/`continue` scope.** They bind to the innermost `for`,
 `loop`, or `select`; `break loop` exits the nearest enclosing `loop`
 statement. General labels (Go's `L:`) are `[TBD]` — the corpus needs none
